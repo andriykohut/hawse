@@ -9,6 +9,7 @@ use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
 use quinn::{Connection, RecvStream, SendStream, VarInt};
+use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
@@ -207,30 +208,9 @@ impl Session {
             tracing::warn!(service, "proxy protocol is not supported yet");
             return failed(BindFailure::BadPort);
         }
-        let claimed = {
-            let mut ports = self.shared.ports.lock().expect("port allocator lock");
-            match port {
-                Some(number) => {
-                    let port = Port { number, kind };
-                    if !self.grant.allows(port) {
-                        return failed(BindFailure::NotGranted);
-                    }
-                    ports.claim(port).map(|()| port)
-                }
-                None => ports.claim_dynamic(kind).ok_or(BindFailure::InUse),
-            }
-        };
-        let port = match claimed {
-            Ok(port) => port,
+        let (port, listener) = match self.open_listener(service, kind, port) {
+            Ok(opened) => opened,
             Err(reason) => return failed(reason),
-        };
-        let listener = match net::bind_tcp(port.number) {
-            Ok(listener) => listener,
-            Err(err) => {
-                tracing::warn!(service, %port, %err, "cannot bind");
-                self.release(port);
-                return failed(BindFailure::InUse);
-            }
         };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -251,6 +231,50 @@ impl Session {
             service_id: id,
             port: port.number,
         }
+    }
+
+    /// A dynamic request walks on past pool ports the host refuses; a fixed one is that port or
+    /// nothing. Refused ports stay claimed for the length of the walk, so an exhausted pool ends it.
+    fn open_listener(
+        &self,
+        service: &str,
+        kind: Kind,
+        fixed: Option<u16>,
+    ) -> Result<(Port, TcpListener), BindFailure> {
+        let mut refused = Vec::new();
+        let outcome = loop {
+            let claimed = {
+                let mut ports = self.shared.ports.lock().expect("port allocator lock");
+                match fixed {
+                    Some(number) => {
+                        let port = Port { number, kind };
+                        if !self.grant.allows(port) {
+                            break Err(BindFailure::NotGranted);
+                        }
+                        ports.claim(port).map(|()| port)
+                    }
+                    None => ports.claim_dynamic(kind).ok_or(BindFailure::InUse),
+                }
+            };
+            let port = match claimed {
+                Ok(port) => port,
+                Err(reason) => break Err(reason),
+            };
+            match net::bind_tcp(port.number) {
+                Ok(listener) => break Ok((port, listener)),
+                Err(err) => {
+                    tracing::warn!(service, %port, %err, "cannot bind");
+                    refused.push(port);
+                    if fixed.is_some() {
+                        break Err(BindFailure::InUse);
+                    }
+                }
+            }
+        };
+        for port in refused {
+            self.release(port);
+        }
+        outcome
     }
 
     fn unbind(&mut self, service: &str) {
