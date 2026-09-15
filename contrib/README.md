@@ -10,8 +10,14 @@ expect the binary at `/usr/local/bin/hawse` and their config at
     systemctl enable --now hawse-server
 
 Both units run under `DynamicUser=yes`, so there is no account to create and no
-uid to keep track of. systemd creates `/etc/hawse`, gives the service write
-access to it, and the service creates its key there on first start.
+uid to keep track of. systemd creates `/etc/hawse` for the config, which stays
+owned by root, and `/var/lib/hawse` for the key, which the service owns. Point
+the config at the second one:
+
+    key = "/var/lib/hawse/server.key"
+
+A relative `key` resolves next to the config file, where the service cannot
+write.
 
 ## Getting the public key
 

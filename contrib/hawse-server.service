@@ -11,8 +11,10 @@ Restart=always
 RestartSec=5s
 
 # The service has no home, so the config path cannot be discovered and is given
-# above. Its directory is where `key` resolves and where the key is created.
+# above. The key is state rather than configuration: a DynamicUser cannot write
+# to ConfigurationDirectory, so point `key` at /var/lib/hawse in the config.
 ConfigurationDirectory=hawse
+StateDirectory=hawse
 DynamicUser=yes
 UMask=0077
 
