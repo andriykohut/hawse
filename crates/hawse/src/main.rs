@@ -27,6 +27,7 @@ struct Cli {
     /// Log format; auto picks json when stderr is not a terminal.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Auto)]
     log: LogFormat,
+    /// Colored output; auto turns color off when stderr is not a terminal.
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
     /// Worker threads; defaults to the number of CPUs.
