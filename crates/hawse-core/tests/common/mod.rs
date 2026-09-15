@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use hawse_core::client::{Client, ClientError, Event};
@@ -11,7 +12,7 @@ use hawse_core::server::Server;
 use hawse_core::tls;
 use hawse_core::transport::quic::{self, Tuning};
 use hawse_proto::key::PublicKey;
-use hawse_proto::port::Port;
+use hawse_proto::port::{Port, PortSpan};
 use quinn::{Connection, Endpoint};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -63,10 +64,15 @@ pub struct RunningServer {
     pub task: JoinHandle<()>,
 }
 
+pub const DYNAMIC_PORTS: RangeInclusive<u16> = 47000..=47999;
+
 pub fn server_config(clients: &[(&str, PublicKey, &[&str])]) -> ServerConfig {
     let mut cfg = ServerConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
-        dynamic_ports: "47000-47999".parse().unwrap(),
+        dynamic_ports: PortSpan {
+            first: *DYNAMIC_PORTS.start(),
+            last: *DYNAMIC_PORTS.end(),
+        },
         ..ServerConfig::default()
     };
     for (name, key, ports) in clients {
@@ -181,4 +187,15 @@ pub async fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// A `free_port` clear of `DYNAMIC_PORTS` and of `taken`, so a fixed bind cannot collide with a
+/// dynamic one. It loops because the ephemeral range overlaps the pool on Linux.
+pub async fn free_port_outside_pool(taken: &[u16]) -> u16 {
+    loop {
+        let port = free_port().await;
+        if !DYNAMIC_PORTS.contains(&port) && !taken.contains(&port) {
+            return port;
+        }
+    }
 }

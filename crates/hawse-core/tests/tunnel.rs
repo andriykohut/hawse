@@ -3,8 +3,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    client_config, echo_server, expect_bound, free_port, next_event, server_config, start_client,
-    start_server,
+    DYNAMIC_PORTS, client_config, echo_server, expect_bound, free_port_outside_pool, next_event,
+    server_config, start_client, start_server,
 };
 use hawse_core::client::{ClientError, Event};
 use hawse_core::identity::Identity;
@@ -38,7 +38,7 @@ async fn tcp_echo_through_the_tunnel() {
         matches!(next_event(&mut client.events).await, Event::Connected { name, .. } if name == "test")
     );
     let port = expect_bound(&mut client.events, "echo").await;
-    assert!((47000..=47999).contains(&port.number));
+    assert!(DYNAMIC_PORTS.contains(&port.number));
 
     let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
         .await
@@ -56,93 +56,103 @@ async fn tcp_echo_through_the_tunnel() {
 
 #[tokio::test]
 async fn half_close_propagates_to_the_local_service() {
-    let (server_id, client_id) = ids();
-    let server = start_server(
-        &server_config(&[("test", client_id.public_key(), &[])]),
-        &server_id,
-    );
-    let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_addr = local.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (mut socket, _) = local.accept().await.unwrap();
-        let mut all = Vec::new();
-        socket.read_to_end(&mut all).await.unwrap();
-        socket
-            .write_all(all.len().to_string().as_bytes())
+    let exchange = async {
+        let (server_id, client_id) = ids();
+        let server = start_server(
+            &server_config(&[("test", client_id.public_key(), &[])]),
+            &server_id,
+        );
+        let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = local.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = local.accept().await.unwrap();
+            let mut all = Vec::new();
+            socket.read_to_end(&mut all).await.unwrap();
+            socket
+                .write_all(all.len().to_string().as_bytes())
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let mut client = start_client(
+            client_config(
+                server.addr,
+                server.key,
+                &[("len", &local_addr.to_string(), "any")],
+            ),
+            client_id,
+        );
+        let port = expect_bound(&mut client.events, "len").await;
+
+        let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
             .await
             .unwrap();
-        socket.shutdown().await.unwrap();
-    });
-    let mut client = start_client(
-        client_config(
-            server.addr,
-            server.key,
-            &[("len", &local_addr.to_string(), "any")],
-        ),
-        client_id,
-    );
-    let port = expect_bound(&mut client.events, "len").await;
-
-    let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
+        visitor.write_all(b"abc").await.unwrap();
+        visitor.shutdown().await.unwrap();
+        let mut reply = String::new();
+        visitor.read_to_string(&mut reply).await.unwrap();
+        assert_eq!(reply, "3");
+        server.cancel.cancel();
+    };
+    tokio::time::timeout(Duration::from_secs(10), exchange)
         .await
-        .unwrap();
-    visitor.write_all(b"abc").await.unwrap();
-    visitor.shutdown().await.unwrap();
-    let mut reply = String::new();
-    visitor.read_to_string(&mut reply).await.unwrap();
-    assert_eq!(reply, "3");
-    server.cancel.cancel();
+        .expect("the half-closed round trip finishes within 10 s");
 }
 
 #[tokio::test]
 async fn transfers_100_mib_intact() {
     const TOTAL: usize = 100 * 1024 * 1024;
-    let (server_id, client_id) = ids();
-    let server = start_server(
-        &server_config(&[("test", client_id.public_key(), &[])]),
-        &server_id,
-    );
-    let echo = echo_server().await;
-    let mut client = start_client(
-        client_config(
-            server.addr,
-            server.key,
-            &[("echo", &echo.to_string(), "any")],
-        ),
-        client_id,
-    );
-    let port = expect_bound(&mut client.events, "echo").await;
+    let transfer = async {
+        let (server_id, client_id) = ids();
+        let server = start_server(
+            &server_config(&[("test", client_id.public_key(), &[])]),
+            &server_id,
+        );
+        let echo = echo_server().await;
+        let mut client = start_client(
+            client_config(
+                server.addr,
+                server.key,
+                &[("echo", &echo.to_string(), "any")],
+            ),
+            client_id,
+        );
+        let port = expect_bound(&mut client.events, "echo").await;
 
-    let visitor = TcpStream::connect(("127.0.0.1", port.number))
+        let visitor = TcpStream::connect(("127.0.0.1", port.number))
+            .await
+            .unwrap();
+        let (mut rd, mut wr) = visitor.into_split();
+        let writer = tokio::spawn(async move {
+            let chunk: Vec<u8> = (0..65536u32)
+                .map(|i| u8::try_from(i % 251).expect("a remainder below 251 fits a byte"))
+                .collect();
+            let mut sent = 0;
+            while sent < TOTAL {
+                let n = chunk.len().min(TOTAL - sent);
+                wr.write_all(&chunk[..n]).await.unwrap();
+                sent += n;
+            }
+            wr.shutdown().await.unwrap();
+        });
+        let mut got = 0usize;
+        let mut buf = vec![0u8; 65536];
+        let mut expected = 0u32;
+        while got < TOTAL {
+            let n = rd.read(&mut buf).await.unwrap();
+            assert!(n > 0, "eof after {got} bytes");
+            for &b in &buf[..n] {
+                assert_eq!(u32::from(b), expected % 251, "corruption at byte {got}");
+                expected = (expected + 1) % 65536;
+            }
+            got += n;
+        }
+        writer.await.unwrap();
+        server.cancel.cancel();
+    };
+    tokio::time::timeout(Duration::from_secs(60), transfer)
         .await
-        .unwrap();
-    let (mut rd, mut wr) = visitor.into_split();
-    let writer = tokio::spawn(async move {
-        let chunk: Vec<u8> = (0..65536u32)
-            .map(|i| u8::try_from(i % 251).expect("a remainder below 251 fits a byte"))
-            .collect();
-        let mut sent = 0;
-        while sent < TOTAL {
-            let n = chunk.len().min(TOTAL - sent);
-            wr.write_all(&chunk[..n]).await.unwrap();
-            sent += n;
-        }
-        wr.shutdown().await.unwrap();
-    });
-    let mut got = 0usize;
-    let mut buf = vec![0u8; 65536];
-    let mut expected = 0u32;
-    while got < TOTAL {
-        let n = rd.read(&mut buf).await.unwrap();
-        assert!(n > 0, "eof after {got} bytes");
-        for &b in &buf[..n] {
-            assert_eq!(u32::from(b), expected % 251, "corruption at byte {got}");
-            expected = (expected + 1) % 65536;
-        }
-        got += n;
-    }
-    writer.await.unwrap();
-    server.cancel.cancel();
+        .expect("100 MiB round trip within 60 s");
 }
 
 #[tokio::test]
@@ -188,8 +198,8 @@ async fn holds_512_visitor_streams_open_at_once() {
 #[tokio::test]
 async fn fixed_ports_need_a_grant() {
     let (server_id, client_id) = ids();
-    let granted = free_port().await;
-    let denied = free_port().await;
+    let granted = free_port_outside_pool(&[]).await;
+    let denied = free_port_outside_pool(&[granted]).await;
     let grant = granted.to_string();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&grant])]),
@@ -212,7 +222,13 @@ async fn fixed_ports_need_a_grant() {
     while ok.is_none() || nope.is_none() {
         match next_event(&mut client.events).await {
             Event::Bound { service, port } if service == "ok" => ok = Some(port.number),
+            Event::BindFailed { service, reason } if service == "ok" => {
+                panic!("granted port {granted} was refused: {reason}")
+            }
             Event::BindFailed { service, reason } if service == "nope" => nope = Some(reason),
+            Event::Bound { service, port } if service == "nope" => {
+                panic!("ungranted port {denied} was bound as {port}")
+            }
             _ => {}
         }
     }
@@ -247,9 +263,17 @@ async fn wrong_server_key_fails_before_any_control_message() {
         client_config(server.addr, impostor.public_key(), &[]),
         client_id,
     );
-    let result = client.task.await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), client.task)
+        .await
+        .expect("the client gives up on the impostor within 10 s")
+        .unwrap();
     assert!(
-        matches!(result, Err(ClientError::Quic(QuicError::Connection(_)))),
+        matches!(
+            result,
+            Err(ClientError::Quic(QuicError::Connection(
+                quinn::ConnectionError::TransportError(_)
+            )))
+        ),
         "{result:?}"
     );
     assert!(client.events.try_recv().is_err());
@@ -263,7 +287,7 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     use hawse_core::tls;
     use hawse_core::transport::quic::{self, Tuning};
     use hawse_proto::frame::{codec, decode, encode};
-    use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader};
+    use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader, reset};
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     let (server_id, client_id) = ids();
@@ -325,13 +349,22 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
         visitor: "203.0.113.9:1".parse().unwrap(),
         listener: "203.0.113.1:40000".parse().unwrap(),
     };
-    let (mut s, _r) = conn.open_bi().await.unwrap();
+    let (mut s, mut r) = conn.open_bi().await.unwrap();
     write_frame(&mut s, &header(99)).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(500), local.accept())
             .await
             .is_err(),
         "client dialed local for an id it never bound"
+    );
+    let refusal = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(16)).await;
+    assert!(
+        matches!(
+            &refusal,
+            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))))
+                if *code == quinn::VarInt::from_u32(reset::UNKNOWN_SERVICE)
+        ),
+        "client did not reset the stream as an unknown service: {refusal:?}"
     );
 
     let (mut s, _r) = conn.open_bi().await.unwrap();
