@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 x509-parser = "0.18"
 etcetera = "0.11"
+rustix = { version = "1", features = ["process"] }
 
 insta = "1"
 proptest = "1"

@@ -567,6 +567,8 @@ dependencies = [
  "hawse-proto",
  "insta",
  "miette",
+ "rustix",
+ "serde",
  "tempfile",
  "thiserror",
  "tokio",

@@ -1,0 +1,12 @@
+---
+source: crates/hawse/src/config_file.rs
+expression: render(&err)
+---
+  × public key must start with `ed25519:`
+   ╭─[server.toml:4:7]
+ 3 │ [clients.homelab]
+ 4 │ key = "not-a-key"
+   ·       ─────┬─────
+   ·            ╰── here
+   ╰────
+  help: fix the highlighted value and start hawse again
