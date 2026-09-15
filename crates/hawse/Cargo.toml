@@ -1,0 +1,37 @@
+[package]
+name = "hawse"
+description = "Reverse tunnels with keys instead of secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hawse"
+path = "src/main.rs"
+
+[features]
+default = ["aws-lc-rs"]
+ring = ["hawse-core/ring"]
+aws-lc-rs = ["hawse-core/aws-lc-rs"]
+
+[dependencies]
+hawse-core.workspace = true
+hawse-proto.workspace = true
+clap.workspace = true
+etcetera.workspace = true
+miette.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

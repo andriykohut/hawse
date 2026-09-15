@@ -1,0 +1,40 @@
+[package]
+name = "hawse-core"
+description = "Identity, transports, and sessions for hawse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["aws-lc-rs"]
+ring = ["quinn/rustls-ring", "rustls/ring", "rcgen/ring"]
+aws-lc-rs = ["quinn/rustls-aws-lc-rs", "rustls/aws_lc_rs", "rcgen/aws_lc_rs"]
+
+[dependencies]
+hawse-proto.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+gethostname.workspace = true
+humantime.workspace = true
+ipnet.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

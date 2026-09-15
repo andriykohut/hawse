@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/hawse-proto", "crates/hawse-core", "crates/hawse"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/andriykohut/hawse"
+
+[workspace.dependencies]
+hawse-proto = { path = "crates/hawse-proto" }
+hawse-core = { path = "crates/hawse-core", default-features = false }
+
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+gethostname = "1"
+humantime = "2"
+ipnet = { version = "2", features = ["serde"] }
+miette = { version = "7", features = ["fancy"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "log"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "crypto"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+socket2 = { version = "0.6", features = ["all"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "signal", "fs"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+x509-parser = "0.18"
+etcetera = "0.11"
+
+insta = "1"
+proptest = "1"
+serde_json = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
