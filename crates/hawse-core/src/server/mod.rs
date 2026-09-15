@@ -66,6 +66,7 @@ impl Server {
             .map_err(|_| ServerError::Window(cfg.transport.stream_window.0))?;
         let tuning = Tuning {
             idle_timeout: cfg.transport.idle_timeout,
+            congestion: cfg.transport.congestion,
             stream_window,
             connection_window: cfg.transport.connection_window.0,
             max_streams: cfg.limits.streams_per_client,

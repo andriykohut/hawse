@@ -148,6 +148,7 @@ pub enum Prefer {
 #[serde(deny_unknown_fields, default)]
 pub struct ClientTransport {
     pub prefer: Prefer,
+    pub congestion: Congestion,
     #[serde(with = "units::duration")]
     pub idle_timeout: Duration,
     pub stream_window: ByteSize,
@@ -159,6 +160,7 @@ impl Default for ClientTransport {
     fn default() -> Self {
         Self {
             prefer: Prefer::Auto,
+            congestion: Congestion::Cubic,
             idle_timeout: Duration::from_secs(30),
             stream_window: ByteSize(2 << 20),
             connection_window: ByteSize(16 << 20),

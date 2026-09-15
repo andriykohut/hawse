@@ -207,9 +207,17 @@ phase 1. Each says what the code does today and what the fix would be.
   stream high and step it down as its byte count grows, so a request-shaped
   stream jumps the queue and a stream pushing a hundred megabytes settles to the
   back. The pump already counts bytes both ways, and no wire change is needed.
-- **Wire the `congestion` setting.** It is parsed and ignored, so BBR cannot be
-  measured. BBR paces instead of filling the buffer, which should shrink the
-  standing queue a small request waits behind.
 - **Revisit the streaming criterion against evidence.** The 3x rule was written
   before anything existed and no configuration meets it, a direct connection
   included, so it does not discriminate.
+
+### From measuring over a real link
+
+- **One congestion window does not fill a long path the way many do.** Over a
+  40 ms link with forty parallel transfers, a connection-per-visitor tunnel
+  reached 214 Mbit/s with a 44 ms concurrent request, where hawse managed
+  65-114 Mbit/s at 45 ms on `cubic`, or 187 Mbit/s at 109 ms on `bbr`. Neither
+  setting gets both, because many small queues in parallel beat one large one.
+  This is the evidence for revisiting connection-per-visitor, which was
+  dismissed on loopback numbers that could not show the effect: a round trip of
+  zero hides everything congestion control does.

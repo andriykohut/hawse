@@ -255,6 +255,7 @@ impl Client {
         let tls = tls::client_config(cert, key, self.cfg.server_key, tls::provider())?;
         let tuning = Tuning {
             idle_timeout: self.cfg.transport.idle_timeout,
+            congestion: self.cfg.transport.congestion,
             stream_window: u32::try_from(self.cfg.transport.stream_window.0)
                 .map_err(|_| ClientError::Window)?,
             connection_window: self.cfg.transport.connection_window.0,

@@ -9,11 +9,13 @@ use quinn::{
 };
 use rustls::pki_types::CertificateDer;
 
+use crate::config::Congestion;
 use crate::tls;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tuning {
     pub idle_timeout: Duration,
+    pub congestion: Congestion,
     pub stream_window: u32,
     pub connection_window: u64,
     pub max_streams: u32,
@@ -22,6 +24,7 @@ pub struct Tuning {
 impl Tuning {
     pub const SERVER: Self = Self {
         idle_timeout: Duration::from_secs(30),
+        congestion: Congestion::Cubic,
         stream_window: 8 * 1024 * 1024,
         connection_window: 64 * 1024 * 1024,
         max_streams: 4096,
@@ -29,6 +32,7 @@ impl Tuning {
 
     pub const CLIENT: Self = Self {
         idle_timeout: Duration::from_secs(30),
+        congestion: Congestion::Cubic,
         stream_window: 2 * 1024 * 1024,
         connection_window: 16 * 1024 * 1024,
         max_streams: 4096,
@@ -58,6 +62,14 @@ fn transport_config(t: Tuning) -> Result<TransportConfig, QuicError> {
     tc.max_concurrent_uni_streams(VarInt::from_u32(0));
     tc.stream_receive_window(VarInt::from_u32(t.stream_window));
     tc.receive_window(VarInt::from_u64(t.connection_window)?);
+    match t.congestion {
+        Congestion::Cubic => {
+            tc.congestion_controller_factory(Arc::new(quinn::congestion::CubicConfig::default()))
+        }
+        Congestion::Bbr => {
+            tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+        }
+    };
     tc.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
     tc.datagram_send_buffer_size(1024 * 1024);
     Ok(tc)

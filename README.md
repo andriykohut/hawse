@@ -127,6 +127,19 @@ Server settings and their defaults:
 The listen port is UDP, because QUIC runs over UDP. Public ports bound for
 clients are TCP.
 
+`congestion` selects the controller, on either end, for the data that end
+sends:
+
+    [transport]
+    congestion = "bbr"    # or "cubic", the default
+
+The choice matters most on a path with a long round trip. Measured over a
+40 ms link carrying forty parallel transfers, `cubic` held a small queue and
+answered a concurrent request in about 50 ms but moved only a third of the
+available bandwidth; `bbr` filled the link but pushed that request past 200 ms.
+Prefer `cubic` when the tunnel carries interactive traffic, `bbr` when it
+carries bulk transfers and throughput is what you are short of.
+
 `bind` is the address those public ports listen on. The default answers on
 every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
 the only thing that should reach them:
