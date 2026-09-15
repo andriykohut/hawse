@@ -31,8 +31,10 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
     /// Number of worker threads. Defaults to the number of CPUs.
-    #[arg(long, global = true)]
-    threads: Option<usize>,
+    // Tokio panics on a zero worker count, and `panic = "abort"` would make
+    // that an abort with no diagnostic.
+    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
+    threads: Option<u16>,
 }
 
 #[derive(Subcommand)]
@@ -77,7 +79,7 @@ fn main() -> miette::Result<()> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if let Some(threads) = cli.threads {
-        runtime.worker_threads(threads);
+        runtime.worker_threads(usize::from(threads));
     }
     let runtime = runtime.build().into_diagnostic()?;
     runtime.block_on(async move {

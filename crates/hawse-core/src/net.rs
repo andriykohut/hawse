@@ -25,11 +25,22 @@ pub fn bind_tcp(bind: IpAddr, port: u16) -> io::Result<TcpListener> {
 
 /// One dual-stack IPv6 socket, falling back to IPv4 on a host without IPv6.
 fn every_interface(port: u16) -> io::Result<Socket> {
-    if let Ok(socket) = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
-        socket.set_only_v6(false)?;
-        prepare(&socket, SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))?;
-        return Ok(socket);
+    match dual_stack(port) {
+        Ok(socket) => Ok(socket),
+        // A host can hand out an IPv6 socket and still refuse `::`, so the
+        // fallback keys off the whole attempt rather than the constructor.
+        Err(v6) => ipv4_only(port).map_err(|_| v6),
     }
+}
+
+fn dual_stack(port: u16) -> io::Result<Socket> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    prepare(&socket, SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))?;
+    Ok(socket)
+}
+
+fn ipv4_only(port: u16) -> io::Result<Socket> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     prepare(&socket, SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?;
     Ok(socket)

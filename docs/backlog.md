@@ -195,3 +195,11 @@ phase 1. Each says what the code does today and what the fix would be.
   takes loopback traffic for itself instead of failing with `EADDRINUSE`. It
   surfaced as a flake between two servers in one test binary. Worth a warning
   when a bound port is already answering, or a documented note.
+
+### From the cloud review
+
+- **Encoding failures on the control stream look like a closed stream.**
+  `send_msg` maps every `frame::encode` error to `ClientError::ControlClosed`,
+  so a message too large for the 64 KiB frame cap reports "control stream
+  closed" and the client retries the same config every 5 s forever. Give the
+  encode failure its own variant and treat it as fatal.
