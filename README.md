@@ -14,13 +14,45 @@ Both ends authenticate with Ed25519 keys inside TLS 1.3. The client pins the
 server's public key. The server holds a list of client keys and the ports each
 client may bind.
 
+## What it is for
+
+Working today, with TCP forwarding and key-based authorization:
+
+- **Reaching machines you cannot port-forward into.** A home server behind
+  CGNAT, a build machine on a corporate network, a Raspberry Pi at a relative's
+  house. Each machine holds its own key, and the server grants it specific
+  ports.
+- **SSH without a shell account on the relay.** The usual alternative is
+  `autossh -R`, which needs an account on the public box and reconnects only as
+  well as the wrapper around it. Here the public server never gets shell access,
+  and reconnection is part of the client.
+- **Self-hosted web services.** Expose the service on a public port and put a
+  reverse proxy such as Caddy or nginx in front of it on the server for TLS and
+  a hostname. hawse forwards bytes and does not read HTTP.
+- **Webhooks and demos during development.** Give a payment provider or a
+  colleague a stable address that lands on a laptop.
+- **A doorway into one network.** Since `local` can name any host the client
+  reaches, a single client can publish services running on several machines
+  beside it.
+
+Waiting on features that are not implemented yet:
+
+- **WireGuard, DNS, and most game servers** need UDP forwarding.
+- **Databases and admin interfaces** should wait for source-address
+  allowlists, or be restricted by a firewall on the server. A public port is
+  reachable by anyone today.
+- **Services that log or rate-limit by client address** need PROXY protocol v2
+  to see the real visitor address rather than the client's own connection.
+- **Many HTTPS services on one port 443** need SNI routing.
+- **Networks that block outbound UDP** need the TCP fallback transport.
+
 ## Status
 
 TCP forwarding works, with fixed or dynamically assigned public ports.
 
-Not implemented yet: UDP forwarding, the TCP fallback transport, source-address
-allowlists, PROXY protocol v2, configuration hot reload, and the `expose`,
-`authorize`, `revoke` and `check` subcommands. See `docs/backlog.md`.
+Besides the features named above, configuration hot reload and the `expose`,
+`authorize`, `revoke` and `check` subcommands are not implemented either.
+`docs/backlog.md` lists everything that is planned or deliberately deferred.
 
 ## Building
 
