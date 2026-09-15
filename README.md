@@ -7,8 +7,7 @@ both ends.
 
 Status: phase 1. TCP forwarding, fixed and dynamic ports, key-based
 authorization. UDP, the TCP fallback transport, hot reload, `hawse expose`, and
-`hawse authorize` are on the way; see `docs/backlog.md` and the spec under
-`docs/superpowers/specs/`.
+`hawse authorize` are on the way; see `docs/backlog.md`.
 
 ## Quickstart
 
