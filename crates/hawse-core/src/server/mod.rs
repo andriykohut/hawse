@@ -72,7 +72,9 @@ impl Server {
             .expect("a bound endpoint has an address")
     }
 
-    /// Runs until `cancel` fires, then sends `Shutdown` to every client and waits up to 5 s for streams to drain.
+    /// Runs until `cancel` fires or the endpoint stops accepting. Cancelling reaches every session
+    /// through a child token, so clients receive `Shutdown`; the endpoint then closes, waiting up
+    /// to 5 s for sessions to drain first.
     pub async fn serve(self, cancel: CancellationToken) {
         let sessions = TaskTracker::new();
         loop {

@@ -7,6 +7,7 @@ use hawse_proto::frame::{codec, decode, encode};
 use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
+use ipnet::IpNet;
 use quinn::{Connection, RecvStream, SendStream, VarInt};
 use tokio::time::MissedTickBehavior;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -22,6 +23,7 @@ use crate::transport::quic;
 const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const DENIED_LINGER: Duration = Duration::from_secs(2);
+const HELLO_DEADLINE: Duration = Duration::from_secs(10);
 
 type Tx = FramedWrite<SendStream, LengthDelimitedCodec>;
 type Rx = FramedRead<RecvStream, LengthDelimitedCodec>;
@@ -32,13 +34,29 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
         conn.close(VarInt::from_u32(2), b"no key");
         return;
     };
-    let Ok((control_send, control_recv)) = conn.accept_bi().await else {
+    // Nothing here is authorized yet, so a peer that never speaks must not hold a task open or stall shutdown.
+    let greeting = async {
+        let (control_send, control_recv) = conn.accept_bi().await?;
+        let tx = FramedWrite::new(control_send, codec());
+        let mut rx = FramedRead::new(control_recv, codec());
+        let hello = next(&mut rx).await;
+        Ok::<_, quinn::ConnectionError>((tx, rx, hello))
+    };
+    let greeted = tokio::select! {
+        () = cancel.cancelled() => {
+            conn.close(VarInt::from_u32(0), b"shutdown");
+            return;
+        }
+        greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
+    };
+    let Ok(opened) = greeted else {
+        conn.close(VarInt::from_u32(4), b"no hello");
         return;
     };
-    let mut tx = FramedWrite::new(control_send, codec());
-    let mut rx = FramedRead::new(control_recv, codec());
-
-    let Some(ClientMessage::Hello { agent, .. }) = next(&mut rx).await else {
+    let Ok((mut tx, rx, hello)) = opened else {
+        return;
+    };
+    let Some(ClientMessage::Hello { agent, .. }) = hello else {
         conn.close(VarInt::from_u32(3), b"expected hello");
         return;
     };
@@ -55,7 +73,10 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
         .await;
         // `close` discards unsent stream data, so let the client read the denial first.
         let _ = tx.into_inner().finish();
-        let _ = tokio::time::timeout(DENIED_LINGER, conn.closed()).await;
+        tokio::select! {
+            () = cancel.cancelled() => {}
+            _ = tokio::time::timeout(DENIED_LINGER, conn.closed()) => {}
+        }
         conn.close(VarInt::from_u32(1), b"denied");
         return;
     };
@@ -124,7 +145,9 @@ impl Session {
                     let Some(msg) = msg else { break "client left" };
                     last_heard = Instant::now();
                     let reply = match msg {
-                        ClientMessage::Bind { service, kind, port, .. } => Some(self.bind(&service, kind, port)),
+                        ClientMessage::Bind { service, kind, port, allow, proxy_protocol } => {
+                            Some(self.bind(&service, kind, port, &allow, proxy_protocol))
+                        }
                         ClientMessage::Unbind { service } => {
                             self.unbind(&service);
                             None
@@ -153,7 +176,14 @@ impl Session {
         self.conn.close(VarInt::from_u32(0), reason.as_bytes());
     }
 
-    fn bind(&mut self, service: &str, kind: Kind, port: Option<u16>) -> ServerMessage {
+    fn bind(
+        &mut self,
+        service: &str,
+        kind: Kind,
+        port: Option<u16>,
+        allow: &[IpNet],
+        proxy_protocol: bool,
+    ) -> ServerMessage {
         let failed = |reason: BindFailure| ServerMessage::BindFailed {
             service: service.to_owned(),
             reason,
@@ -166,6 +196,15 @@ impl Session {
         }
         if kind == Kind::Udp {
             tracing::warn!(service, "udp services are not supported yet");
+            return failed(BindFailure::BadPort);
+        }
+        // Ignoring these would open a port with weaker guarantees than the client asked for.
+        if !allow.is_empty() {
+            tracing::warn!(service, "allow lists are not supported yet");
+            return failed(BindFailure::BadPort);
+        }
+        if proxy_protocol {
+            tracing::warn!(service, "proxy protocol is not supported yet");
             return failed(BindFailure::BadPort);
         }
         let claimed = {
