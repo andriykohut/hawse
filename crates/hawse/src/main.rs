@@ -13,31 +13,31 @@ use miette::IntoDiagnostic as _;
 #[command(
     name = "hawse",
     version,
-    about = "Reverse tunnels with keys instead of secrets"
+    about = "Reverse TCP tunnel over QUIC with Ed25519 authentication"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// More detail; repeat for trace output.
+    /// Log at debug level; repeat for trace level.
     #[arg(short, long, global = true, action = ArgAction::Count)]
     verbose: u8,
-    /// Warnings and errors only.
+    /// Log warnings and errors only.
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
-    /// Log format; auto picks json when stderr is not a terminal.
+    /// Log format. `auto` selects json when stderr is not a terminal.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Auto)]
     log: LogFormat,
-    /// Colored output; auto turns color off when stderr is not a terminal.
+    /// Colored output. `auto` disables color when stderr is not a terminal.
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
-    /// Worker threads; defaults to the number of CPUs.
+    /// Number of worker threads. Defaults to the number of CPUs.
     #[arg(long, global = true)]
     threads: Option<usize>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Accept clients and expose their services on public ports.
+    /// Run the server: accept clients and bind their services to public ports.
     Server {
         #[arg(long, env = "HAWSE_CONFIG")]
         config: Option<PathBuf>,
@@ -45,12 +45,12 @@ enum Command {
         #[arg(long)]
         listen: Option<SocketAddr>,
     },
-    /// Connect to a server and expose the services in client.toml.
+    /// Run the client: connect to a server and expose the configured services.
     Client {
         #[arg(long, env = "HAWSE_CONFIG")]
         config: Option<PathBuf>,
     },
-    /// Create a key if none exists and print its public half.
+    /// Generate a key if one does not exist, and print its public key.
     Keygen {
         #[arg(long)]
         out: Option<PathBuf>,

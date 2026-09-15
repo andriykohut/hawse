@@ -1,61 +1,100 @@
 # hawse
 
-Reverse tunnels with keys instead of secrets. A client behind NAT connects out
-to a server with a public address; the server exposes the client's local TCP
-services on public ports. One binary, QUIC with TLS 1.3, Ed25519 identity on
-both ends.
+hawse forwards TCP services from a machine behind NAT to public ports on a
+server with a routable address. The client opens one outbound QUIC connection
+to the server. The server listens on the public ports, and relays each incoming
+connection over that connection to a local address on the client.
 
-Status: phase 1. TCP forwarding, fixed and dynamic ports, key-based
-authorization. UDP, the TCP fallback transport, hot reload, `hawse expose`, and
-`hawse authorize` are on the way; see `docs/backlog.md`.
+Both ends authenticate with Ed25519 keys inside TLS 1.3. The client pins the
+server's public key. The server holds a list of client keys and the ports each
+client may bind.
 
-## Quickstart
+## Status
 
-On the server:
+TCP forwarding works, with fixed or dynamically assigned public ports.
+
+Not implemented yet: UDP forwarding, the TCP fallback transport, source-address
+allowlists, PROXY protocol v2, configuration hot reload, and the `expose`,
+`authorize`, `revoke` and `check` subcommands. See `docs/backlog.md`.
+
+## Building
+
+    cargo build --release
+
+The binary is `target/release/hawse`. Cross builds use the `ring` crypto
+provider in place of the default `aws-lc-rs`:
+
+    cargo build --release --no-default-features --features ring
+
+## Usage
+
+Start the server:
 
     hawse server
 
-It creates `server.key`, prints the server's public key, and tells you no
-clients are authorized yet.
+On first run it generates `server.key` and prints the corresponding public key.
+Connections from unknown keys are refused, so until a client is authorized the
+server accepts nothing.
 
-On the client:
+Generate a key on the client:
 
     hawse keygen
 
-Copy the printed key into the server's `server.toml`:
+Add the printed key to `server.toml` on the server, together with the ports
+that client may bind:
 
     [clients.laptop]
-    key = "ed25519:…"
+    key = "ed25519:AAAA..."
     ports = ["2222"]
 
-Restart the server for now (hot reload comes in phase 3). Then write
-`client.toml` next to the client key:
+Restart the server. Configuration is read at startup only.
+
+Write `client.toml` on the client:
 
     server = "tunnel.example.com:4433"
-    server_key = "ed25519:…"          # printed by hawse server
+    server_key = "ed25519:BBBB..."
 
     [expose.ssh]
     local = "127.0.0.1:22"
     port = 2222
 
     [expose.dev]
-    local = "localhost:3000"          # no port: the server picks one
+    local = "127.0.0.1:3000"
 
-and run:
+Then run:
 
     hawse client
 
-Config lives in `~/.config/hawse/` for a user or `/etc/hawse/` for root;
-`--config` overrides. Logs go to stderr, JSON when stderr is not a terminal,
-`-v` for per-connection detail.
+The `ssh` service binds port 2222 on the server and forwards to port 22 on the
+client. The `dev` service sets no `port`, so the server assigns one from its
+`dynamic_ports` range and the client logs which port it got.
 
-## Building
+## Configuration
 
-    cargo build --release
+Configuration is read from `$XDG_CONFIG_HOME/hawse/` (`~/.config/hawse/` by
+default), or from `/etc/hawse/` when running as root. `--config PATH` and the
+`HAWSE_CONFIG` environment variable override the location. Relative key paths
+resolve against the directory containing the config file.
 
-Router and cross builds use the `ring` crypto provider:
+Server settings and their defaults:
 
-    cargo build --release --no-default-features --features ring
+    listen = "[::]:4433"
+    key = "server.key"
+    dynamic_ports = "40000-41000"
+
+The listen port is UDP, because QUIC runs over UDP. Public ports bound for
+clients are TCP.
+
+Client settings: `server` and `server_key` are required, `key` defaults to
+`client.key`, and each `[expose.NAME]` table needs a `local` address.
+
+## Logging
+
+Logs go to stderr, formatted for a terminal when stderr is one and as JSON
+otherwise; `--log` overrides that choice. `-v` adds per-connection events, `-vv`
+adds trace output, and `-q` restricts output to warnings and errors. The
+`HAWSE_LOG` environment variable takes a `tracing` filter directive and
+overrides all of them.
 
 ## License
 

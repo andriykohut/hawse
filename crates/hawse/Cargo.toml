@@ -1,6 +1,6 @@
 [package]
 name = "hawse"
-description = "Reverse tunnels with keys instead of secrets"
+description = "Reverse TCP tunnel over QUIC with Ed25519 authentication"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
