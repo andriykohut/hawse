@@ -1,4 +1,4 @@
-/target
+target/
 *.key
 *.pem
 known_servers

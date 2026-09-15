@@ -193,3 +193,14 @@ phase 1. Each says what the code does today and what the fix would be.
   takes loopback traffic for itself instead of failing with `EADDRINUSE`. It
   surfaced as a flake between two servers in one test binary. Worth a warning
   when a bound port is already answering, or a documented note.
+
+### From the first benchmark
+
+- **A bulk transfer delays a concurrent small request.** At a capped 12 MiB/s
+  the probe's p99 is 1.85 ms against 0.34 ms with no tunnel, and the spec's own
+  criterion of 3x the idle p99 is met by neither hawse at 5.6x nor a direct
+  connection at 2.6x. Shrinking the client's `stream_window` does not move it,
+  so the queue is in congestion control and packet scheduling, not stream flow
+  control. Two things to try: wire the `congestion` setting so BBR can be
+  measured, and revisit the criterion against evidence rather than the guess it
+  was written from.

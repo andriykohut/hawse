@@ -1,0 +1,14 @@
+# Standalone so the benchmark never builds as part of the workspace or its CI.
+[workspace]
+
+[package]
+name = "hawse-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
+
+[profile.release]
+opt-level = 3
