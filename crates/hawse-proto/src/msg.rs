@@ -98,6 +98,13 @@ pub struct DatagramHeader {
     pub session: u32,
 }
 
+/// Error codes for `SendStream::reset`, so the peer can tell why a stream was dropped.
+pub mod reset {
+    pub const UNKNOWN_SERVICE: u32 = 0x10;
+    pub const LOCAL_REFUSED: u32 = 0x11;
+    pub const ABORTED: u32 = 0x12;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

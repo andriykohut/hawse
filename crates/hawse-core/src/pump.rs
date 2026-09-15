@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use hawse_proto::msg::reset::ABORTED;
 use quinn::{RecvStream, SendStream, VarInt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -21,8 +22,6 @@ pub enum PumpError {
 // quinn's own `Drop for SendStream` finishes (not resets) a stream that's dropped mid-transfer,
 // so try_join! cancelling this half on the other side's error would otherwise hand the peer a
 // clean end-of-stream on a truncated payload.
-const RESET_ABORTED: u32 = 0x12;
-
 struct ResetOnDrop(Option<SendStream>);
 
 impl ResetOnDrop {
@@ -38,7 +37,7 @@ impl ResetOnDrop {
 impl Drop for ResetOnDrop {
     fn drop(&mut self) {
         if let Some(mut send) = self.0.take() {
-            let _: Result<(), quinn::ClosedStream> = send.reset(VarInt::from_u32(RESET_ABORTED));
+            let _: Result<(), quinn::ClosedStream> = send.reset(VarInt::from_u32(ABORTED));
         }
     }
 }
