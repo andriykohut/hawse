@@ -178,6 +178,36 @@ pub enum ConfigError {
     Name(NameError),
     #[error("listen port cannot be 0")]
     ListenPort,
+    #[error("transport buffer must be between 1 KiB and 1 GiB, not {0} bytes")]
+    Buffer(u64),
+    #[error("transport stream_window must be at least 1 byte and under 4 GiB, not {0} bytes")]
+    StreamWindow(u64),
+    #[error("transport connection_window cannot be 0")]
+    ConnectionWindow,
+    #[error("transport stream_window of {0} bytes is larger than connection_window of {1} bytes")]
+    Windows(u64, u64),
+}
+
+/// A zero buffer reads nothing at all: `BytesMut` never gains capacity and the pump takes the
+/// empty read for end of stream.
+fn validate_transport(
+    buffer: ByteSize,
+    stream_window: ByteSize,
+    connection_window: ByteSize,
+) -> Result<(), ConfigError> {
+    if !(1024..=1 << 30).contains(&buffer.0) {
+        return Err(ConfigError::Buffer(buffer.0));
+    }
+    if stream_window.0 == 0 || u32::try_from(stream_window.0).is_err() {
+        return Err(ConfigError::StreamWindow(stream_window.0));
+    }
+    if connection_window.0 == 0 {
+        return Err(ConfigError::ConnectionWindow);
+    }
+    if stream_window.0 > connection_window.0 {
+        return Err(ConfigError::Windows(stream_window.0, connection_window.0));
+    }
+    Ok(())
 }
 
 impl ServerConfig {
@@ -185,6 +215,11 @@ impl ServerConfig {
         if self.listen.port() == 0 {
             return Err(ConfigError::ListenPort);
         }
+        validate_transport(
+            self.transport.buffer,
+            self.transport.stream_window,
+            self.transport.connection_window,
+        )?;
         let mut seen: BTreeMap<PublicKey, &str> = BTreeMap::new();
         for (client, policy) in &self.clients {
             name::validate(client).map_err(|e| ConfigError::ClientName(client.clone(), e))?;
@@ -205,6 +240,11 @@ impl ClientConfig {
         if let Some(name) = &self.name {
             name::validate(name).map_err(ConfigError::Name)?;
         }
+        validate_transport(
+            self.transport.buffer,
+            self.transport.stream_window,
+            self.transport.connection_window,
+        )?;
         for (service, expose) in &self.expose {
             name::validate(service).map_err(|e| ConfigError::ServiceName(service.clone(), e))?;
             match split_host_port(&expose.local) {
@@ -407,6 +447,30 @@ prefer = "tcp"
         let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         cfg.name = Some("Home Lab".into());
         assert!(matches!(cfg.validate(), Err(ConfigError::Name(_))));
+    }
+
+    #[test]
+    fn a_zero_buffer_is_rejected() {
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.transport.buffer = ByteSize(0);
+        assert_eq!(cfg.validate(), Err(ConfigError::Buffer(0)));
+
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.transport.buffer = ByteSize(0);
+        assert_eq!(cfg.validate(), Err(ConfigError::Buffer(0)));
+    }
+
+    #[test]
+    fn a_stream_window_larger_than_the_connection_window_is_rejected() {
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.transport.stream_window = ByteSize(2 << 20);
+        cfg.transport.connection_window = ByteSize(1 << 20);
+        assert_eq!(cfg.validate(), Err(ConfigError::Windows(2 << 20, 1 << 20)));
+
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.transport.stream_window = ByteSize(2 << 20);
+        cfg.transport.connection_window = ByteSize(1 << 20);
+        assert_eq!(cfg.validate(), Err(ConfigError::Windows(2 << 20, 1 << 20)));
     }
 
     #[test]
