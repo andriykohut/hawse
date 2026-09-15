@@ -201,6 +201,15 @@ phase 1. Each says what the code does today and what the fix would be.
   criterion of 3x the idle p99 is met by neither hawse at 5.6x nor a direct
   connection at 2.6x. Shrinking the client's `stream_window` does not move it,
   so the queue is in congestion control and packet scheduling, not stream flow
-  control. Two things to try: wire the `congestion` setting so BBR can be
-  measured, and revisit the criterion against evidence rather than the guess it
-  was written from.
+  control.
+- **Favour streams that have transferred least.** quinn's `SendStream::set_priority`
+  sends buffered data from higher-priority streams first. Start every visitor
+  stream high and step it down as its byte count grows, so a request-shaped
+  stream jumps the queue and a stream pushing a hundred megabytes settles to the
+  back. The pump already counts bytes both ways, and no wire change is needed.
+- **Wire the `congestion` setting.** It is parsed and ignored, so BBR cannot be
+  measured. BBR paces instead of filling the buffer, which should shrink the
+  standing queue a small request waits behind.
+- **Revisit the streaming criterion against evidence.** The 3x rule was written
+  before anything existed and no configuration meets it, a direct connection
+  included, so it does not discriminate.
