@@ -1,7 +1,12 @@
 mod common;
 
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
 use hawse_core::pump::pump;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 fn pattern(len: usize, seed: u64) -> Vec<u8> {
     let mut x = seed | 1;
@@ -98,4 +103,63 @@ async fn frames_round_trip_on_raw_streams() {
     let (_send, mut recv) = pair.server.accept_bi().await.unwrap();
     assert_eq!(read_frame::<StreamHeader>(&mut recv).await.unwrap(), header);
     assert_eq!(recv.read_to_end(64).await.unwrap(), b"payload");
+}
+
+/// Fails every read deterministically, so `pump`'s socket-to-stream half always aborts there.
+struct BoomOnRead;
+
+impl AsyncRead for BoomOnRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::Error::other("boom")))
+    }
+}
+
+impl AsyncWrite for BoomOnRead {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn abort_resets_the_stream_for_the_peer() {
+    let pair = common::quic_pair().await;
+    let (mut send, recv) = pair.client.open_bi().await.unwrap();
+    // One byte so the server's accept_bi sees the stream before the pump aborts it.
+    send.write_all(b"x").await.unwrap();
+
+    let accepted = tokio::spawn(async move {
+        let (_peer_send, mut peer_recv) = pair.server.accept_bi().await.unwrap();
+        loop {
+            match peer_recv.read_chunk(64, true).await {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("stream finished cleanly instead of being reset"),
+                Err(err) => break err,
+            }
+        }
+    });
+
+    let result = pump(BoomOnRead, send, recv, 16 * 1024).await;
+    assert!(result.is_err());
+
+    let peer_err = tokio::time::timeout(Duration::from_secs(5), accepted)
+        .await
+        .expect("peer never observed the reset")
+        .unwrap();
+    assert!(matches!(peer_err, quinn::ReadError::Reset(_)));
 }

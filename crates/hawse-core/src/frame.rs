@@ -26,6 +26,7 @@ pub async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T,
     Ok(frame::decode(&body)?)
 }
 
+/// Matches `hawse_proto::frame::codec()`'s wire format bit-for-bit, so the two are interchangeable across a stream.
 pub async fn write_frame<T: Serialize>(
     send: &mut SendStream,
     value: &T,
