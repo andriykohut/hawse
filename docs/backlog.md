@@ -23,3 +23,9 @@ parked for later. Each entry says what it is and why it waits.
   intersects with client-declared allowlists. Useful once clients are not the
   server admin.
 - **Passphrase-protected private keys.** File permissions only in v1.
+- **Connection-per-visitor on the TCP fallback.** The rejected alternative to
+  yamux: a fresh TLS connection per visitor plus a pre-opened pool, the shape
+  other reverse tunnels take. Kept on file because yamux puts every visitor in one congestion
+  window, so a video stream at link rate delays interactive requests behind it.
+  Revisit only if the streaming benchmark shows the fallback transport is
+  unusable for streaming; QUIC, the primary path, does not have this problem.
