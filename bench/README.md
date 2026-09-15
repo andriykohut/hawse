@@ -29,3 +29,13 @@ no tunnel in it at all. A cap near the uplink a deployment really has is the
 only setting where the latency numbers mean anything.
 
 It is a separate crate so it never builds as part of the workspace or its CI.
+
+## Measure the path, not one leg of it
+
+Running the load generator beside the tunnel server measures the tunnel and
+nothing else, and that number can point the wrong way. Measured from the server
+itself, one congestion controller looked two to three times slower than an
+alternative; measured from where a viewer actually sits, with the reply
+travelling back out over the same household link, the two were level and the
+supposedly slower one moved more data. Run it from the machine that will
+consume the traffic.
