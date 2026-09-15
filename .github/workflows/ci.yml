@@ -25,3 +25,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            toolchain: stable
+          - target: aarch64-unknown-linux-musl
+            toolchain: stable
+          - target: armv7-unknown-linux-musleabihf
+            toolchain: stable
+          # Tier 3: no prebuilt std, so Cross.toml builds it from rust-src.
+          - target: mipsel-unknown-linux-musl
+            toolchain: nightly
+            components: rust-src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: ${{ matrix.components }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo install cross --git https://github.com/cross-rs/cross --locked
+      - run: cross +${{ matrix.toolchain }} build --release --target ${{ matrix.target }} -p hawse --no-default-features --features ring
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release -p hawse
