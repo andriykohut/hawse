@@ -120,8 +120,6 @@ phase 1. Each says what the code does today and what the fix would be.
   so a stranger can fill the log.
 - The 45 s liveness deadline is only checked on the 15 s tick, so detection
   lands between 45 and 60 s.
-- `next_id` wraps after 65536 binds in one session and can then collide with a
-  live service id.
 - Two early exits close the connection without an explicit code, so the client
   cannot tell them apart.
 - `limits.streams_per_client` bounds the streams the client may open, not the
@@ -195,11 +193,3 @@ phase 1. Each says what the code does today and what the fix would be.
   takes loopback traffic for itself instead of failing with `EADDRINUSE`. It
   surfaced as a flake between two servers in one test binary. Worth a warning
   when a bound port is already answering, or a documented note.
-
-### From the cloud review
-
-- **Encoding failures on the control stream look like a closed stream.**
-  `send_msg` maps every `frame::encode` error to `ClientError::ControlClosed`,
-  so a message too large for the 64 KiB frame cap reports "control stream
-  closed" and the client retries the same config every 5 s forever. Give the
-  encode failure its own variant and treat it as fatal.

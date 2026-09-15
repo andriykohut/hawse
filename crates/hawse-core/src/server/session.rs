@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -119,7 +119,7 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
             key,
             live,
             services: HashMap::new(),
-            next_id: 1,
+            ids: ServiceIds::new(),
             tasks: TaskTracker::new(),
         };
         session.serve(tx, rx, cancel).await;
@@ -148,13 +148,38 @@ struct Session {
     key: PublicKey,
     live: Arc<Live>,
     services: HashMap<String, BoundService>,
-    next_id: u16,
+    ids: ServiceIds,
     tasks: TaskTracker,
 }
 
 struct BoundService {
+    id: u16,
     port: Port,
     cancel: CancellationToken,
+}
+
+/// Hands out ids in order, skipping any a live service still holds: past a wrap the
+/// counter would otherwise reissue an id the client is still routing visitors on.
+#[derive(Debug)]
+struct ServiceIds {
+    next: u16,
+}
+
+impl ServiceIds {
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    fn claim(&mut self, live: &HashSet<u16>) -> Option<u16> {
+        for _ in 0..u16::MAX {
+            let id = self.next;
+            self.next = if id == u16::MAX { 1 } else { id + 1 };
+            if !live.contains(&id) {
+                return Some(id);
+            }
+        }
+        None
+    }
 }
 
 impl Session {
@@ -259,12 +284,15 @@ impl Session {
             tracing::warn!(service, "proxy protocol is not supported yet");
             return failed(BindFailure::BadPort);
         }
+        let live = self.services.values().map(|bound| bound.id).collect();
+        let Some(id) = self.ids.claim(&live) else {
+            tracing::warn!(service, "every service id is taken");
+            return failed(BindFailure::InUse);
+        };
         let (port, listener) = match self.open_listener(service, kind, port) {
             Ok(opened) => opened,
             Err(reason) => return failed(reason),
         };
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
         let cancel = CancellationToken::new();
         self.tasks.spawn(listener::serve(
             self.conn.clone(),
@@ -276,7 +304,7 @@ impl Session {
             self.tasks.clone(),
         ));
         self.services
-            .insert(service.to_owned(), BoundService { port, cancel });
+            .insert(service.to_owned(), BoundService { id, port, cancel });
         tracing::info!(service, %port, bind = %self.grant.bind, "bound");
         ServerMessage::Bound {
             service: service.to_owned(),
@@ -354,4 +382,32 @@ async fn send(tx: &mut Tx, msg: &ServerMessage) -> Result<(), ()> {
 async fn next(rx: &mut Rx) -> Option<ClientMessage> {
     let frame = rx.next().await?.ok()?;
     decode(&frame).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_skip_the_ones_a_live_service_holds() {
+        let mut ids = ServiceIds::new();
+        let live = HashSet::from([1, 2, 4]);
+        assert_eq!(ids.claim(&live), Some(3));
+        assert_eq!(ids.claim(&live), Some(5));
+    }
+
+    #[test]
+    fn ids_wrap_past_the_top_onto_a_free_one() {
+        let mut ids = ServiceIds { next: u16::MAX };
+        let live = HashSet::from([1]);
+        assert_eq!(ids.claim(&live), Some(u16::MAX));
+        assert_eq!(ids.claim(&live), Some(2));
+    }
+
+    #[test]
+    fn ids_run_out_when_every_one_is_live() {
+        let mut ids = ServiceIds::new();
+        let live: HashSet<u16> = (1..=u16::MAX).collect();
+        assert_eq!(ids.claim(&live), None);
+    }
 }

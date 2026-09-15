@@ -76,6 +76,8 @@ pub enum ClientError {
     Protocol(&'static str),
     #[error("control stream closed")]
     ControlClosed,
+    #[error("cannot encode a control message")]
+    Encode(#[source] hawse_proto::frame::FrameError),
     #[error("server is shutting down: {0}")]
     Shutdown(String),
     #[error("server stopped answering")]
@@ -108,16 +110,23 @@ impl Client {
     }
 
     /// Reconnects 5 s after every failure, including `Denied`, until `cancel` fires.
+    /// A message this config cannot encode ends it instead, since retrying cannot fix one.
     pub async fn run(&self, cancel: CancellationToken, events: mpsc::Sender<Event>) {
         while !cancel.is_cancelled() {
             match self.run_once(cancel.clone(), &events).await {
                 Ok(()) => return,
-                Err(err) => emit(
-                    &events,
-                    Event::Disconnected {
-                        reason: chain(&err),
-                    },
-                ),
+                Err(err) => {
+                    let fatal = matches!(err, ClientError::Encode(_));
+                    emit(
+                        &events,
+                        Event::Disconnected {
+                            reason: chain(&err),
+                        },
+                    );
+                    if fatal {
+                        return;
+                    }
+                }
             }
             tokio::select! {
                 () = cancel.cancelled() => return,
@@ -298,7 +307,7 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
 }
 
 async fn send_msg(tx: &mut Tx, msg: &ClientMessage) -> Result<(), ClientError> {
-    let bytes = encode(msg).map_err(|_| ClientError::ControlClosed)?;
+    let bytes = encode(msg).map_err(ClientError::Encode)?;
     tx.send(bytes).await.map_err(|_| ClientError::ControlClosed)
 }
 
