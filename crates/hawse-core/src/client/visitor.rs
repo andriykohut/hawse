@@ -9,6 +9,13 @@ use super::Target;
 use crate::frame::read_frame;
 use crate::pump::pump;
 
+/// Without the matching `stop`, dropping `recv` sends the server `STOP_SENDING(0)` and the reason
+/// reaches only one half.
+fn refuse(send: &mut SendStream, recv: &mut RecvStream, code: u32) {
+    let _ = send.reset(VarInt::from_u32(code));
+    let _ = recv.stop(VarInt::from_u32(code));
+}
+
 /// Dials only the `local` address recorded for `service_id` at `Bound` time; nothing in the header can name an address.
 pub async fn serve(
     mut send: SendStream,
@@ -34,7 +41,7 @@ pub async fn serve(
             visitor = %header.visitor,
             "stream for a service we never bound"
         );
-        let _ = send.reset(VarInt::from_u32(reset::UNKNOWN_SERVICE));
+        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
         return;
     };
     let socket = match TcpStream::connect(&target.local).await {
@@ -46,7 +53,7 @@ pub async fn serve(
                 %err,
                 "local service refused the connection"
             );
-            let _ = send.reset(VarInt::from_u32(reset::LOCAL_REFUSED));
+            refuse(&mut send, &mut recv, reset::LOCAL_REFUSED);
             return;
         }
     };

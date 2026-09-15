@@ -111,13 +111,12 @@ impl Client {
         while !cancel.is_cancelled() {
             match self.run_once(cancel.clone(), &events).await {
                 Ok(()) => return,
-                Err(err) => {
-                    let _ = events
-                        .send(Event::Disconnected {
-                            reason: err.to_string(),
-                        })
-                        .await;
-                }
+                Err(err) => emit(
+                    &events,
+                    Event::Disconnected {
+                        reason: err.to_string(),
+                    },
+                ),
             }
             tokio::select! {
                 () = cancel.cancelled() => return,
@@ -152,20 +151,21 @@ impl Client {
         let (agent, client_name) = match next(&mut rx).await {
             Some(ServerMessage::Welcome { agent, client_name }) => (agent, client_name),
             Some(ServerMessage::Denied { key, .. }) => {
-                let _ = events.send(Event::Denied { key }).await;
+                emit(events, Event::Denied { key });
                 conn.close(VarInt::from_u32(0), b"denied");
                 return Err(ClientError::Denied(key));
             }
             Some(_) => return Err(ClientError::Protocol("another message")),
             None => return Err(ClientError::ControlClosed),
         };
-        let _ = events
-            .send(Event::Connected {
+        emit(
+            events,
+            Event::Connected {
                 remote,
                 name: client_name,
                 agent,
-            })
-            .await;
+            },
+        );
 
         self.send_binds(&mut tx).await?;
 
@@ -195,14 +195,17 @@ impl Client {
                     last_heard = Instant::now();
                     match msg {
                         ServerMessage::Bound { service, service_id, port } => {
-                            let Some(expose) = self.cfg.expose.get(&service) else { continue };
+                            let Some(expose) = self.cfg.expose.get(&service) else {
+                                tracing::warn!(service, "server bound a service we never asked for");
+                                continue;
+                            };
                             let target = Target { service: service.clone(), local: expose.local.clone() };
                             self.targets.write().expect("targets lock").insert(service_id, target);
                             let port = Port { number: port, kind: expose.port.kind() };
-                            let _ = events.send(Event::Bound { service, port }).await;
+                            emit(events, Event::Bound { service, port });
                         }
                         ServerMessage::BindFailed { service, reason } => {
-                            let _ = events.send(Event::BindFailed { service, reason }).await;
+                            emit(events, Event::BindFailed { service, reason });
                         }
                         ServerMessage::Ping { nonce } => {
                             if let Err(err) = send_msg(&mut tx, &ClientMessage::Pong { nonce }).await {
@@ -282,6 +285,14 @@ impl Client {
             .map_err(|e| ClientError::Resolve(target.clone(), e))?
             .next();
         first.ok_or(ClientError::NoAddress(target))
+    }
+}
+
+/// Events are informational: awaiting a slow consumer would stall the control loop past the
+/// server's liveness deadline.
+fn emit(events: &mpsc::Sender<Event>, event: Event) {
+    if let Err(mpsc::error::TrySendError::Full(event)) = events.try_send(event) {
+        tracing::debug!(?event, "dropped an event: the receiver is behind");
     }
 }
 
