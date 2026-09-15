@@ -50,7 +50,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # cross's own dependencies do not build under the workflow's -D warnings.
       - run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        env:
+          RUSTFLAGS: ""
       - run: cross +${{ matrix.toolchain }} build --release --target ${{ matrix.target }} -p hawse --no-default-features --features ring
   macos:
     runs-on: macos-latest
