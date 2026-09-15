@@ -1,9 +1,14 @@
 # hawse
 
-hawse forwards TCP services from a machine behind NAT to public ports on a
-server with a routable address. The client opens one outbound QUIC connection
-to the server. The server listens on the public ports, and relays each incoming
-connection over that connection to a local address on the client.
+hawse publishes TCP services on a server's ports. The client opens one outbound
+QUIC connection to the server. The server listens on the configured ports and
+relays each incoming connection over that connection, to an address the client
+can reach.
+
+Only the client dials out, so the network holding the services needs no inbound
+connectivity: no port forwarding, no public address, no firewall rules for
+incoming traffic. The server needs an address that its clients and their
+visitors can reach, which is usually a public one but does not have to be.
 
 Both ends authenticate with Ed25519 keys inside TLS 1.3. The client pins the
 server's public key. The server holds a list of client keys and the ports each
@@ -68,6 +73,10 @@ Then run:
 The `ssh` service binds port 2222 on the server and forwards to port 22 on the
 client. The `dev` service sets no `port`, so the server assigns one from its
 `dynamic_ports` range and the client logs which port it got.
+
+`local` is any address the client can open a TCP connection to, not only one on
+the client itself. `local = "192.168.1.50:80"` forwards to another host on the
+client's network.
 
 ## Configuration
 
