@@ -180,7 +180,6 @@ phase 1. Each says what the code does today and what the fix would be.
 - **The supersede wait is not cancel-aware.** A session superseding another at the moment the server is cancelled sits up to 5 s before noticing. Select on cancel as well.
 - **`expect("a validated buffer")` is reachable from the library API.** `Server::bind` and `Client::run_once` do not call `validate()`; a 32-bit caller with an unvalidated 4 GiB buffer panics where the sibling window conversion returns an error. Validate inside those entry points or return an error.
 - **One `%err` log remains without its cause chain.** The "cannot bind" warning in the server session; route it through `error::chain` like the rest.
-- **A superseded client's message contradicts itself.** `ClientError::Shutdown` renders "server is shutting down: another session for this key took over". Split the variant or reword the prefix.
 - **Two live processes sharing one key supersede each other forever.** Each `Shutdown` triggers the other's reconnect. Intended consequence of one-session-per-key; phase 2's backoff should at least make it slow, and the server log should say which remote won.
 - **A session that panics between insert and retire leaves its map entry.** Every later session for that key then pays the full 5 s supersede wait. Make the entry removal a drop guard.
 - **TIME_WAIT can refuse an immediate rebind of a freed fixed port** despite `SO_REUSEADDR`. Pre-existing; a retry-once on `EADDRINUSE` for fixed ports would cover it.

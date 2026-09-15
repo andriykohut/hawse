@@ -78,7 +78,7 @@ pub enum ClientError {
     ControlClosed,
     #[error("cannot encode a control message")]
     Encode(#[source] hawse_proto::frame::FrameError),
-    #[error("server is shutting down: {0}")]
+    #[error("server ended the session: {0}")]
     Shutdown(String),
     #[error("server stopped answering")]
     Unresponsive,
