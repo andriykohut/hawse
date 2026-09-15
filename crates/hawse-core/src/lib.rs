@@ -1,5 +1,6 @@
 pub mod client;
 pub mod config;
+mod error;
 pub mod frame;
 pub mod identity;
 pub mod net;

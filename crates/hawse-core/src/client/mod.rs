@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::config::{ClientConfig, DEFAULT_PORT, split_host_port};
+use crate::error::chain;
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
 use crate::transport::quic::{self, QuicError, Tuning};
@@ -114,7 +115,7 @@ impl Client {
                 Err(err) => emit(
                     &events,
                     Event::Disconnected {
-                        reason: err.to_string(),
+                        reason: chain(&err),
                     },
                 ),
             }
@@ -171,7 +172,7 @@ impl Client {
 
         self.targets.write().expect("targets lock").clear();
         let tasks = TaskTracker::new();
-        let buffer = usize::try_from(self.cfg.transport.buffer.0).unwrap_or(16 * 1024);
+        let buffer = usize::try_from(self.cfg.transport.buffer.0).expect("a validated buffer");
         let mut ping =
             tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);

@@ -6,6 +6,7 @@ use quinn::{RecvStream, SendStream, VarInt};
 use tokio::net::TcpStream;
 
 use super::Target;
+use crate::error::chain;
 use crate::frame::read_frame;
 use crate::pump::pump;
 
@@ -26,7 +27,7 @@ pub async fn serve(
     let header: StreamHeader = match read_frame(&mut recv).await {
         Ok(header) => header,
         Err(err) => {
-            tracing::debug!(%err, "bad stream header");
+            tracing::debug!(err = %chain(&err), "bad stream header");
             return;
         }
     };
@@ -50,7 +51,7 @@ pub async fn serve(
             tracing::warn!(
                 service = target.service,
                 local = target.local,
-                %err,
+                err = %chain(&err),
                 "local service refused the connection"
             );
             refuse(&mut send, &mut recv, reset::LOCAL_REFUSED);
@@ -66,6 +67,6 @@ pub async fn serve(
             down = stats.to_stream,
             "visitor done"
         ),
-        Err(err) => tracing::debug!(service = target.service, %err, "visitor ended"),
+        Err(err) => tracing::debug!(service = target.service, err = %chain(&err), "visitor ended"),
     }
 }

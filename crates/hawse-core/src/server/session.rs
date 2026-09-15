@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use hawse_proto::frame::{codec, decode, encode};
+use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
@@ -17,7 +18,7 @@ use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
 
 use super::policy::Grant;
-use super::{AGENT, DRAIN, Shared, listener};
+use super::{AGENT, Live, Shared, listener};
 use crate::net;
 use crate::transport::quic;
 
@@ -25,6 +26,10 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const DENIED_LINGER: Duration = Duration::from_secs(2);
 const HELLO_DEADLINE: Duration = Duration::from_secs(10);
+const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
+/// Under the server's own 5 s drain, so a session's close still lands inside it.
+const DRAIN: Duration = Duration::from_secs(4);
+const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 
 type Tx = FramedWrite<SendStream, LengthDelimitedCodec>;
 type Rx = FramedRead<RecvStream, LengthDelimitedCodec>;
@@ -84,11 +89,26 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
 
     let span = tracing::info_span!("session", client = %grant.name, %remote);
     async move {
+        let live = Arc::new(Live {
+            cancel: cancel.child_token(),
+            done: CancellationToken::new(),
+        });
+        let previous = shared
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(key, Arc::clone(&live));
+        if let Some(previous) = previous {
+            previous.cancel.cancel();
+            tracing::info!("superseding this key's previous session");
+            let _ = tokio::time::timeout(SUPERSEDE_WAIT, previous.done.cancelled()).await;
+        }
         let welcome = ServerMessage::Welcome {
             agent: AGENT.to_owned(),
             client_name: grant.name.clone(),
         };
         if send(&mut tx, &welcome).await.is_err() {
+            retire(&shared, key, &live);
             return;
         }
         tracing::info!(%agent, "client connected");
@@ -96,6 +116,8 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
             conn,
             shared,
             grant,
+            key,
+            live,
             services: HashMap::new(),
             next_id: 1,
             tasks: TaskTracker::new(),
@@ -106,10 +128,25 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
     .await;
 }
 
+/// Signals that this session's ports are free, then drops its claim on the key unless a newer
+/// session has already taken it.
+fn retire(shared: &Shared, key: PublicKey, live: &Arc<Live>) {
+    live.done.cancel();
+    let mut sessions = shared.sessions.lock().expect("sessions lock");
+    if sessions
+        .get(&key)
+        .is_some_and(|held| Arc::ptr_eq(held, live))
+    {
+        sessions.remove(&key);
+    }
+}
+
 struct Session {
     conn: Connection,
     shared: Arc<Shared>,
     grant: Grant,
+    key: PublicKey,
+    live: Arc<Live>,
     services: HashMap<String, BoundService>,
     next_id: u16,
     tasks: TaskTracker,
@@ -121,17 +158,25 @@ struct BoundService {
 }
 
 impl Session {
-    async fn serve(mut self, mut tx: Tx, mut rx: Rx, cancel: CancellationToken) {
+    async fn serve(mut self, mut tx: Tx, mut rx: Rx, server_cancel: CancellationToken) {
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
         let mut nonce = 0u64;
+        let mut told_client = false;
 
+        let mine = self.live.cancel.clone();
         let reason = loop {
             tokio::select! {
-                () = cancel.cancelled() => {
-                    let _ = send(&mut tx, &ServerMessage::Shutdown { reason: "server shutting down".to_owned() }).await;
-                    break "shutdown";
+                () = mine.cancelled() => {
+                    let superseded = !server_cancel.is_cancelled();
+                    let why = if superseded {
+                        "another session for this key took over"
+                    } else {
+                        "server shutting down"
+                    };
+                    told_client = send(&mut tx, &ServerMessage::Shutdown { reason: why.to_owned() }).await.is_ok();
+                    break if superseded { "superseded" } else { "shutdown" };
                 }
                 _ = ping.tick() => {
                     if last_heard.elapsed() > PONG_DEADLINE {
@@ -171,9 +216,15 @@ impl Session {
         for name in names {
             self.unbind(&name);
         }
+        let _ = tx.into_inner().finish();
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
-        let _ = tx.into_inner().finish();
+        retire(&self.shared, self.key, &self.live);
+        // `close` drops whatever quinn has not put on the wire, so let a client that was told why
+        // read it and close first.
+        if told_client {
+            let _ = tokio::time::timeout(SHUTDOWN_LINGER, self.conn.closed()).await;
+        }
         self.conn.close(VarInt::from_u32(0), reason.as_bytes());
     }
 
@@ -219,7 +270,8 @@ impl Session {
             self.conn.clone(),
             listener,
             id,
-            self.shared.buffer,
+            port,
+            Arc::clone(&self.shared),
             cancel.clone(),
             self.tasks.clone(),
         ));
@@ -277,10 +329,10 @@ impl Session {
         outcome
     }
 
+    /// The listener task holds the port's claim until its socket is gone, so this only stops it.
     fn unbind(&mut self, service: &str) {
         if let Some(bound) = self.services.remove(service) {
             bound.cancel.cancel();
-            self.release(bound.port);
             tracing::info!(service, port = %bound.port, "unbound");
         }
     }

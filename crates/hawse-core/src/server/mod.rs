@@ -3,15 +3,18 @@ pub mod policy;
 pub mod ports;
 mod session;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use hawse_proto::key::PublicKey;
 use quinn::{Endpoint, VarInt};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::config::ServerConfig;
+use crate::error::chain;
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
 use crate::transport::quic::{self, QuicError, Tuning};
@@ -26,6 +29,16 @@ pub struct Shared {
     pub policy: Policy,
     pub ports: Mutex<PortAllocator>,
     pub buffer: usize,
+    /// One live session per client key, so a reconnecting client is not locked out of its own
+    /// ports by the session its previous connection left behind.
+    pub sessions: Mutex<HashMap<PublicKey, Arc<Live>>>,
+}
+
+/// `done` is cancelled once the session has released its ports, so a session superseding this one
+/// can wait for them.
+pub struct Live {
+    pub cancel: CancellationToken,
+    pub done: CancellationToken,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +74,8 @@ impl Server {
         let shared = Arc::new(Shared {
             policy: Policy::from_config(cfg),
             ports: Mutex::new(PortAllocator::new(cfg.dynamic_ports)),
-            buffer: usize::try_from(cfg.transport.buffer.0).unwrap_or(16 * 1024),
+            buffer: usize::try_from(cfg.transport.buffer.0).expect("a validated buffer"),
+            sessions: Mutex::new(HashMap::new()),
         });
         Ok(Self { endpoint, shared })
     }
@@ -87,7 +101,7 @@ impl Server {
                     sessions.spawn(async move {
                         match incoming.await {
                             Ok(conn) => session::run(conn, shared, cancel).await,
-                            Err(err) => tracing::debug!(%err, "handshake failed"),
+                            Err(err) => tracing::debug!(err = %chain(&err), "handshake failed"),
                         }
                     });
                 }

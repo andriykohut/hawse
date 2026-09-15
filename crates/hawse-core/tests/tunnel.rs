@@ -377,3 +377,145 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     );
     client.cancel.cancel();
 }
+
+#[tokio::test]
+async fn server_shutdown_tells_the_client_why() {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let echo = echo_server().await;
+    let mut client = start_client(
+        client_config(
+            server.addr,
+            server.key,
+            &[("echo", &echo.to_string(), "any")],
+        ),
+        client_id,
+    );
+    expect_bound(&mut client.events, "echo").await;
+
+    server.cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), client.task)
+        .await
+        .expect("the client hears the shutdown within 10 s")
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(ClientError::Shutdown(_))),
+        "{outcome:?}"
+    );
+    server.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn binds_with_phase_two_features_are_refused() {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let echo = echo_server().await.to_string();
+    let mut cfg = client_config(
+        server.addr,
+        server.key,
+        &[("allowed", &echo, "any"), ("proxied", &echo, "any")],
+    );
+    cfg.expose.get_mut("allowed").unwrap().allow = vec!["203.0.113.0/24".parse().unwrap()];
+    cfg.expose.get_mut("proxied").unwrap().proxy_protocol = true;
+    let mut client = start_client(cfg, client_id);
+
+    let mut refused = Vec::new();
+    while refused.len() < 2 {
+        match next_event(&mut client.events).await {
+            Event::BindFailed { service, reason } => refused.push((service, reason)),
+            Event::Bound { service, port } => panic!("{service} was bound on {port}"),
+            _ => {}
+        }
+    }
+    refused.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        refused,
+        [
+            ("allowed".to_owned(), BindFailure::BadPort),
+            ("proxied".to_owned(), BindFailure::BadPort),
+        ]
+    );
+
+    let after = tokio::time::timeout(Duration::from_secs(1), client.events.recv()).await;
+    assert!(after.is_err(), "a later event arrived: {after:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_reconnecting_client_supersedes_its_zombie_session() {
+    let (server_id, client_id) = ids();
+    let granted = free_port_outside_pool(&[]).await;
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[&granted.to_string()])]),
+        &server_id,
+    );
+    let echo = echo_server().await.to_string();
+    let cfg = client_config(
+        server.addr,
+        server.key,
+        &[("svc", &echo, &granted.to_string())],
+    );
+    let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
+    let mut first = start_client(cfg.clone(), twin);
+    assert_eq!(expect_bound(&mut first.events, "svc").await.number, granted);
+
+    // Aborting sends no close frame, so the server still holds the port for the dead session.
+    first.task.abort();
+
+    let mut second = start_client(cfg, client_id);
+    let bound = tokio::time::timeout(
+        Duration::from_secs(10),
+        expect_bound(&mut second.events, "svc"),
+    )
+    .await
+    .expect("the reconnecting client binds within 10 s");
+    assert_eq!(bound.number, granted);
+    second.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_second_session_for_the_same_key_supersedes_the_first() {
+    let (server_id, client_id) = ids();
+    let granted = free_port_outside_pool(&[]).await;
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[&granted.to_string()])]),
+        &server_id,
+    );
+    let echo = echo_server().await.to_string();
+    let cfg = client_config(
+        server.addr,
+        server.key,
+        &[("svc", &echo, &granted.to_string())],
+    );
+    let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
+    let mut first = start_client(cfg.clone(), twin);
+    assert_eq!(expect_bound(&mut first.events, "svc").await.number, granted);
+
+    let mut second = start_client(cfg, client_id);
+    let bound = tokio::time::timeout(
+        Duration::from_secs(10),
+        expect_bound(&mut second.events, "svc"),
+    )
+    .await
+    .expect("the second session binds within 10 s");
+    assert_eq!(bound.number, granted);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(10), first.task)
+        .await
+        .expect("the first session ends within 10 s")
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(ClientError::Shutdown(_))),
+        "{outcome:?}"
+    );
+    second.cancel.cancel();
+    server.cancel.cancel();
+}
