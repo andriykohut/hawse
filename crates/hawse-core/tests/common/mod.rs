@@ -77,8 +77,14 @@ pub fn server_config(clients: &[(&str, PublicKey, &[&str])]) -> ServerConfig {
     };
     for (name, key, ports) in clients {
         let ports = ports.iter().map(|p| p.parse().unwrap()).collect();
-        cfg.clients
-            .insert((*name).to_owned(), ClientPolicy { key: *key, ports });
+        cfg.clients.insert(
+            (*name).to_owned(),
+            ClientPolicy {
+                key: *key,
+                ports,
+                bind: None,
+            },
+        );
     }
     cfg
 }

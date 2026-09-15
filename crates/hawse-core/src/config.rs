@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ pub const DEFAULT_PORT: u16 = 4433;
 #[serde(deny_unknown_fields, default)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
+    pub bind: IpAddr,
     pub key: PathBuf,
     pub dynamic_ports: PortSpan,
     pub quic_retry: bool,
@@ -31,6 +32,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([0u16; 8], DEFAULT_PORT)),
+            bind: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             key: PathBuf::from("server.key"),
             dynamic_ports: PortSpan {
                 first: 40000,
@@ -50,6 +52,9 @@ pub struct ClientPolicy {
     pub key: PublicKey,
     #[serde(default)]
     pub ports: Vec<PortRange>,
+    /// Overrides the server-wide `bind` for this client's public ports.
+    #[serde(default)]
+    pub bind: Option<IpAddr>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -298,6 +303,7 @@ fn parse_port(text: &str) -> Option<u16> {
 mod tests {
     use super::*;
     use hawse_proto::port::{Kind, Port};
+    use std::net::Ipv4Addr;
     use std::time::Duration;
 
     const SERVER: &str = r#"
@@ -346,6 +352,25 @@ local = "localhost:3000"
 [transport]
 prefer = "tcp"
 "#;
+
+    #[test]
+    fn bind_defaults_to_every_interface_and_a_client_can_override_it() {
+        let cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        assert_eq!(cfg.bind, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(cfg.clients["homelab"].bind, None);
+
+        let text = format!("bind = \"127.0.0.1\"\n{SERVER}");
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        let text = format!("{SERVER}bind = \"127.0.0.1\"\n");
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.bind, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(
+            cfg.clients["laptop"].bind,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
 
     #[test]
     fn server_example_parses() {

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use std::net::IpAddr;
+
 use hawse_proto::key::PublicKey;
 use hawse_proto::port::{Port, PortRange};
 
@@ -9,6 +11,7 @@ use crate::config::ServerConfig;
 pub struct Grant {
     pub name: String,
     pub ports: Vec<PortRange>,
+    pub bind: IpAddr,
 }
 
 impl Grant {
@@ -33,6 +36,7 @@ impl Policy {
                     Grant {
                         name: name.clone(),
                         ports: policy.ports.clone(),
+                        bind: policy.bind.unwrap_or(cfg.bind),
                     },
                 )
             })
@@ -66,6 +70,7 @@ mod tests {
             ClientPolicy {
                 key: key(1),
                 ports: vec!["443".parse().unwrap(), "8000-8100/udp".parse().unwrap()],
+                bind: None,
             },
         );
         let policy = Policy::from_config(&cfg);
@@ -86,6 +91,7 @@ mod tests {
             ClientPolicy {
                 key: key(3),
                 ports: vec![],
+                bind: None,
             },
         );
         let policy = Policy::from_config(&cfg);

@@ -1,5 +1,6 @@
 mod common;
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{
@@ -15,6 +16,52 @@ use tokio::net::{TcpListener, TcpStream};
 
 fn ids() -> (Identity, Identity) {
     (Identity::generate().unwrap(), Identity::generate().unwrap())
+}
+
+#[tokio::test]
+async fn a_loopback_bind_serves_visitors_on_loopback() {
+    let (server_id, client_id) = ids();
+    // A fixed port outside the shared dynamic pool: with SO_REUSEADDR a loopback
+    // bind and another test's wildcard bind can hold the same port at once, and
+    // loopback traffic then reaches whichever is more specific.
+    let granted = free_port_outside_pool(&[]).await;
+    let grant = granted.to_string();
+    let mut cfg = server_config(&[("test", client_id.public_key(), &[&grant])]);
+    cfg.bind = Ipv4Addr::LOCALHOST.into();
+    let server = start_server(&cfg, &server_id);
+    let echo = echo_server().await;
+    let mut client = start_client(
+        client_config(
+            server.addr,
+            server.key,
+            &[("echo", &echo.to_string(), &granted.to_string())],
+        ),
+        client_id,
+    );
+    let port = expect_bound(&mut client.events, "echo").await;
+    assert_eq!(port.number, granted);
+
+    let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
+        .await
+        .unwrap();
+    visitor.write_all(b"hello").await.unwrap();
+    let mut buf = [0u8; 5];
+    visitor.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"hello");
+
+    // A second loopback address reaches a wildcard listener but not a bound one.
+    // Linux has all of 127/8 up; elsewhere the address is absent and the connect
+    // fails for a different reason, which proves nothing, so only assert there.
+    if cfg!(target_os = "linux") {
+        let elsewhere = TcpStream::connect(("127.0.0.2", port.number)).await;
+        assert!(
+            elsewhere.is_err(),
+            "bound to 127.0.0.1 yet answered on 127.0.0.2"
+        );
+    }
+
+    client.cancel.cancel();
+    server.cancel.cancel();
 }
 
 #[tokio::test]

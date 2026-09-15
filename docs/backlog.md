@@ -186,3 +186,12 @@ phase 1. Each says what the code does today and what the fix would be.
 - **Two live processes sharing one key supersede each other forever.** Each `Shutdown` triggers the other's reconnect. Intended consequence of one-session-per-key; phase 2's backoff should at least make it slow, and the server log should say which remote won.
 - **A session that panics between insert and retire leaves its map entry.** Every later session for that key then pays the full 5 s supersede wait. Make the entry removal a drop guard.
 - **TIME_WAIT can refuse an immediate rebind of a freed fixed port** despite `SO_REUSEADDR`. Pre-existing; a retry-once on `EADDRINUSE` for fixed ports would cover it.
+
+### From the bind setting
+
+- **A specific bind can shadow a wildcard bind on the same port.** Public
+  listeners set `SO_REUSEADDR`, so on a host already serving port 8096 on every
+  interface, a hawse service bound to `127.0.0.1:8096` binds successfully and
+  takes loopback traffic for itself instead of failing with `EADDRINUSE`. It
+  surfaced as a flake between two servers in one test binary. Worth a warning
+  when a bound port is already answering, or a documented note.

@@ -120,11 +120,25 @@ resolve against the directory containing the config file.
 Server settings and their defaults:
 
     listen = "[::]:4433"
+    bind = "::"
     key = "server.key"
     dynamic_ports = "40000-41000"
 
 The listen port is UDP, because QUIC runs over UDP. Public ports bound for
 clients are TCP.
+
+`bind` is the address those public ports listen on. The default answers on
+every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
+the only thing that should reach them:
+
+    bind = "127.0.0.1"
+
+    [clients.nas]
+    key = "ed25519:AAAA..."
+    ports = ["8096"]
+
+A client may override the server-wide value with its own `bind`, so one server
+can keep some services behind a proxy and publish others directly.
 
 Client settings: `server` and `server_key` are required, `key` defaults to
 `client.key`, and each `[expose.NAME]` table needs a `local` address.

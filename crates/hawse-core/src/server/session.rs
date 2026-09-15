@@ -277,7 +277,7 @@ impl Session {
         ));
         self.services
             .insert(service.to_owned(), BoundService { port, cancel });
-        tracing::info!(service, %port, "bound");
+        tracing::info!(service, %port, bind = %self.grant.bind, "bound");
         ServerMessage::Bound {
             service: service.to_owned(),
             service_id: id,
@@ -312,7 +312,7 @@ impl Session {
                 Ok(port) => port,
                 Err(reason) => break Err(reason),
             };
-            match net::bind_tcp(port.number) {
+            match net::bind_tcp(self.grant.bind, port.number) {
                 Ok(listener) => break Ok((port, listener)),
                 Err(err) => {
                     tracing::warn!(service, %port, %err, "cannot bind");
