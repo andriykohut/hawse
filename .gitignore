@@ -3,3 +3,4 @@
 *.pem
 known_servers
 /.worktrees
+/.superpowers
