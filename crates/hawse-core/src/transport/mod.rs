@@ -154,7 +154,8 @@ pub trait Transport: Send + Sync + 'static {
     /// `None` when this connection cannot carry datagrams, and the limit can move with the path MTU,
     /// so it is not safe to cache.
     fn max_datagram_size(&self) -> Option<usize>;
-    /// Discards stream data still in flight, so anything the peer must read has to land first.
+    /// A QUIC peer loses stream data still in flight; yamux flushes what is queued before its
+    /// go-away. Anything the peer must read has to land first either way.
     fn close(&self, reason: CloseReason);
     /// Ends when either side closes, so waiting here before `close` gives the peer a chance to read
     /// what is still in flight.

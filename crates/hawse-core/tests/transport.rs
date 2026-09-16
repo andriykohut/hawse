@@ -2,6 +2,7 @@ mod common;
 
 use std::future::poll_fn;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -115,7 +116,8 @@ async fn closed_resolves_only_once_the_peer_has_closed() {
 
 #[tokio::test]
 async fn tcp_transport_opens_a_bidirectional_stream() {
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
 
     let (mut cs, _cr) = client.open_bi().await.unwrap();
     cs.write_all(b"hi").await.unwrap();
@@ -132,7 +134,8 @@ async fn tcp_transport_opens_a_bidirectional_stream() {
 
 #[tokio::test]
 async fn tcp_transport_has_no_datagrams() {
-    let (client, _server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
+    let client = &pair.client;
 
     assert!(client.max_datagram_size().is_none());
     assert!(matches!(
@@ -147,7 +150,8 @@ async fn tcp_transport_has_no_datagrams() {
 
 #[tokio::test]
 async fn tcp_transport_opens_a_stream_from_the_server_end() {
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
 
     let (mut ss, _sr) = server.open_bi().await.unwrap();
     ss.write_all(b"down").await.unwrap();
@@ -168,7 +172,8 @@ async fn tcp_transport_opens_a_stream_from_the_server_end() {
 async fn tcp_transport_round_trips_many_streams_at_once() {
     const BURST: usize = 64;
 
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
 
     // `server` has to outlive every echo: dropping the transport closes the connection under any
     // stream still running on it.
@@ -214,7 +219,10 @@ async fn tcp_transport_round_trips_many_streams_at_once() {
 async fn tcp_transport_opens_streams_the_peer_has_not_accepted() {
     const BURST: usize = 64;
 
-    let (client, _server) = common::tcp_pair().await;
+    // The whole pair stays bound: dropping the server end would close the connection under the
+    // opens this test is timing.
+    let pair = common::tcp_pair().await;
+    let client = &pair.client;
 
     let open = async {
         let mut streams = Vec::with_capacity(BURST);
@@ -231,18 +239,66 @@ async fn tcp_transport_opens_streams_the_peer_has_not_accepted() {
 
 #[tokio::test]
 async fn tcp_transport_reports_the_peer_key_and_address() {
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
 
-    assert!(client.peer_key().is_some());
-    assert!(server.peer_key().is_some());
-    assert_ne!(client.peer_key(), server.peer_key());
-    assert_eq!(client.remote_address().ip(), Ipv4Addr::LOCALHOST);
-    assert_eq!(server.remote_address().ip(), Ipv4Addr::LOCALHOST);
+    assert_eq!(pair.client.peer_key(), Some(pair.server_key));
+    assert_eq!(pair.server.peer_key(), Some(pair.client_key));
+    assert_ne!(pair.client_key, pair.server_key);
+    assert_eq!(pair.client.remote_address().ip(), Ipv4Addr::LOCALHOST);
+    assert_eq!(pair.server.remote_address().ip(), Ipv4Addr::LOCALHOST);
+}
+
+/// Past 256 unacknowledged streams yamux parks `poll_new_outbound`, and the acknowledgement that
+/// releases it arrives only through `poll_next_inbound`: a driver awaiting the two separately would
+/// stop collecting acknowledgements exactly when it starts needing one, and stall here.
+#[tokio::test]
+async fn tcp_transport_opens_past_the_ack_backlog() {
+    const BACKLOG: usize = 256;
+    const BURST: usize = BACKLOG + 44;
+
+    let pair = common::tcp_pair().await;
+    let server = Arc::clone(&pair.server);
+
+    let answering = tokio::spawn(async move {
+        // The first wave is held unanswered so the client's 257th open really does park. A stream
+        // is acknowledged by the peer's first frame on it, so accepting alone puts nothing on the
+        // wire and drains nothing.
+        let mut held = Vec::with_capacity(BACKLOG);
+        for _ in 0..BACKLOG {
+            held.push(server.accept_bi().await.unwrap());
+        }
+        for (send, _) in &mut held {
+            send.write_all(b"ack").await.unwrap();
+        }
+        let mut answered = held;
+        for _ in BACKLOG..BURST {
+            let (mut send, recv) = server.accept_bi().await.unwrap();
+            send.write_all(b"ack").await.unwrap();
+            answered.push((send, recv));
+        }
+        answered
+    });
+
+    let opening = async {
+        let mut opened = Vec::with_capacity(BURST);
+        for _ in 0..BURST {
+            let (mut send, recv) = pair.client.open_bi().await.unwrap();
+            send.write_all(b"x").await.unwrap();
+            opened.push((send, recv));
+        }
+        opened
+    };
+    let opened = timeout(Duration::from_secs(20), opening)
+        .await
+        .expect("open_bi stalled past the 256-stream acknowledgement backlog");
+    assert_eq!(opened.len(), BURST);
+    assert_eq!(answering.await.unwrap().len(), BURST);
 }
 
 #[tokio::test]
 async fn tcp_closed_resolves_only_once_the_peer_has_closed() {
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
 
     assert!(
         server.closed().now_or_never().is_none(),

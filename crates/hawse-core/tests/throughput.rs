@@ -130,15 +130,15 @@ async fn stream_to_socket() {
 #[tokio::test]
 #[ignore = "benchmark, run explicitly with --ignored --nocapture"]
 async fn throughput_over_tcp_in_both_directions() {
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
     report(
         "tcp_socket_to_stream",
-        tcp_socket_to_stream(&*client, &*server).await,
+        tcp_socket_to_stream(&*pair.client, &*pair.server).await,
     );
-    let (client, server) = common::tcp_pair().await;
+    let pair = common::tcp_pair().await;
     report(
         "tcp_stream_to_socket",
-        tcp_stream_to_socket(&*client, &*server).await,
+        tcp_stream_to_socket(&*pair.client, &*pair.server).await,
     );
     eprintln!(
         "the two figures stop their clocks differently; compare each only against its own history"

@@ -70,8 +70,14 @@ pub async fn quic_pair() -> Pair {
     }
 }
 
-/// Returns `(client, server)`.
-pub async fn tcp_pair() -> (Arc<dyn Transport>, Arc<dyn Transport>) {
+pub struct TcpPair {
+    pub client: Arc<dyn Transport>,
+    pub server: Arc<dyn Transport>,
+    pub client_key: PublicKey,
+    pub server_key: PublicKey,
+}
+
+pub async fn tcp_pair() -> TcpPair {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
     let (cert, key) = server_id.certificate().unwrap();
@@ -84,11 +90,18 @@ pub async fn tcp_pair() -> (Arc<dyn Transport>, Arc<dyn Transport>) {
     let (server, client) = tokio::join!(
         async {
             let (stream, _) = listener.accept().await.unwrap();
-            tcp::accept(stream, server_tls).await.unwrap()
+            tcp::accept(stream, server_tls, Tuning::SERVER)
+                .await
+                .unwrap()
         },
-        tcp::connect(addr, client_tls),
+        tcp::connect(addr, client_tls, Tuning::CLIENT),
     );
-    (Arc::new(client.unwrap()), Arc::new(server))
+    TcpPair {
+        client: Arc::new(client.unwrap()),
+        server: Arc::new(server),
+        client_key: client_id.public_key(),
+        server_key: server_id.public_key(),
+    }
 }
 
 pub struct RunningServer {
