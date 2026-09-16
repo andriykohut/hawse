@@ -4,6 +4,8 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use hawse_core::config::ServerConfig;
+
 struct Proc(Child);
 
 impl Drop for Proc {
@@ -29,15 +31,20 @@ fn free_udp_port() -> u16 {
 
 /// The server answers its listen port on UDP and on TCP, and the two port spaces are independent:
 /// a port the kernel hands out as free on UDP can be taken on TCP, and the server then refuses to
-/// start rather than come up without the fallback.
+/// start rather than come up without the fallback. It also refuses a listen port inside its
+/// dynamic pool, and the default pool lies within Linux's ephemeral range.
 fn free_listen_port() -> u16 {
+    let pool = ServerConfig::default().dynamic_ports;
     for _ in 0..16 {
         let port = free_udp_port();
+        if pool.contains_number(port) {
+            continue;
+        }
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
-    panic!("no port free on both UDP and TCP in 16 tries");
+    panic!("no port free on both UDP and TCP, outside the dynamic pool, in 16 tries");
 }
 
 fn free_tcp_port() -> u16 {
