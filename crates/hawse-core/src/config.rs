@@ -185,6 +185,10 @@ pub enum ConfigError {
     Name(NameError),
     #[error("listen port cannot be 0")]
     ListenPort,
+    #[error("listen port {0} falls inside dynamic_ports; move the pool or the port")]
+    ListenInPool(u16),
+    #[error("client `{0}` is granted the listen port {1}; a grant cannot name it")]
+    ListenGranted(String, u16),
     #[error("transport buffer must be between 1 KiB and 1 GiB, not {0} bytes")]
     Buffer(u64),
     #[error("transport stream_window must be at least 1 byte and under 4 GiB, not {0} bytes")]
@@ -221,6 +225,19 @@ impl ServerConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.listen.port() == 0 {
             return Err(ConfigError::ListenPort);
+        }
+        let listen = self.listen.port();
+        if self.dynamic_ports.contains_number(listen) {
+            return Err(ConfigError::ListenInPool(listen));
+        }
+        for (name, policy) in &self.clients {
+            if policy
+                .ports
+                .iter()
+                .any(|r| r.first <= listen && listen <= r.last)
+            {
+                return Err(ConfigError::ListenGranted(name.clone(), listen));
+            }
         }
         validate_transport(
             self.transport.buffer,
@@ -355,6 +372,10 @@ local = "localhost:3000"
 prefer = "tcp"
 "#;
 
+    fn sample_key() -> PublicKey {
+        PublicKey::from_bytes([7u8; 32])
+    }
+
     #[test]
     fn bind_defaults_to_every_interface_and_a_client_can_override_it() {
         let cfg: ServerConfig = toml::from_str(SERVER).unwrap();
@@ -446,6 +467,32 @@ prefer = "tcp"
         assert!(cfg.expose["ssh"].proxy_protocol);
         assert_eq!(cfg.expose["ssh"].allow.len(), 1);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn listen_port_inside_the_dynamic_pool_is_rejected() {
+        let mut cfg = ServerConfig::default();
+        cfg.listen = "127.0.0.1:40500".parse().unwrap();
+        cfg.dynamic_ports = "40000-41000".parse().unwrap();
+        assert_eq!(cfg.validate(), Err(ConfigError::ListenInPool(40500)));
+    }
+
+    #[test]
+    fn a_grant_naming_the_listen_port_is_rejected() {
+        let mut cfg = ServerConfig::default();
+        cfg.listen = "127.0.0.1:4433".parse().unwrap();
+        cfg.clients.insert(
+            "laptop".into(),
+            ClientPolicy {
+                key: sample_key(),
+                ports: vec!["4433".parse().unwrap()],
+                bind: None,
+            },
+        );
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ListenGranted("laptop".into(), 4433))
+        );
     }
 
     #[test]

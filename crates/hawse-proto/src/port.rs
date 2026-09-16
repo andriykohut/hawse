@@ -112,6 +112,10 @@ impl PortSpan {
     pub fn is_empty(&self) -> bool {
         false
     }
+
+    pub fn contains_number(&self, n: u16) -> bool {
+        self.first <= n && n <= self.last
+    }
 }
 
 impl PortRequest {

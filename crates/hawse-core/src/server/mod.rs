@@ -72,9 +72,11 @@ impl Server {
             max_streams: cfg.limits.streams_per_client,
         };
         let endpoint = quic::listen(cfg.listen, tls, tuning)?;
+        let mut ports = PortAllocator::new(cfg.dynamic_ports);
+        ports.reserve(cfg.listen.port());
         let shared = Arc::new(Shared {
             policy: Policy::from_config(cfg),
-            ports: Mutex::new(PortAllocator::new(cfg.dynamic_ports)),
+            ports: Mutex::new(ports),
             buffer: usize::try_from(cfg.transport.buffer.0).expect("a validated buffer"),
             sessions: Mutex::new(HashMap::new()),
         });
