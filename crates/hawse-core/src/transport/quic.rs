@@ -16,8 +16,9 @@ use crate::tls;
 use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError};
 
 /// Both transports take one of these, though it lives here. `stream_window` and `congestion` are
-/// QUIC's alone — yamux fixes every stream's window at `DEFAULT_CREDIT` and TCP's congestion
-/// control is the kernel's — so under `Prefer::Tcp` the two are accepted, validated and inert.
+/// QUIC's alone — yamux guarantees every stream `DEFAULT_CREDIT` and grows it only into the
+/// connection window's slack, so there is no per-stream knob to set, and TCP's congestion control
+/// is the kernel's — so under `Prefer::Tcp` the two are accepted, validated and inert.
 /// `idle_timeout` becomes the TCP handshake deadline, the keepalive idle time and the close grace;
 /// `connection_window` and `max_streams` are honoured by both.
 #[derive(Clone, Copy, Debug)]

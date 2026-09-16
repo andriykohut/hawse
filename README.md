@@ -214,9 +214,10 @@ cut short.
 The rest of `[transport]` is not honoured equally by the two. Both use
 `idle_timeout` (on TCP it is the quiet time before the kernel starts probing),
 `connection_window` and `buffer`. `stream_window` and `congestion` are QUIC's
-alone: yamux gives every stream a fixed 256 KiB window and TCP's congestion
-control belongs to the kernel, so under `prefer = "tcp"` both settings are
-accepted, validated and then ignored.
+alone: yamux guarantees every stream 256 KiB and grows it only into the
+connection window's slack, so there is no per-stream knob to set, and TCP's
+congestion control belongs to the kernel — so under `prefer = "tcp"` both
+settings are accepted, validated and then ignored.
 
 ## Logging
 

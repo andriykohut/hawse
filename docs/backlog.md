@@ -243,6 +243,8 @@ phase 1. Each says what the code does today and what the fix would be.
 - **Two live processes sharing one key supersede each other forever.** Each `Shutdown` triggers the other's reconnect. Intended consequence of one-session-per-key; phase 2's backoff should at least make it slow, and the server log should say which remote won.
 - **A session that panics between insert and retire leaves its map entry.** Every later session for that key then pays the full 5 s supersede wait. Make the entry removal a drop guard.
 - **TIME_WAIT can refuse an immediate rebind of a freed fixed port** despite `SO_REUSEADDR`. Pre-existing; a retry-once on `EADDRINUSE` for fixed ports would cover it.
+- **A SIGINT during dial is not cancel-aware.** `Client::run_once` awaits `self.connect(remote)` outside the cancel-aware `select!`; only the post-connect loop watches `cancel`. Same as pre-branch, so not a regression against `main` — but dropping the 2 s probe deadline raised the wait from ≤2 s to quinn's ~30 s default `idle_timeout`, so `systemctl stop` can now block that long mid-dial. Make the dial itself cancel-aware.
+- **The fatal-`DisconnectCause` predicate is duplicated.** `client/mod.rs` and `hawse/src/commands/client.rs` each independently test `matches!(cause, DisconnectCause::Config(_))`; nothing keeps the two in sync, and drift would make the CLI print "retrying in 5 s" for a cause that exits, or the reverse. Expose the predicate once from `hawse-core` and have the CLI call it.
 
 ### From the bind setting
 
