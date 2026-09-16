@@ -137,6 +137,10 @@ impl Server {
     /// waiting up to 5 s for sessions to drain first.
     pub async fn serve(self, cancel: CancellationToken) {
         let sessions = TaskTracker::new();
+        let tcp = &self.tcp;
+        // An instant, not a duration: the arm holding it is rebuilt every time another arm wins,
+        // and a relative sleep would restart from zero each time and never elapse.
+        let mut resume_tcp: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 () = cancel.cancelled() => break,
@@ -151,14 +155,24 @@ impl Server {
                         }
                     });
                 }
-                accepted = self.tcp.accept() => {
+                // The pause waits inside this arm rather than in its body, so a descriptor
+                // shortage on the TCP side cannot stall QUIC, which needs no descriptor of its own.
+                accepted = async move {
+                    if let Some(at) = resume_tcp {
+                        tokio::time::sleep_until(at).await;
+                    }
+                    tcp.accept().await
+                } => {
                     let socket = match accepted {
-                        Ok((socket, _)) => socket,
+                        Ok((socket, _)) => {
+                            resume_tcp = None;
+                            socket
+                        }
                         Err(err) if out_of_descriptors(&err) => {
                             tracing::warn!(err = %chain(&err), "tcp accept failed");
-                            // Every accept fails until something closes, so without this the loop
+                            // Every accept fails until something closes, so without this the arm
                             // spins on it.
-                            tokio::time::sleep(ACCEPT_BACKOFF).await;
+                            resume_tcp = Some(tokio::time::Instant::now() + ACCEPT_BACKOFF);
                             continue;
                         }
                         Err(err) => {
@@ -201,10 +215,12 @@ mod tests {
     fn a_descriptor_shortage_is_told_apart_from_a_reset_connection() {
         assert!(out_of_descriptors(&io::Error::from_raw_os_error(ENFILE)));
         assert!(out_of_descriptors(&io::Error::from_raw_os_error(EMFILE)));
-        // What a peer resetting between the SYN and the accept produces.
-        assert!(!out_of_descriptors(&io::Error::from(
-            io::ErrorKind::ConnectionAborted
-        )));
-        assert!(!out_of_descriptors(&io::Error::other("eproto")));
+        // Linux's ECONNABORTED and EPROTO — what a peer resetting between the SYN and the accept
+        // reaches this code as. They have to be errno values rather than `ErrorKind`s: a negative
+        // case carrying no errno at all leaves `Some(_)` passing for the allowlist.
+        for errno in [103, 71] {
+            assert!(!out_of_descriptors(&io::Error::from_raw_os_error(errno)));
+        }
+        assert!(!out_of_descriptors(&io::Error::other("not an os error")));
     }
 }
