@@ -108,7 +108,8 @@ pub struct DatagramHeader {
     pub session: u32,
 }
 
-/// Error codes for `SendStream::reset`, so the peer can tell why a stream was dropped.
+/// Error codes for `SendHalf::reset`. Only the QUIC transport carries them to the peer; a yamux
+/// peer reads end-of-stream with no code.
 pub mod reset {
     pub const UNKNOWN_SERVICE: u32 = 0x10;
     pub const LOCAL_REFUSED: u32 = 0x11;

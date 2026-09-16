@@ -152,7 +152,10 @@ async fn a_yamux_pair_round_trips_through_the_halves() {
     let (client, mut inbound) = yamux_pair().await;
     let (mut cs, mut cr) = halves(client);
 
-    cs.write_bytes(Bytes::from_static(b"ping")).await.unwrap();
+    // The enum's own AsyncWrite here and write_bytes for the reply, so one round trip covers both
+    // send paths.
+    cs.write_all(b"ping").await.unwrap();
+    cs.flush().await.unwrap();
 
     let server = inbound
         .recv()

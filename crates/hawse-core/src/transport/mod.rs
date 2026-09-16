@@ -65,8 +65,8 @@ impl SendHalf {
             Self::Quic(send) => {
                 let _: Result<(), quinn::ClosedStream> = send.reset(VarInt::from_u32(code));
             }
-            // Best effort: a close yamux cannot queue now still reaches the peer when the stream
-            // is dropped, as a RST frame rather than this FIN.
+            // Best effort: the one poll is Pending only if yamux's command channel is full, and
+            // the close then still reaches the peer when the stream drops, as a RST not this FIN.
             Self::Tcp(send) => {
                 let mut cx = Context::from_waker(Waker::noop());
                 let _: Poll<io::Result<()>> = AsyncWrite::poll_shutdown(Pin::new(send), &mut cx);
