@@ -52,8 +52,18 @@ pub enum Event {
         key: PublicKey,
     },
     Disconnected {
-        reason: String,
+        cause: DisconnectCause,
     },
+}
+
+/// `Config` came from an error retrying cannot fix; every other variant is worth retrying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisconnectCause {
+    Shutdown(String),
+    Unresponsive,
+    Denied,
+    Transport(String),
+    Config(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,19 +120,14 @@ impl Client {
     }
 
     /// Reconnects 5 s after every failure, including `Denied`, until `cancel` fires.
-    /// A message this config cannot encode ends it instead, since retrying cannot fix one.
+    /// A config-class failure ends it instead, since retrying cannot fix one.
     pub async fn run(&self, cancel: CancellationToken, events: mpsc::Sender<Event>) {
         while !cancel.is_cancelled() {
             match self.run_once(cancel.clone(), &events).await {
                 Ok(()) => return,
                 Err(err) => {
-                    let fatal = matches!(err, ClientError::Encode(_));
-                    emit(
-                        &events,
-                        Event::Disconnected {
-                            reason: chain(&err),
-                        },
-                    );
+                    let (fatal, cause) = classify(&err);
+                    emit(&events, Event::Disconnected { cause });
                     if fatal {
                         return;
                     }
@@ -304,6 +309,24 @@ impl Client {
 fn emit(events: &mpsc::Sender<Event>, event: Event) {
     if let Err(mpsc::error::TrySendError::Full(event)) = events.try_send(event) {
         tracing::debug!(?event, "dropped an event: the receiver is behind");
+    }
+}
+
+/// A bad address, DNS, TLS, identity, window sizing, or a message this config cannot
+/// encode is not something a reconnect could ever fix, so those are fatal.
+fn classify(err: &ClientError) -> (bool, DisconnectCause) {
+    match err {
+        ClientError::Shutdown(s) => (false, DisconnectCause::Shutdown(s.clone())),
+        ClientError::Unresponsive => (false, DisconnectCause::Unresponsive),
+        ClientError::Denied(_) => (false, DisconnectCause::Denied),
+        ClientError::Encode(_)
+        | ClientError::ServerAddr(_)
+        | ClientError::Resolve(..)
+        | ClientError::NoAddress(_)
+        | ClientError::Window
+        | ClientError::Tls(_)
+        | ClientError::Identity(_) => (true, DisconnectCause::Config(chain(err))),
+        _ => (false, DisconnectCause::Transport(chain(err))),
     }
 }
 

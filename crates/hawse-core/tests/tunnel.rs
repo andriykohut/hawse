@@ -7,12 +7,14 @@ use common::{
     DYNAMIC_PORTS, client_config, echo_server, expect_bound, free_port_outside_pool, next_event,
     server_config, start_client, start_server,
 };
-use hawse_core::client::{ClientError, Event};
+use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::identity::Identity;
 use hawse_core::transport::quic::QuicError;
 use hawse_proto::msg::BindFailure;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 fn ids() -> (Identity, Identity) {
     (Identity::generate().unwrap(), Identity::generate().unwrap())
@@ -437,25 +439,32 @@ async fn server_shutdown_tells_the_client_why() {
         &server_id,
     );
     let echo = echo_server().await;
-    let mut client = start_client(
-        client_config(
-            server.addr,
-            server.key,
-            &[("echo", &echo.to_string(), "any")],
-        ),
-        client_id,
+    let cfg = client_config(
+        server.addr,
+        server.key,
+        &[("echo", &echo.to_string(), "any")],
     );
-    expect_bound(&mut client.events, "echo").await;
+    // `Event::Disconnected` is only emitted by the retry loop, so this test drives
+    // `run` directly rather than the `run_once` harness `start_client` uses.
+    let (tx, mut events) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+    let client = Client::new(cfg, client_id);
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { client.run(cancel, tx).await }
+    });
+    expect_bound(&mut events, "echo").await;
 
     server.cancel.cancel();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), client.task)
-        .await
-        .expect("the client hears the shutdown within 10 s")
-        .unwrap();
-    assert!(
-        matches!(outcome, Err(ClientError::Shutdown(_))),
-        "{outcome:?}"
-    );
+    match next_event(&mut events).await {
+        Event::Disconnected {
+            cause: DisconnectCause::Shutdown(why),
+        } => assert!(why.contains("shut")),
+        other => panic!("expected shutdown disconnect, got {other:?}"),
+    }
+
+    cancel.cancel();
+    task.await.unwrap();
     server.task.await.unwrap();
 }
 

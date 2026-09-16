@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use hawse_core::client::{Client, Event};
+use hawse_core::client::{Client, DisconnectCause, Event};
 use hawse_core::config::split_host_port;
 use hawse_core::identity::Identity;
 use miette::{IntoDiagnostic as _, WrapErr as _};
@@ -47,7 +47,19 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
                 Event::Denied { key } => tracing::warn!(
                     "not authorized. on the server, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"\nthen wait; retrying every 5 s"
                 ),
-                Event::Disconnected { reason } => {
+                Event::Disconnected { cause } => {
+                    let reason = match cause {
+                        DisconnectCause::Shutdown(why) => {
+                            format!("server ended the session: {why}")
+                        }
+                        DisconnectCause::Unresponsive => "server stopped answering".to_owned(),
+                        DisconnectCause::Denied => {
+                            "this machine's key is not authorized on the server".to_owned()
+                        }
+                        DisconnectCause::Transport(reason) | DisconnectCause::Config(reason) => {
+                            reason
+                        }
+                    };
                     tracing::warn!(%reason, "disconnected; retrying in 5 s");
                 }
             }
