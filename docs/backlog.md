@@ -152,9 +152,11 @@ phase 1. Each says what the code does today and what the fix would be.
 - `quic_retry`, `auth_failures_per_minute` and `udp_sessions_per_service`
   parse but do not take effect yet, and nothing warns that they are ignored.
   `transport.stream_window` and `transport.congestion` join them under
-  `prefer = "tcp"`, where yamux fixes the stream window and the kernel owns
-  congestion control: both are validated and then silently inert. The README
-  and `Tuning` now say so; a warning at startup would say it louder.
+  `prefer = "tcp"`, where yamux guarantees every stream 256 KiB and grows it
+  only into the connection window's slack, leaving no per-stream knob, and the
+  kernel owns congestion control: both are validated and then silently inert.
+  The README and `Tuning` now say so; a warning at startup would say it
+  louder.
 
 ### Pump
 
