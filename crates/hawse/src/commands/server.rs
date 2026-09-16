@@ -24,7 +24,7 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
         .into_diagnostic()
         .wrap_err("cannot start the server")?;
     let addr = server.local_addr();
-    tracing::info!(%addr, transport = "quic", "listening");
+    tracing::info!(%addr, transports = "quic/udp, tcp", "listening");
     tracing::info!(key = %identity.public_key(), "server key");
     if cfg.clients.is_empty() {
         tracing::warn!(config = %located.file.display(), "no clients are authorized yet; add a [clients.NAME] table with the client's key");

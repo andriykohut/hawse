@@ -61,6 +61,9 @@ pub struct ClientPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub auth_failures_per_minute: u32,
+    /// Costs 256 KiB of receive window per stream on the TCP fallback, where yamux guarantees
+    /// every stream that much and the connection window has to cover the whole guarantee: the
+    /// default 4096 reserves ~1 GiB per session against QUIC's 64 MiB for the same config.
     pub streams_per_client: u32,
     pub udp_sessions_per_service: u32,
 }
@@ -136,6 +139,9 @@ pub struct Expose {
     pub proxy_protocol: bool,
 }
 
+/// `Auto` dials exactly what `Quic` does today. It stays a distinct setting because it is where
+/// the TCP fallback returns once a visitor stream can report that it arrived whole; until then
+/// hawse will not pick a transport on which a truncated transfer looks complete.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Prefer {
@@ -185,6 +191,10 @@ pub enum ConfigError {
     Name(NameError),
     #[error("listen port cannot be 0")]
     ListenPort,
+    #[error("listen port {0} falls inside dynamic_ports; move the pool or the port")]
+    ListenInPool(u16),
+    #[error("client `{0}` is granted the listen port {1}; a grant cannot name it")]
+    ListenGranted(String, u16),
     #[error("transport buffer must be between 1 KiB and 1 GiB, not {0} bytes")]
     Buffer(u64),
     #[error("transport stream_window must be at least 1 byte and under 4 GiB, not {0} bytes")]
@@ -193,17 +203,27 @@ pub enum ConfigError {
     ConnectionWindow,
     #[error("transport stream_window of {0} bytes is larger than connection_window of {1} bytes")]
     Windows(u64, u64),
+    #[error(
+        "transport idle_timeout must be at least 1s, not {0:?}; the TCP fallback sets its keepalive in whole seconds, and anything shorter rounds down to a zero the kernel rejects"
+    )]
+    IdleTimeout(Duration),
+    #[error("limits streams_per_client cannot be 0")]
+    StreamsPerClient,
 }
 
-/// A zero buffer reads nothing at all: `BytesMut` never gains capacity and the pump takes the
-/// empty read for end of stream.
 fn validate_transport(
     buffer: ByteSize,
     stream_window: ByteSize,
     connection_window: ByteSize,
+    idle_timeout: Duration,
 ) -> Result<(), ConfigError> {
+    // A zero buffer reads nothing at all: `BytesMut` never gains capacity and the pump takes the
+    // empty read for end of stream.
     if !(1024..=1 << 30).contains(&buffer.0) {
         return Err(ConfigError::Buffer(buffer.0));
+    }
+    if idle_timeout < Duration::from_secs(1) {
+        return Err(ConfigError::IdleTimeout(idle_timeout));
     }
     if stream_window.0 == 0 || u32::try_from(stream_window.0).is_err() {
         return Err(ConfigError::StreamWindow(stream_window.0));
@@ -222,11 +242,30 @@ impl ServerConfig {
         if self.listen.port() == 0 {
             return Err(ConfigError::ListenPort);
         }
+        let listen = self.listen.port();
+        if self.dynamic_ports.contains_number(listen) {
+            return Err(ConfigError::ListenInPool(listen));
+        }
+        for (name, policy) in &self.clients {
+            if policy
+                .ports
+                .iter()
+                .any(|r| r.first <= listen && listen <= r.last)
+            {
+                return Err(ConfigError::ListenGranted(name.clone(), listen));
+            }
+        }
         validate_transport(
             self.transport.buffer,
             self.transport.stream_window,
             self.transport.connection_window,
+            self.transport.idle_timeout,
         )?;
+        // A zero budget is not "no limit": yamux answers the first stream over the cap by tearing
+        // the connection down.
+        if self.limits.streams_per_client == 0 {
+            return Err(ConfigError::StreamsPerClient);
+        }
         let mut seen: BTreeMap<PublicKey, &str> = BTreeMap::new();
         for (client, policy) in &self.clients {
             name::validate(client).map_err(|e| ConfigError::ClientName(client.clone(), e))?;
@@ -251,6 +290,7 @@ impl ClientConfig {
             self.transport.buffer,
             self.transport.stream_window,
             self.transport.connection_window,
+            self.transport.idle_timeout,
         )?;
         for (service, expose) in &self.expose {
             name::validate(service).map_err(|e| ConfigError::ServiceName(service.clone(), e))?;
@@ -355,6 +395,10 @@ local = "localhost:3000"
 prefer = "tcp"
 "#;
 
+    fn sample_key() -> PublicKey {
+        PublicKey::from_bytes([7u8; 32])
+    }
+
     #[test]
     fn bind_defaults_to_every_interface_and_a_client_can_override_it() {
         let cfg: ServerConfig = toml::from_str(SERVER).unwrap();
@@ -449,6 +493,36 @@ prefer = "tcp"
     }
 
     #[test]
+    fn listen_port_inside_the_dynamic_pool_is_rejected() {
+        let cfg = ServerConfig {
+            listen: "127.0.0.1:40500".parse().unwrap(),
+            dynamic_ports: "40000-41000".parse().unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.validate(), Err(ConfigError::ListenInPool(40500)));
+    }
+
+    #[test]
+    fn a_grant_naming_the_listen_port_is_rejected() {
+        let mut cfg = ServerConfig {
+            listen: "127.0.0.1:4433".parse().unwrap(),
+            ..Default::default()
+        };
+        cfg.clients.insert(
+            "laptop".into(),
+            ClientPolicy {
+                key: sample_key(),
+                ports: vec!["4433".parse().unwrap()],
+                bind: None,
+            },
+        );
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ListenGranted("laptop".into(), 4433))
+        );
+    }
+
+    #[test]
     fn validation_catches_names_keys_and_addresses() {
         let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
         let dup = cfg.clients["homelab"].clone();
@@ -498,6 +572,26 @@ prefer = "tcp"
         cfg.transport.stream_window = ByteSize(2 << 20);
         cfg.transport.connection_window = ByteSize(1 << 20);
         assert_eq!(cfg.validate(), Err(ConfigError::Windows(2 << 20, 1 << 20)));
+    }
+
+    #[test]
+    fn a_sub_second_idle_timeout_is_rejected() {
+        let short = Duration::from_millis(500);
+
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.transport.idle_timeout = short;
+        assert_eq!(cfg.validate(), Err(ConfigError::IdleTimeout(short)));
+
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.transport.idle_timeout = short;
+        assert_eq!(cfg.validate(), Err(ConfigError::IdleTimeout(short)));
+    }
+
+    #[test]
+    fn a_zero_stream_budget_is_rejected() {
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.limits.streams_per_client = 0;
+        assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
     }
 
     #[test]

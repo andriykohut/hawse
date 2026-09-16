@@ -48,6 +48,19 @@ impl PortAllocator {
     pub fn release(&mut self, port: Port) -> bool {
         self.in_use.remove(&port)
     }
+
+    /// Marks a port number as never-available for dynamic assignment, both TCP and UDP,
+    /// so the tunnel's own listen port cannot be handed to a visitor listener.
+    pub fn reserve(&mut self, number: u16) {
+        self.in_use.insert(Port {
+            number,
+            kind: Kind::Tcp,
+        });
+        self.in_use.insert(Port {
+            number,
+            kind: Kind::Udp,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -116,5 +129,17 @@ mod tests {
         });
         a.claim(tcp(40000)).unwrap();
         assert_eq!(a.claim_dynamic(Kind::Tcp), Some(tcp(40001)));
+    }
+
+    #[test]
+    fn a_reserved_port_is_never_handed_out_dynamically() {
+        let mut alloc = PortAllocator::new("40000-40002".parse().unwrap());
+        alloc.reserve(40001);
+        let mut handed = std::collections::HashSet::new();
+        while let Some(p) = alloc.claim_dynamic(Kind::Tcp) {
+            handed.insert(p.number);
+        }
+        assert!(!handed.contains(&40001));
+        assert_eq!(handed, std::collections::HashSet::from([40000, 40002]));
     }
 }

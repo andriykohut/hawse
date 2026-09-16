@@ -32,6 +32,58 @@ parked for later. Each entry says what it is and why it waits.
   Revisit only if the streaming benchmark shows the fallback transport is
   unusable for streaming; QUIC, the primary path, does not have this problem.
 
+## Deferred from the phase 2a transport work
+
+- **The TCP accept path is unauthenticated.** A semaphore now caps concurrent
+  in-flight TLS handshakes at 256, so exhaustion queues in the kernel backlog
+  instead of reaching EMFILE, but nothing yet rate-limits a peer that keeps
+  completing handshakes: `limits.auth_failures_per_minute` does not take effect,
+  and QUIC's listen side has `quic_retry` available for the same job and does
+  not use it either.
+- **No way to decline the TCP listener entirely.** The bind is mandatory and
+  fatal, so a deployment that will only ever use QUIC still publishes an
+  unauthenticated TCP accept path. A `transport.tcp_fallback = false` switch is
+  the right shape for it; it was left out as new config surface belonging to a
+  later phase.
+- **Streams past the control stream are never accepted on a session.** The
+  server calls `accept_bi` once, for the control stream, and never again. On
+  QUIC the extras sit in quinn's accept queue against the client's stream
+  credit; on TCP they accumulate in `TcpTransport`'s unbounded inbound channel
+  and hold slots in yamux's stream budget, which counts both directions in one
+  number and kills the connection rather than backpressuring when it is full.
+  Harmless against our own client, which never opens one, but it is an
+  authenticated client's way to end its own session.
+- **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
+  resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
+  a QUIC visitor's read fails with that code. On yamux neither half carries one,
+  so the visitor gets a clean empty close and reads a refusal as a service that
+  answered with nothing. Same root cause as the truncation gap below, and the
+  same application-level signal fixes both.
+- **`transport.prefer = "auto"` does not fall back to TCP.** It dials QUIC and
+  nothing else, because yamux hands a reset stream to its reader as a clean
+  end-of-stream: a transfer cut short on the fallback arrives looking complete,
+  and neither end can tell. Moving a user onto that because their network blocks
+  UDP trades a loud failure for a silent one, so the fallback is reachable only
+  by asking for it. Give the tunnel an application-level completeness signal — a
+  trailer on each visitor stream, or a length the reader checks — and
+  `Client::connect`'s `Prefer::Auto` arm can fall back again. Lifting the gate
+  means splitting `Prefer::Auto` back off `Prefer::Quic`, choosing a probe
+  deadline and racing `connect_tcp` after it; the deadline wants measuring
+  against a real high-latency path, since the 2 s this branch carried for a
+  while was sized on loopback and would fail a satellite handshake that works.
+- **`Transport::close()` does not complete symmetrically.** On QUIC it is
+  immediate and `endpoint.wait_idle()` bounds the flush; on TCP it only cancels
+  a token, and the driver then flushes yamux's queue for up to `idle_timeout` in
+  a task the server's `TaskTracker` does not know about. The process still
+  exits, but a shutdown that looks drained may not be.
+- **`SendHalf::Tcp::reset` is nondeterministic in the peer's write direction.**
+  Its single noop-waker `poll_shutdown` normally emits FIN, but when that poll
+  returns `Pending` the close reaches the peer as an RST from the stream drop
+  instead — leaving it in `RecvClosed` or in `Closed`, and only the latter fails
+  its next write. This matters for the completeness signal above: a probe-write
+  was the leading candidate for telling an abort from a clean finish, and it
+  cannot be, while `reset` picks between FIN and RST on timing.
+
 ## Deferred from the phase 1 reviews
 
 Findings from the task and branch reviews that were real but out of scope for
@@ -97,9 +149,14 @@ phase 1. Each says what the code does today and what the fix would be.
   each.
 - Nothing checks that `listen` falls outside `dynamic_ports`, or that a fixed
   grant does not name the listen port; both would fail later at bind time.
-- `congestion`, `quic_retry`, `auth_failures_per_minute`,
-  `udp_sessions_per_service` and `prefer` parse but do not take effect yet,
-  and nothing warns that they are ignored.
+- `quic_retry`, `auth_failures_per_minute` and `udp_sessions_per_service`
+  parse but do not take effect yet, and nothing warns that they are ignored.
+  `transport.stream_window` and `transport.congestion` join them under
+  `prefer = "tcp"`, where yamux guarantees every stream 256 KiB and grows it
+  only into the connection window's slack, leaving no per-stream knob, and the
+  kernel owns congestion control: both are validated and then silently inert.
+  The README and `Tuning` now say so; a warning at startup would say it
+  louder.
 
 ### Pump
 
@@ -125,9 +182,10 @@ phase 1. Each says what the code does today and what the fix would be.
 - `limits.streams_per_client` bounds the streams the client may open, not the
   visitor streams the server opens toward it.
 - Visitor accept is unbounded: only QUIC stream credit limits how many visitor
-  tasks one session can hold.
-- Connection close codes are ad hoc integer literals; name them next to the
-  `reset` codes in the proto crate.
+  tasks one session can hold. On the TCP fallback the consequence differs in
+  kind, not degree — yamux has no credit to push back with, and the first
+  stream past `max_num_streams` tears the whole connection down, so a burst
+  QUIC merely queues kills every service on that session at once.
 - A malformed control frame ends the session exactly like a clean EOF, logged
   as "client left".
 - `SO_KEEPALIVE` from spec section 5 is not set on visitor or local sockets.
@@ -169,8 +227,12 @@ phase 1. Each says what the code does today and what the fix would be.
   the transport trait arrives.
 - `client::Event` carries strings where it could carry errors; callers cannot
   match on a cause.
-- The listen port is not reserved from grants or from the dynamic pool, which
-  will collide once the TCP fallback listener shares it.
+- The listen port is reserved from grants and from the pool now: `validate`
+  rejects both, and `Server::bind` reserves the *resolved* port rather than the
+  configured one. The latter also closed a latent bug — a configured port of 0
+  used to reserve 0, and Linux's ephemeral range overlaps the default
+  40000-41000 pool, so the kernel could hand the listener a port the allocator
+  would later hand to a service.
 - Visitor accept needs a per-session bound before UDP sessions add another
   unbounded map.
 
@@ -183,6 +245,8 @@ phase 1. Each says what the code does today and what the fix would be.
 - **Two live processes sharing one key supersede each other forever.** Each `Shutdown` triggers the other's reconnect. Intended consequence of one-session-per-key; phase 2's backoff should at least make it slow, and the server log should say which remote won.
 - **A session that panics between insert and retire leaves its map entry.** Every later session for that key then pays the full 5 s supersede wait. Make the entry removal a drop guard.
 - **TIME_WAIT can refuse an immediate rebind of a freed fixed port** despite `SO_REUSEADDR`. Pre-existing; a retry-once on `EADDRINUSE` for fixed ports would cover it.
+- **A SIGINT during dial is not cancel-aware.** `Client::run_once` awaits `self.connect(remote)` outside the cancel-aware `select!`; only the post-connect loop watches `cancel`. Same as pre-branch, so not a regression against `main` — but dropping the 2 s probe deadline raised the wait from ≤2 s to quinn's ~30 s default `idle_timeout`, so `systemctl stop` can now block that long mid-dial. Make the dial itself cancel-aware.
+- **The fatal-`DisconnectCause` predicate is duplicated.** `client/mod.rs` and `hawse/src/commands/client.rs` each independently test `matches!(cause, DisconnectCause::Config(_))`; nothing keeps the two in sync, and drift would make the CLI print "retrying in 5 s" for a cause that exits, or the reverse. Expose the predicate once from `hawse-core` and have the CLI call it.
 
 ### From the bind setting
 

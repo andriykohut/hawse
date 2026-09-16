@@ -5,23 +5,23 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
-use hawse_proto::frame::{codec, decode, encode};
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage};
 use hawse_proto::port::{Port, PortRequest};
-use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
+use quinn::Endpoint;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::config::{ClientConfig, DEFAULT_PORT, split_host_port};
+use crate::config::{ClientConfig, DEFAULT_PORT, Prefer, split_host_port};
+use crate::control::Control;
 use crate::error::chain;
+use crate::frame::StreamFrameError;
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
-use crate::transport::quic::{self, QuicError, Tuning};
+use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
+use crate::transport::{CloseReason, Transport, TransportError, TransportKind, tcp};
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
@@ -30,13 +30,11 @@ const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 const DRAIN: Duration = Duration::from_secs(2);
 
-type Tx = FramedWrite<SendStream, LengthDelimitedCodec>;
-type Rx = FramedRead<RecvStream, LengthDelimitedCodec>;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Connected {
         remote: SocketAddr,
+        transport: TransportKind,
         name: String,
         agent: String,
     },
@@ -52,8 +50,18 @@ pub enum Event {
         key: PublicKey,
     },
     Disconnected {
-        reason: String,
+        cause: DisconnectCause,
     },
+}
+
+/// `Config` came from an error retrying cannot fix; every other variant is worth retrying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisconnectCause {
+    Shutdown(String),
+    Unresponsive,
+    Denied,
+    Transport(String),
+    Config(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +78,8 @@ pub enum ClientError {
     Tls(#[from] rustls::Error),
     #[error(transparent)]
     Quic(#[from] QuicError),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
     #[error("this machine's key {0} is not authorized on the server")]
     Denied(PublicKey),
     #[error("server sent {0} where a greeting was expected")]
@@ -94,6 +104,20 @@ pub struct Target {
 
 type Targets = Arc<RwLock<HashMap<u16, Target>>>;
 
+/// Carries the QUIC endpoint only so `wait_idle` can flush the close frame; the TCP transport has
+/// none.
+struct Dialed {
+    transport: Arc<dyn Transport>,
+    kind: TransportKind,
+    endpoint: Option<Endpoint>,
+    control: Control,
+}
+
+async fn open_control(transport: &Arc<dyn Transport>) -> Result<Control, ClientError> {
+    let (send, recv) = transport.open_bi().await?;
+    Ok(Control::new(send, recv))
+}
+
 pub struct Client {
     cfg: ClientConfig,
     identity: Identity,
@@ -109,20 +133,16 @@ impl Client {
         }
     }
 
-    /// Reconnects 5 s after every failure, including `Denied`, until `cancel` fires.
-    /// A message this config cannot encode ends it instead, since retrying cannot fix one.
+    /// Reconnects 5 s after every failure until `cancel` fires, except a `Config` cause,
+    /// which retrying cannot fix and ends it instead.
     pub async fn run(&self, cancel: CancellationToken, events: mpsc::Sender<Event>) {
         while !cancel.is_cancelled() {
             match self.run_once(cancel.clone(), &events).await {
                 Ok(()) => return,
                 Err(err) => {
-                    let fatal = matches!(err, ClientError::Encode(_));
-                    emit(
-                        &events,
-                        Event::Disconnected {
-                            reason: chain(&err),
-                        },
-                    );
+                    let cause = classify(&err);
+                    let fatal = matches!(cause, DisconnectCause::Config(_));
+                    emit(&events, Event::Disconnected { cause });
                     if fatal {
                         return;
                     }
@@ -142,42 +162,25 @@ impl Client {
         events: &mpsc::Sender<Event>,
     ) -> Result<(), ClientError> {
         let remote = self.resolve().await?;
-        let (endpoint, conn, mut tx, mut rx) = self.connect(remote).await?;
+        let Dialed {
+            transport,
+            kind,
+            endpoint,
+            mut control,
+        } = self.connect(remote).await?;
 
-        let name = self
-            .cfg
-            .name
-            .clone()
-            .or_else(|| Some(gethostname::gethostname().to_string_lossy().into_owned()));
-        send_msg(
-            &mut tx,
-            &ClientMessage::Hello {
-                name,
-                agent: AGENT.to_owned(),
-            },
-        )
-        .await?;
-
-        let (agent, client_name) = match next(&mut rx).await {
-            Some(ServerMessage::Welcome { agent, client_name }) => (agent, client_name),
-            Some(ServerMessage::Denied { key, .. }) => {
-                emit(events, Event::Denied { key });
-                conn.close(VarInt::from_u32(0), b"denied");
-                return Err(ClientError::Denied(key));
-            }
-            Some(_) => return Err(ClientError::Protocol("another message")),
-            None => return Err(ClientError::ControlClosed),
-        };
+        let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
         emit(
             events,
             Event::Connected {
                 remote,
+                transport: kind,
                 name: client_name,
                 agent,
             },
         );
 
-        self.send_binds(&mut tx).await?;
+        self.send_binds(&mut control).await?;
 
         self.targets.write().expect("targets lock").clear();
         let tasks = TaskTracker::new();
@@ -196,11 +199,11 @@ impl Client {
                         break Err(ClientError::Unresponsive);
                     }
                     nonce += 1;
-                    if let Err(err) = send_msg(&mut tx, &ClientMessage::Ping { nonce }).await {
+                    if let Err(err) = send_msg(&mut control, &ClientMessage::Ping { nonce }).await {
                         break Err(err);
                     }
                 }
-                msg = next(&mut rx) => {
+                msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = Instant::now();
                     match msg {
@@ -218,7 +221,7 @@ impl Client {
                             emit(events, Event::BindFailed { service, reason });
                         }
                         ServerMessage::Ping { nonce } => {
-                            if let Err(err) = send_msg(&mut tx, &ClientMessage::Pong { nonce }).await {
+                            if let Err(err) = send_msg(&mut control, &ClientMessage::Pong { nonce }).await {
                                 break Err(err);
                             }
                         }
@@ -229,28 +232,104 @@ impl Client {
                         }
                     }
                 }
-                incoming = conn.accept_bi() => {
+                incoming = transport.accept_bi() => {
                     match incoming {
                         Ok((send, recv)) => {
-                            tasks.spawn(visitor::serve(send, recv, Arc::clone(&self.targets), buffer));
+                            let visitor = visitor::serve(send, recv, Arc::clone(&self.targets), buffer);
+                            // A yamux stream dies with the transport that opened it, so the task
+                            // keeps one alive for as long as it pumps.
+                            let held = Arc::clone(&transport);
+                            tasks.spawn(async move {
+                                visitor.await;
+                                drop(held);
+                            });
                         }
-                        Err(err) => break Err(QuicError::from(err).into()),
+                        Err(err) => break Err(err.into()),
                     }
                 }
             }
         };
 
         tasks.close();
-        conn.close(VarInt::from_u32(0), b"bye");
+        transport.close(CloseReason::Shutdown);
         let _ = tokio::time::timeout(DRAIN, tasks.wait()).await;
-        endpoint.wait_idle().await;
+        if let Some(endpoint) = endpoint {
+            endpoint.wait_idle().await;
+        }
         outcome
     }
 
-    async fn connect(
+    /// Returns the server's agent and the name it knows this client by. A refusal is reported and
+    /// closed here, so a caller that sees `ClientError::Denied` has nothing left to do.
+    async fn greet(
         &self,
-        remote: SocketAddr,
-    ) -> Result<(Endpoint, Connection, Tx, Rx), ClientError> {
+        control: &mut Control,
+        transport: &Arc<dyn Transport>,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<(String, String), ClientError> {
+        let name = self
+            .cfg
+            .name
+            .clone()
+            .or_else(|| Some(gethostname::gethostname().to_string_lossy().into_owned()));
+        send_msg(
+            control,
+            &ClientMessage::Hello {
+                name,
+                agent: AGENT.to_owned(),
+            },
+        )
+        .await?;
+        match control.next::<ServerMessage>().await {
+            Some(ServerMessage::Welcome { agent, client_name }) => Ok((agent, client_name)),
+            Some(ServerMessage::Denied { key, .. }) => {
+                emit(events, Event::Denied { key });
+                transport.close(CloseReason::Denied);
+                Err(ClientError::Denied(key))
+            }
+            Some(_) => Err(ClientError::Protocol("another message")),
+            None => Err(ClientError::ControlClosed),
+        }
+    }
+
+    async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        match self.cfg.transport.prefer {
+            // `Auto` dials QUIC and nothing else while yamux delivers a reset stream as a clean
+            // end-of-stream: a fallback would answer blocked UDP with a transport on which a
+            // truncated transfer arrives looking complete. Deadline-free for the same reason —
+            // with nothing to fall back to, a probe could only fail a handshake that would land.
+            Prefer::Auto | Prefer::Quic => self.connect_quic(remote).await,
+            Prefer::Tcp => self.connect_tcp(remote).await,
+        }
+    }
+
+    async fn connect_quic(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        let (tls, tuning) = self.dial_settings()?;
+        let endpoint = quic::dialer(tls, tuning, remote)?;
+        let transport: Arc<dyn Transport> =
+            Arc::new(QuicTransport(quic::connect(&endpoint, remote).await?));
+        let control = open_control(&transport).await?;
+        Ok(Dialed {
+            transport,
+            kind: TransportKind::Quic,
+            endpoint: Some(endpoint),
+            control,
+        })
+    }
+
+    async fn connect_tcp(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        let (tls, tuning) = self.dial_settings()?;
+        let transport: Arc<dyn Transport> = Arc::new(tcp::connect(remote, tls, tuning).await?);
+        let control = open_control(&transport).await?;
+        Ok(Dialed {
+            transport,
+            kind: TransportKind::Tcp,
+            endpoint: None,
+            control,
+        })
+    }
+
+    fn dial_settings(&self) -> Result<(rustls::ClientConfig, Tuning), ClientError> {
         let (cert, key) = self.identity.certificate()?;
         let tls = tls::client_config(cert, key, self.cfg.server_key, tls::provider())?;
         let tuning = Tuning {
@@ -261,15 +340,10 @@ impl Client {
             connection_window: self.cfg.transport.connection_window.0,
             max_streams: Tuning::CLIENT.max_streams,
         };
-        let endpoint = quic::dialer(tls, tuning, remote)?;
-        let conn = quic::connect(&endpoint, remote).await?;
-        let (send, recv) = conn.open_bi().await.map_err(QuicError::from)?;
-        let tx = FramedWrite::new(send, codec());
-        let rx = FramedRead::new(recv, codec());
-        Ok((endpoint, conn, tx, rx))
+        Ok((tls, tuning))
     }
 
-    async fn send_binds(&self, tx: &mut Tx) -> Result<(), ClientError> {
+    async fn send_binds(&self, control: &mut Control) -> Result<(), ClientError> {
         for (service, expose) in &self.cfg.expose {
             let (kind, port) = match expose.port {
                 PortRequest::Any(kind) => (kind, None),
@@ -282,7 +356,7 @@ impl Client {
                 allow: expose.allow.clone(),
                 proxy_protocol: expose.proxy_protocol,
             };
-            send_msg(tx, &bind).await?;
+            send_msg(control, &bind).await?;
         }
         Ok(())
     }
@@ -307,12 +381,73 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
     }
 }
 
-async fn send_msg(tx: &mut Tx, msg: &ClientMessage) -> Result<(), ClientError> {
-    let bytes = encode(msg).map_err(ClientError::Encode)?;
-    tx.send(bytes).await.map_err(|_| ClientError::ControlClosed)
+/// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
+/// sizing, or a message this config cannot encode. DNS failing (`Resolve`, `NoAddress`) is
+/// transient, not a config problem, so it maps to `Transport` and keeps retrying. So does a dial
+/// that found nothing: the server may be down, or the path blocked only for now.
+fn classify(err: &ClientError) -> DisconnectCause {
+    match err {
+        ClientError::Shutdown(s) => DisconnectCause::Shutdown(s.clone()),
+        ClientError::Unresponsive => DisconnectCause::Unresponsive,
+        ClientError::Denied(_) => DisconnectCause::Denied,
+        ClientError::Encode(_)
+        | ClientError::ServerAddr(_)
+        | ClientError::Window
+        | ClientError::Tls(_)
+        | ClientError::Identity(_) => DisconnectCause::Config(chain(err)),
+        _ => DisconnectCause::Transport(chain(err)),
+    }
 }
 
-async fn next(rx: &mut Rx) -> Option<ServerMessage> {
-    let frame = rx.next().await?.ok()?;
-    decode(&frame).ok()
+/// A frame the message itself couldn't fill is a config bug worth giving up on; a stream the
+/// peer has already closed is not, so `classify` needs the two kept apart.
+async fn send_msg(control: &mut Control, msg: &ClientMessage) -> Result<(), ClientError> {
+    control.send(msg).await.map_err(|err| match err {
+        StreamFrameError::Io(_) => ClientError::ControlClosed,
+        StreamFrameError::Frame(err) => ClientError::Encode(err),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use hawse_proto::frame::FrameError;
+
+    use super::*;
+
+    #[test]
+    fn a_resolver_failure_is_worth_retrying() {
+        let resolve =
+            ClientError::Resolve("example.invalid:443".to_owned(), std::io::Error::other("x"));
+        let no_address = ClientError::NoAddress("example.invalid:443".to_owned());
+        assert!(matches!(classify(&resolve), DisconnectCause::Transport(_)));
+        assert!(matches!(
+            classify(&no_address),
+            DisconnectCause::Transport(_)
+        ));
+    }
+
+    #[test]
+    fn a_dial_that_reached_nobody_is_worth_retrying() {
+        let quic = ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
+        let tcp = ClientError::Transport(TransportError::Io(std::io::Error::other("x")));
+        assert!(matches!(classify(&quic), DisconnectCause::Transport(_)));
+        assert!(matches!(classify(&tcp), DisconnectCause::Transport(_)));
+    }
+
+    #[test]
+    fn a_config_error_ends_the_retry_loop() {
+        let cases = [
+            ClientError::ServerAddr("bad".to_owned()),
+            ClientError::Window,
+            ClientError::Tls(rustls::Error::General("boom".to_owned())),
+            ClientError::Identity(IdentityError::WrongAlgorithm("rsa".to_owned())),
+            ClientError::Encode(FrameError::TooLarge(0)),
+        ];
+        for err in cases {
+            assert!(
+                matches!(classify(&err), DisconnectCause::Config(_)),
+                "{err:?}"
+            );
+        }
+    }
 }

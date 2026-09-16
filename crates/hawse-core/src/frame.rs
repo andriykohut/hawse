@@ -1,20 +1,20 @@
 use hawse_proto::frame::{self, FrameError, MAX_FRAME};
-use quinn::{RecvStream, SendStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::transport::{RecvHalf, SendHalf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StreamFrameError {
     #[error(transparent)]
     Frame(#[from] FrameError),
-    #[error("stream write failed")]
-    Write(#[from] quinn::WriteError),
-    #[error("stream read failed")]
-    Read(#[from] quinn::ReadExactError),
+    #[error("stream i/o failed")]
+    Io(#[from] std::io::Error),
 }
 
 /// Reads exactly one frame and leaves the stream positioned at the first byte after it, unlike a codec, which reads ahead.
-pub async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T, StreamFrameError> {
+pub async fn read_frame<T: DeserializeOwned>(recv: &mut RecvHalf) -> Result<T, StreamFrameError> {
     let mut len = [0u8; 4];
     recv.read_exact(&mut len).await?;
     let len = u32::from_le_bytes(len) as usize;
@@ -28,7 +28,7 @@ pub async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T,
 
 /// Matches `hawse_proto::frame::codec()`'s wire format bit-for-bit, so the two are interchangeable across a stream.
 pub async fn write_frame<T: Serialize>(
-    send: &mut SendStream,
+    send: &mut SendHalf,
     value: &T,
 ) -> Result<(), StreamFrameError> {
     let body = frame::encode(value)?;

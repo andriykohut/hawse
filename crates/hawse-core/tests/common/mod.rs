@@ -1,16 +1,22 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::io;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_core::client::{Client, ClientError, Event};
-use hawse_core::config::{ClientConfig, ClientPolicy, ClientTransport, Expose, ServerConfig};
+use hawse_core::config::{
+    ClientConfig, ClientPolicy, ClientTransport, Expose, Prefer, ServerConfig,
+};
 use hawse_core::identity::Identity;
-use hawse_core::server::Server;
+use hawse_core::server::{Server, ServerError};
 use hawse_core::tls;
-use hawse_core::transport::quic::{self, Tuning};
+use hawse_core::transport::Transport;
+use hawse_core::transport::quic::{self, QuicTransport, Tuning};
+use hawse_core::transport::tcp;
 use hawse_proto::key::PublicKey;
 use hawse_proto::port::{Port, PortSpan};
 use quinn::{Connection, Endpoint};
@@ -25,6 +31,16 @@ pub struct Pair {
     pub client: Connection,
     pub server_endpoint: Endpoint,
     pub client_endpoint: Endpoint,
+}
+
+impl Pair {
+    pub fn client_transport(&self) -> Arc<dyn Transport> {
+        Arc::new(QuicTransport(self.client.clone()))
+    }
+
+    pub fn server_transport(&self) -> Arc<dyn Transport> {
+        Arc::new(QuicTransport(self.server.clone()))
+    }
 }
 
 pub async fn quic_pair() -> Pair {
@@ -54,6 +70,40 @@ pub async fn quic_pair() -> Pair {
         client,
         server_endpoint,
         client_endpoint,
+    }
+}
+
+pub struct TcpPair {
+    pub client: Arc<dyn Transport>,
+    pub server: Arc<dyn Transport>,
+    pub client_key: PublicKey,
+    pub server_key: PublicKey,
+}
+
+pub async fn tcp_pair() -> TcpPair {
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let (cert, key) = server_id.certificate().unwrap();
+    let server_tls = Arc::new(tls::server_config(cert, key, tls::provider()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (cert, key) = client_id.certificate().unwrap();
+    let client_tls =
+        tls::client_config(cert, key, server_id.public_key(), tls::provider()).unwrap();
+    let (server, client) = tokio::join!(
+        async {
+            let (stream, _) = listener.accept().await.unwrap();
+            tcp::accept(stream, server_tls, Tuning::SERVER)
+                .await
+                .unwrap()
+        },
+        tcp::connect(addr, client_tls, Tuning::CLIENT),
+    );
+    TcpPair {
+        client: Arc::new(client.unwrap()),
+        server: Arc::new(server),
+        client_key: client_id.public_key(),
+        server_key: server_id.public_key(),
     }
 }
 
@@ -89,8 +139,24 @@ pub fn server_config(clients: &[(&str, PublicKey, &[&str])]) -> ServerConfig {
     cfg
 }
 
+/// Draws another listen port when the TCP half of the bind loses a race: on port 0 the kernel
+/// picks a port free on *UDP* for QUIC, and the server then demands that same number on TCP, which
+/// the independent port spaces do not promise. No production config reaches this, as
+/// `ConfigError::ListenPort` rejects a listen port of 0.
+fn bind_retrying(cfg: &ServerConfig, identity: &Identity) -> Server {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match Server::bind(cfg, identity) {
+            Err(ServerError::Listen(_, err))
+                if err.kind() == io::ErrorKind::AddrInUse && attempts < 16 => {}
+            result => return result.unwrap(),
+        }
+    }
+}
+
 pub fn start_server(cfg: &ServerConfig, identity: &Identity) -> RunningServer {
-    let server = Server::bind(cfg, identity).unwrap();
+    let server = bind_retrying(cfg, identity);
     let addr = server.local_addr();
     let cancel = CancellationToken::new();
     let task = tokio::spawn(server.serve(cancel.clone()));
@@ -126,6 +192,21 @@ pub fn client_config(
         name: Some("test".to_owned()),
         expose,
         transport: ClientTransport::default(),
+    }
+}
+
+pub fn client_config_over(
+    server_addr: SocketAddr,
+    server_key: PublicKey,
+    exposes: &[(&str, &str, &str)],
+    prefer: Prefer,
+) -> ClientConfig {
+    ClientConfig {
+        transport: ClientTransport {
+            prefer,
+            ..ClientTransport::default()
+        },
+        ..client_config(server_addr, server_key, exposes)
     }
 }
 

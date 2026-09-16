@@ -9,8 +9,8 @@ repository.workspace = true
 
 [features]
 default = ["aws-lc-rs"]
-ring = ["quinn/rustls-ring", "rustls/ring", "rcgen/ring"]
-aws-lc-rs = ["quinn/rustls-aws-lc-rs", "rustls/aws_lc_rs", "rcgen/aws_lc_rs"]
+ring = ["quinn/rustls-ring", "rustls/ring", "rcgen/ring", "tokio-rustls/ring"]
+aws-lc-rs = ["quinn/rustls-aws-lc-rs", "rustls/aws_lc_rs", "rcgen/aws_lc_rs", "tokio-rustls/aws_lc_rs"]
 
 [dependencies]
 hawse-proto.workspace = true
@@ -27,9 +27,11 @@ serde.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 x509-parser.workspace = true
+yamux.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

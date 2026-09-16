@@ -73,6 +73,8 @@ pub enum BindFailure {
     NotGranted,
     InUse,
     BadPort,
+    BadName,
+    Unsupported,
 }
 
 impl fmt::Display for BindFailure {
@@ -81,6 +83,8 @@ impl fmt::Display for BindFailure {
             BindFailure::NotGranted => "port is not granted to this client",
             BindFailure::InUse => "port is already in use on the server",
             BindFailure::BadPort => "port cannot be bound",
+            BindFailure::BadName => "service name is not valid",
+            BindFailure::Unsupported => "this build does not support that bind yet",
         })
     }
 }
@@ -92,17 +96,39 @@ pub struct StreamHeader {
     pub listener: SocketAddr,
 }
 
+/// The first frame on every stream the server opens toward the client. UDP adds a `Bulk` variant in phase 2b.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamOpen {
+    Visitor(StreamHeader),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatagramHeader {
     pub service_id: u16,
     pub session: u32,
 }
 
-/// Error codes for `SendStream::reset`, so the peer can tell why a stream was dropped.
+/// Error codes for `SendHalf::reset`. Only the QUIC transport carries them to the peer; a yamux
+/// peer reads end-of-stream with no code.
 pub mod reset {
     pub const UNKNOWN_SERVICE: u32 = 0x10;
     pub const LOCAL_REFUSED: u32 = 0x11;
     pub const ABORTED: u32 = 0x12;
+}
+
+/// Error codes for `Transport::close`. Only the QUIC transport carries them to the peer; yamux's
+/// go-away has no room for one, so a TCP peer learns nothing but that the connection ended.
+pub mod close {
+    pub const SHUTDOWN: u32 = 0x00;
+    pub const SUPERSEDED: u32 = 0x01;
+    pub const DENIED: u32 = 0x02;
+    pub const NO_KEY: u32 = 0x03;
+    pub const NO_HELLO: u32 = 0x04;
+    pub const BAD_HELLO: u32 = 0x05;
+    pub const DUPLICATE_HELLO: u32 = 0x06;
+    pub const UNRESPONSIVE: u32 = 0x07;
+    pub const PEER_LEFT: u32 = 0x08;
+    pub const CONTROL_CLOSED: u32 = 0x09;
 }
 
 #[cfg(test)]
@@ -169,7 +195,9 @@ mod tests {
                 prop_oneof![
                     Just(BindFailure::NotGranted),
                     Just(BindFailure::InUse),
-                    Just(BindFailure::BadPort)
+                    Just(BindFailure::BadPort),
+                    Just(BindFailure::BadName),
+                    Just(BindFailure::Unsupported)
                 ]
             )
                 .prop_map(|(service, reason)| ServerMessage::BindFailed { service, reason }),
@@ -207,6 +235,39 @@ mod tests {
             session: 7,
         };
         assert!(encode(&h).unwrap().len() <= 6);
+    }
+
+    #[test]
+    fn bind_failure_display_names_each_case() {
+        assert_eq!(
+            BindFailure::NotGranted.to_string(),
+            "port is not granted to this client"
+        );
+        assert_eq!(
+            BindFailure::InUse.to_string(),
+            "port is already in use on the server"
+        );
+        assert_eq!(BindFailure::BadPort.to_string(), "port cannot be bound");
+        assert_eq!(
+            BindFailure::BadName.to_string(),
+            "service name is not valid"
+        );
+        assert_eq!(
+            BindFailure::Unsupported.to_string(),
+            "this build does not support that bind yet"
+        );
+    }
+
+    #[test]
+    fn stream_open_visitor_round_trips() {
+        let header = StreamHeader {
+            service_id: 7,
+            visitor: "203.0.113.9:5000".parse().unwrap(),
+            listener: "127.0.0.1:2222".parse().unwrap(),
+        };
+        let open = StreamOpen::Visitor(header);
+        let bytes = crate::frame::encode(&open).unwrap();
+        assert_eq!(crate::frame::decode::<StreamOpen>(&bytes).unwrap(), open);
     }
 
     #[test]

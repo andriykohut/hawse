@@ -27,6 +27,19 @@ fn free_udp_port() -> u16 {
         .port()
 }
 
+/// The server answers its listen port on UDP and on TCP, and the two port spaces are independent:
+/// a port the kernel hands out as free on UDP can be taken on TCP, and the server then refuses to
+/// start rather than come up without the fallback.
+fn free_listen_port() -> u16 {
+    for _ in 0..16 {
+        let port = free_udp_port();
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no port free on both UDP and TCP in 16 tries");
+}
+
 fn free_tcp_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -50,7 +63,7 @@ fn echo_round_trip_through_real_binaries() {
     let dir = tempfile::tempdir().unwrap();
     let server_key = keygen(&dir.path().join("server.key"));
     let client_key = keygen(&dir.path().join("client.key"));
-    let server_port = free_udp_port();
+    let server_port = free_listen_port();
     let public_port = free_tcp_port();
 
     let echo = TcpListener::bind("127.0.0.1:0").unwrap();

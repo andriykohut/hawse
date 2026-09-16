@@ -1,21 +1,20 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use hawse_proto::msg::StreamHeader;
+use hawse_proto::msg::{StreamHeader, StreamOpen};
 use hawse_proto::port::Port;
-use quinn::Connection;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use super::Shared;
+use super::{ACCEPT_BACKOFF, Shared, out_of_descriptors};
 use crate::error::chain;
 use crate::frame::write_frame;
 use crate::pump::pump;
+use crate::transport::Transport;
 
 /// Owns `port`'s claim on the allocator for as long as the socket is open.
 pub async fn serve(
-    conn: Connection,
+    transport: Arc<dyn Transport>,
     listener: TcpListener,
     service_id: u16,
     port: Port,
@@ -31,9 +30,16 @@ pub async fn serve(
         };
         let (socket, visitor) = match accepted {
             Ok(accepted) => accepted,
-            Err(err) => {
+            Err(err) if out_of_descriptors(&err) => {
                 tracing::warn!(err = %chain(&err), "accept failed");
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Every accept fails until something closes, so without this the loop spins on it.
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+                continue;
+            }
+            // Anything else is one visitor's doing — see `out_of_descriptors` — and this is the
+            // published port, so pausing would hand a stranger its accept rate.
+            Err(err) => {
+                tracing::debug!(err = %chain(&err), "accept failed");
                 continue;
             }
         };
@@ -41,9 +47,11 @@ pub async fn serve(
             continue;
         };
         let _ = socket.set_nodelay(true);
-        let conn = conn.clone();
+        // Held by the task for the whole pump, not just for `open_bi`: on the TCP transport the
+        // stream halves do not keep the connection alive, and the last `Arc` dropped ends it.
+        let transport = Arc::clone(&transport);
         tasks.spawn(async move {
-            let (mut send, recv) = match conn.open_bi().await {
+            let (mut send, recv) = match transport.open_bi().await {
                 Ok(streams) => streams,
                 Err(err) => {
                     tracing::debug!(%visitor, err = %chain(&err), "cannot open stream");
@@ -55,7 +63,7 @@ pub async fn serve(
                 visitor,
                 listener: listener_addr,
             };
-            if let Err(err) = write_frame(&mut send, &header).await {
+            if let Err(err) = write_frame(&mut send, &StreamOpen::Visitor(header)).await {
                 tracing::debug!(%visitor, err = %chain(&err), "header write failed");
                 return;
             }

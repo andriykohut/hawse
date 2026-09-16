@@ -6,6 +6,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hawse_core::pump::pump;
+use hawse_core::transport::{RecvHalf, SendHalf};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 fn pattern(len: usize, seed: u64) -> Vec<u8> {
@@ -25,7 +26,12 @@ async fn half_close_lets_the_other_direction_finish() {
     let pair = common::quic_pair().await;
     let (send, recv) = pair.client.open_bi().await.unwrap();
     let (near, far) = tokio::io::duplex(64 * 1024);
-    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024));
+    let pumped = tokio::spawn(pump(
+        near,
+        SendHalf::Quic(send),
+        RecvHalf::Quic(recv),
+        16 * 1024,
+    ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
     far_wr.write_all(b"ping").await.unwrap();
@@ -50,7 +56,12 @@ async fn moves_large_payloads_intact_both_ways() {
     let pair = common::quic_pair().await;
     let (send, recv) = pair.client.open_bi().await.unwrap();
     let (near, far) = tokio::io::duplex(256 * 1024);
-    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024));
+    let pumped = tokio::spawn(pump(
+        near,
+        SendHalf::Quic(send),
+        RecvHalf::Quic(recv),
+        16 * 1024,
+    ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
     let up = pattern(LEN, 1);
@@ -91,7 +102,8 @@ async fn frames_round_trip_on_raw_streams() {
     use hawse_core::frame::{read_frame, write_frame};
     use hawse_proto::msg::StreamHeader;
     let pair = common::quic_pair().await;
-    let (mut send, _recv) = pair.client.open_bi().await.unwrap();
+    let (send, _recv) = pair.client.open_bi().await.unwrap();
+    let mut send = SendHalf::Quic(send);
     let header = StreamHeader {
         service_id: 9,
         visitor: "203.0.113.5:5555".parse().unwrap(),
@@ -99,10 +111,13 @@ async fn frames_round_trip_on_raw_streams() {
     };
     write_frame(&mut send, &header).await.unwrap();
     send.write_all(b"payload").await.unwrap();
-    send.finish().unwrap();
-    let (_send, mut recv) = pair.server.accept_bi().await.unwrap();
+    send.finish().await;
+    let (_send, recv) = pair.server.accept_bi().await.unwrap();
+    let mut recv = RecvHalf::Quic(recv);
     assert_eq!(read_frame::<StreamHeader>(&mut recv).await.unwrap(), header);
-    assert_eq!(recv.read_to_end(64).await.unwrap(), b"payload");
+    let mut rest = Vec::new();
+    recv.read_to_end(&mut rest).await.unwrap();
+    assert_eq!(rest, b"payload");
 }
 
 /// Fails every read deterministically, so `pump`'s socket-to-stream half always aborts there.
@@ -139,7 +154,8 @@ impl AsyncWrite for BoomOnRead {
 #[tokio::test]
 async fn abort_resets_the_stream_for_the_peer() {
     let pair = common::quic_pair().await;
-    let (mut send, recv) = pair.client.open_bi().await.unwrap();
+    let (send, recv) = pair.client.open_bi().await.unwrap();
+    let mut send = SendHalf::Quic(send);
     // One byte so the server's accept_bi sees the stream before the pump aborts it.
     send.write_all(b"x").await.unwrap();
 
@@ -154,7 +170,7 @@ async fn abort_resets_the_stream_for_the_peer() {
         }
     });
 
-    let result = pump(BoomOnRead, send, recv, 16 * 1024).await;
+    let result = pump(BoomOnRead, send, RecvHalf::Quic(recv), 16 * 1024).await;
     assert!(result.is_err());
 
     let peer_err = tokio::time::timeout(Duration::from_secs(5), accepted)
