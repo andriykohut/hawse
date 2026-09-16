@@ -119,14 +119,15 @@ impl Client {
         }
     }
 
-    /// Reconnects 5 s after every failure, including `Denied`, until `cancel` fires.
-    /// A config-class failure ends it instead, since retrying cannot fix one.
+    /// Reconnects 5 s after every failure until `cancel` fires, except a `Config` cause,
+    /// which retrying cannot fix and ends it instead.
     pub async fn run(&self, cancel: CancellationToken, events: mpsc::Sender<Event>) {
         while !cancel.is_cancelled() {
             match self.run_once(cancel.clone(), &events).await {
                 Ok(()) => return,
                 Err(err) => {
-                    let (fatal, cause) = classify(&err);
+                    let cause = classify(&err);
+                    let fatal = matches!(cause, DisconnectCause::Config(_));
                     emit(&events, Event::Disconnected { cause });
                     if fatal {
                         return;
@@ -312,21 +313,20 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
     }
 }
 
-/// A bad address, DNS, TLS, identity, window sizing, or a message this config cannot
-/// encode is not something a reconnect could ever fix, so those are fatal.
-fn classify(err: &ClientError) -> (bool, DisconnectCause) {
+/// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
+/// sizing, or a message this config cannot encode. DNS failing (`Resolve`, `NoAddress`) is
+/// transient, not a config problem, so it maps to `Transport` and keeps retrying.
+fn classify(err: &ClientError) -> DisconnectCause {
     match err {
-        ClientError::Shutdown(s) => (false, DisconnectCause::Shutdown(s.clone())),
-        ClientError::Unresponsive => (false, DisconnectCause::Unresponsive),
-        ClientError::Denied(_) => (false, DisconnectCause::Denied),
+        ClientError::Shutdown(s) => DisconnectCause::Shutdown(s.clone()),
+        ClientError::Unresponsive => DisconnectCause::Unresponsive,
+        ClientError::Denied(_) => DisconnectCause::Denied,
         ClientError::Encode(_)
         | ClientError::ServerAddr(_)
-        | ClientError::Resolve(..)
-        | ClientError::NoAddress(_)
         | ClientError::Window
         | ClientError::Tls(_)
-        | ClientError::Identity(_) => (true, DisconnectCause::Config(chain(err))),
-        _ => (false, DisconnectCause::Transport(chain(err))),
+        | ClientError::Identity(_) => DisconnectCause::Config(chain(err)),
+        _ => DisconnectCause::Transport(chain(err)),
     }
 }
 
@@ -338,4 +338,40 @@ async fn send_msg(tx: &mut Tx, msg: &ClientMessage) -> Result<(), ClientError> {
 async fn next(rx: &mut Rx) -> Option<ServerMessage> {
     let frame = rx.next().await?.ok()?;
     decode(&frame).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use hawse_proto::frame::FrameError;
+
+    use super::*;
+
+    #[test]
+    fn a_resolver_failure_is_worth_retrying() {
+        let resolve =
+            ClientError::Resolve("example.invalid:443".to_owned(), std::io::Error::other("x"));
+        let no_address = ClientError::NoAddress("example.invalid:443".to_owned());
+        assert!(matches!(classify(&resolve), DisconnectCause::Transport(_)));
+        assert!(matches!(
+            classify(&no_address),
+            DisconnectCause::Transport(_)
+        ));
+    }
+
+    #[test]
+    fn a_config_error_ends_the_retry_loop() {
+        let cases = [
+            ClientError::ServerAddr("bad".to_owned()),
+            ClientError::Window,
+            ClientError::Tls(rustls::Error::General("boom".to_owned())),
+            ClientError::Identity(IdentityError::WrongAlgorithm("rsa".to_owned())),
+            ClientError::Encode(FrameError::TooLarge(0)),
+        ];
+        for err in cases {
+            assert!(
+                matches!(classify(&err), DisconnectCause::Config(_)),
+                "{err:?}"
+            );
+        }
+    }
 }
