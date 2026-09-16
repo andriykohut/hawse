@@ -4,17 +4,21 @@
 expect the binary at `/usr/local/bin/hawse` and their config at
 `/etc/hawse/server.toml` or `/etc/hawse/client.toml`.
 
-    install -m755 target/release/hawse /usr/local/bin/hawse
-    install -m644 contrib/hawse-server.service /etc/systemd/system/
-    systemctl daemon-reload
-    systemctl enable --now hawse-server
+```sh
+install -m755 target/release/hawse /usr/local/bin/hawse
+install -m644 contrib/hawse-server.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now hawse-server
+```
 
 Both units run under `DynamicUser=yes`, so there is no account to create and no
 uid to keep track of. systemd creates `/etc/hawse` for the config, which stays
 owned by root, and `/var/lib/hawse` for the key, which the service owns. Point
 the config at the second one:
 
-    key = "/var/lib/hawse/server.key"
+```toml
+key = "/var/lib/hawse/server.key"
+```
 
 A relative `key` resolves next to the config file, where the service cannot
 write.
@@ -24,8 +28,10 @@ write.
 Because the service owns its key, generate it by starting the service and
 reading the key it prints:
 
-    systemctl start hawse-server
-    journalctl -u hawse-server -n 20 | grep 'server key'
+```sh
+systemctl start hawse-server
+journalctl -u hawse-server -n 20 | grep 'server key'
+```
 
 The same works for the client. Paste the client's key into the server's
 `server.toml` and restart the server; configuration is read at startup only.
@@ -35,8 +41,10 @@ The same works for the client. Paste the client's key into the server's
 `DynamicUser` runs unprivileged, so binding a public port under 1024 needs one
 capability. Add it to both lines in the server unit:
 
-    CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-    AmbientCapabilities=CAP_NET_BIND_SERVICE
+```ini
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+```
 
 ## Different paths
 
@@ -44,10 +52,12 @@ capability. Add it to both lines in the server unit:
 `/etc` is not a good home. On TrueNAS SCALE, for example, put both the binary
 and the config on a pool:
 
-    [Service]
-    ExecStart=
-    ExecStart=/mnt/pool/apps/hawse/hawse client --config /mnt/pool/apps/hawse/client.toml --log pretty
-    ReadWritePaths=/mnt/pool/apps/hawse
+```ini
+[Service]
+ExecStart=
+ExecStart=/mnt/pool/apps/hawse/hawse client --config /mnt/pool/apps/hawse/client.toml --log pretty
+ReadWritePaths=/mnt/pool/apps/hawse
+```
 
 `ProtectSystem=strict` makes everything outside the unit's own directories
 read-only, so a config directory elsewhere needs the `ReadWritePaths` line above

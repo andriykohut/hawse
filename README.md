@@ -61,18 +61,24 @@ Besides the features named above, configuration hot reload and the `expose`,
 
 ## Building
 
-    cargo build --release
+```sh
+cargo build --release
+```
 
 The binary is `target/release/hawse`. Cross builds use the `ring` crypto
 provider in place of the default `aws-lc-rs`:
 
-    cargo build --release --no-default-features --features ring
+```sh
+cargo build --release --no-default-features --features ring
+```
 
 ## Usage
 
 Start the server:
 
-    hawse server
+```sh
+hawse server
+```
 
 On first run it generates `server.key` and prints the corresponding public key.
 Connections from unknown keys are refused, so until a client is authorized the
@@ -80,32 +86,40 @@ server accepts nothing.
 
 Generate a key on the client:
 
-    hawse keygen
+```sh
+hawse keygen
+```
 
 Add the printed key to `server.toml` on the server, together with the ports
 that client may bind:
 
-    [clients.laptop]
-    key = "ed25519:AAAA..."
-    ports = ["2222"]
+```toml
+[clients.laptop]
+key = "ed25519:AAAA..."
+ports = ["2222"]
+```
 
 Restart the server. Configuration is read at startup only.
 
 Write `client.toml` on the client:
 
-    server = "tunnel.example.com:4433"
-    server_key = "ed25519:BBBB..."
+```toml
+server = "tunnel.example.com:4433"
+server_key = "ed25519:BBBB..."
 
-    [expose.ssh]
-    local = "127.0.0.1:22"
-    port = 2222
+[expose.ssh]
+local = "127.0.0.1:22"
+port = 2222
 
-    [expose.dev]
-    local = "127.0.0.1:3000"
+[expose.dev]
+local = "127.0.0.1:3000"
+```
 
 Then run:
 
-    hawse client
+```sh
+hawse client
+```
 
 The `ssh` service binds port 2222 on the server and forwards to port 22 on the
 client. The `dev` service sets no `port`, so the server assigns one from its
@@ -124,10 +138,12 @@ resolve against the directory containing the config file.
 
 Server settings and their defaults:
 
-    listen = "[::]:4433"
-    bind = "::"
-    key = "server.key"
-    dynamic_ports = "40000-41000"
+```toml
+listen = "[::]:4433"
+bind = "::"
+key = "server.key"
+dynamic_ports = "40000-41000"
+```
 
 The listen port is UDP, because QUIC runs over UDP. Public ports bound for
 clients are TCP.
@@ -135,8 +151,10 @@ clients are TCP.
 `congestion` selects the controller, on either end, for the data that end
 sends:
 
-    [transport]
-    congestion = "bbr"    # or "cubic", the default
+```toml
+[transport]
+congestion = "bbr"    # or "cubic", the default
+```
 
 The choice matters most on a path with a long round trip, where `cubic` keeps
 a shorter queue and `bbr` reaches a higher rate. Prefer `cubic` when the tunnel
@@ -148,11 +166,13 @@ have, which is the only way to settle it.
 every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
 the only thing that should reach them:
 
-    bind = "127.0.0.1"
+```toml
+bind = "127.0.0.1"
 
-    [clients.nas]
-    key = "ed25519:AAAA..."
-    ports = ["8096"]
+[clients.nas]
+key = "ed25519:AAAA..."
+ports = ["8096"]
+```
 
 A client may override the server-wide value with its own `bind`, so one server
 can keep some services behind a proxy and publish others directly.
