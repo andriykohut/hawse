@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_core::client::{Client, ClientError, Event};
@@ -10,7 +11,8 @@ use hawse_core::config::{ClientConfig, ClientPolicy, ClientTransport, Expose, Se
 use hawse_core::identity::Identity;
 use hawse_core::server::Server;
 use hawse_core::tls;
-use hawse_core::transport::quic::{self, Tuning};
+use hawse_core::transport::Transport;
+use hawse_core::transport::quic::{self, QuicTransport, Tuning};
 use hawse_proto::key::PublicKey;
 use hawse_proto::port::{Port, PortSpan};
 use quinn::{Connection, Endpoint};
@@ -25,6 +27,16 @@ pub struct Pair {
     pub client: Connection,
     pub server_endpoint: Endpoint,
     pub client_endpoint: Endpoint,
+}
+
+impl Pair {
+    pub fn client_transport(&self) -> Arc<dyn Transport> {
+        Arc::new(QuicTransport(self.client.clone()))
+    }
+
+    pub fn server_transport(&self) -> Arc<dyn Transport> {
+        Arc::new(QuicTransport(self.server.clone()))
+    }
 }
 
 pub async fn quic_pair() -> Pair {

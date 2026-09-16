@@ -2,6 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use hawse_proto::key::PublicKey;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
@@ -11,6 +13,7 @@ use rustls::pki_types::CertificateDer;
 
 use crate::config::Congestion;
 use crate::tls;
+use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tuning {
@@ -117,6 +120,56 @@ pub fn dialer(
 pub async fn connect(endpoint: &Endpoint, remote: SocketAddr) -> Result<Connection, QuicError> {
     // The pinned-key verifier ignores server names.
     Ok(endpoint.connect(remote, "hawse")?.await?)
+}
+
+#[derive(Debug)]
+pub struct QuicTransport(pub Connection);
+
+impl Transport for QuicTransport {
+    fn open_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>> {
+        Box::pin(async move {
+            let (send, recv) = self
+                .0
+                .open_bi()
+                .await
+                .map_err(|e| TransportError::Connection(Box::new(e)))?;
+            Ok((SendHalf::Quic(send), RecvHalf::Quic(recv)))
+        })
+    }
+
+    fn accept_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>> {
+        Box::pin(async move {
+            let (send, recv) = self
+                .0
+                .accept_bi()
+                .await
+                .map_err(|e| TransportError::Connection(Box::new(e)))?;
+            Ok((SendHalf::Quic(send), RecvHalf::Quic(recv)))
+        })
+    }
+
+    fn send_datagram(&self, data: Bytes) -> Result<(), TransportError> {
+        self.0
+            .send_datagram(data)
+            .map_err(|e| TransportError::Connection(Box::new(e)))
+    }
+
+    fn recv_datagram(&self) -> BoxFuture<'_, Result<Bytes, TransportError>> {
+        Box::pin(async move {
+            self.0
+                .read_datagram()
+                .await
+                .map_err(|e| TransportError::Connection(Box::new(e)))
+        })
+    }
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        self.0.max_datagram_size()
+    }
+
+    fn close(&self, reason: CloseReason) {
+        self.0.close(VarInt::from_u32(reason.code()), b"");
+    }
 }
 
 pub fn peer_key(conn: &Connection) -> Option<PublicKey> {

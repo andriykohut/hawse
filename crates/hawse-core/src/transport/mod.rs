@@ -34,11 +34,12 @@ pub enum TransportError {
     #[error("this transport has no datagrams")]
     NoDatagrams,
     #[error("stream i/o failed")]
-    Io(#[source] std::io::Error),
+    Io(#[source] io::Error),
 }
 
 /// `finish` ends the stream cleanly and the peer sees EOF; `reset` aborts it, so the peer sees a
 /// reset rather than a truncated payload delivered as complete.
+#[derive(Debug)]
 pub enum SendHalf {
     Quic(quinn::SendStream),
 }
@@ -66,6 +67,7 @@ impl SendHalf {
     }
 }
 
+#[derive(Debug)]
 pub enum RecvHalf {
     Quic(quinn::RecvStream),
 }
@@ -125,6 +127,9 @@ pub trait Transport: Send + Sync + 'static {
     fn accept_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>>;
     fn send_datagram(&self, data: Bytes) -> Result<(), TransportError>;
     fn recv_datagram(&self) -> BoxFuture<'_, Result<Bytes, TransportError>>;
+    /// `None` when this connection cannot carry datagrams, and the limit can move with the path MTU,
+    /// so it is not safe to cache.
     fn max_datagram_size(&self) -> Option<usize>;
+    /// Discards stream data still in flight, so anything the peer must read has to land first.
     fn close(&self, reason: CloseReason);
 }
