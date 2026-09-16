@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_core::client::{Client, ClientError, Event};
-use hawse_core::config::{ClientConfig, ClientPolicy, ClientTransport, Expose, ServerConfig};
+use hawse_core::config::{
+    ClientConfig, ClientPolicy, ClientTransport, Expose, Prefer, ServerConfig,
+};
 use hawse_core::identity::Identity;
 use hawse_core::server::Server;
 use hawse_core::tls;
@@ -173,6 +175,21 @@ pub fn client_config(
         name: Some("test".to_owned()),
         expose,
         transport: ClientTransport::default(),
+    }
+}
+
+pub fn client_config_over(
+    server_addr: SocketAddr,
+    server_key: PublicKey,
+    exposes: &[(&str, &str, &str)],
+    prefer: Prefer,
+) -> ClientConfig {
+    ClientConfig {
+        transport: ClientTransport {
+            prefer,
+            ..ClientTransport::default()
+        },
+        ..client_config(server_addr, server_key, exposes)
     }
 }
 

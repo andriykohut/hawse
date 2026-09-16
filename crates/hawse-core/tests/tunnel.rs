@@ -4,8 +4,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{
-    DYNAMIC_PORTS, client_config, echo_server, expect_bound, free_port_outside_pool, next_event,
-    server_config, start_client, start_server,
+    DYNAMIC_PORTS, client_config, client_config_over, echo_server, expect_bound,
+    free_port_outside_pool, next_event, server_config, start_client, start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
@@ -68,8 +68,7 @@ async fn a_loopback_bind_serves_visitors_on_loopback() {
     server.cancel.cancel();
 }
 
-#[tokio::test]
-async fn tcp_echo_through_the_tunnel() {
+async fn echo_through_the_tunnel(prefer: Prefer, expected: TransportKind) {
     let (server_id, client_id) = ids();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[])]),
@@ -77,16 +76,17 @@ async fn tcp_echo_through_the_tunnel() {
     );
     let echo = echo_server().await;
     let mut client = start_client(
-        client_config(
+        client_config_over(
             server.addr,
             server.key,
             &[("echo", &echo.to_string(), "any")],
+            prefer,
         ),
         client_id,
     );
 
     assert!(
-        matches!(next_event(&mut client.events).await, Event::Connected { name, transport, .. } if name == "test" && transport == TransportKind::Quic)
+        matches!(next_event(&mut client.events).await, Event::Connected { name, transport, .. } if name == "test" && transport == expected)
     );
     let port = expect_bound(&mut client.events, "echo").await;
     assert!(DYNAMIC_PORTS.contains(&port.number));
@@ -106,7 +106,16 @@ async fn tcp_echo_through_the_tunnel() {
 }
 
 #[tokio::test]
-async fn half_close_propagates_to_the_local_service() {
+async fn echoes_through_the_tunnel_over_quic() {
+    echo_through_the_tunnel(Prefer::Auto, TransportKind::Quic).await;
+}
+
+#[tokio::test]
+async fn echoes_through_the_tunnel_over_tcp() {
+    echo_through_the_tunnel(Prefer::Tcp, TransportKind::Tcp).await;
+}
+
+async fn half_close_propagates_to_the_local_service(prefer: Prefer) {
     let exchange = async {
         let (server_id, client_id) = ids();
         let server = start_server(
@@ -126,10 +135,11 @@ async fn half_close_propagates_to_the_local_service() {
             socket.shutdown().await.unwrap();
         });
         let mut client = start_client(
-            client_config(
+            client_config_over(
                 server.addr,
                 server.key,
                 &[("len", &local_addr.to_string(), "any")],
+                prefer,
             ),
             client_id,
         );
@@ -151,8 +161,16 @@ async fn half_close_propagates_to_the_local_service() {
 }
 
 #[tokio::test]
-async fn transfers_100_mib_intact() {
-    const TOTAL: usize = 100 * 1024 * 1024;
+async fn half_close_propagates_to_the_local_service_over_quic() {
+    half_close_propagates_to_the_local_service(Prefer::Auto).await;
+}
+
+#[tokio::test]
+async fn half_close_propagates_to_the_local_service_over_tcp() {
+    half_close_propagates_to_the_local_service(Prefer::Tcp).await;
+}
+
+async fn transfers_intact(prefer: Prefer, total: usize) {
     let transfer = async {
         let (server_id, client_id) = ids();
         let server = start_server(
@@ -161,10 +179,11 @@ async fn transfers_100_mib_intact() {
         );
         let echo = echo_server().await;
         let mut client = start_client(
-            client_config(
+            client_config_over(
                 server.addr,
                 server.key,
                 &[("echo", &echo.to_string(), "any")],
+                prefer,
             ),
             client_id,
         );
@@ -179,8 +198,8 @@ async fn transfers_100_mib_intact() {
                 .map(|i| u8::try_from(i % 251).expect("a remainder below 251 fits a byte"))
                 .collect();
             let mut sent = 0;
-            while sent < TOTAL {
-                let n = chunk.len().min(TOTAL - sent);
+            while sent < total {
+                let n = chunk.len().min(total - sent);
                 wr.write_all(&chunk[..n]).await.unwrap();
                 sent += n;
             }
@@ -189,7 +208,7 @@ async fn transfers_100_mib_intact() {
         let mut got = 0usize;
         let mut buf = vec![0u8; 65536];
         let mut expected = 0u32;
-        while got < TOTAL {
+        while got < total {
             let n = rd.read(&mut buf).await.unwrap();
             assert!(n > 0, "eof after {got} bytes");
             for &b in &buf[..n] {
@@ -203,11 +222,24 @@ async fn transfers_100_mib_intact() {
     };
     tokio::time::timeout(Duration::from_secs(60), transfer)
         .await
-        .expect("100 MiB round trip within 60 s");
+        .expect("the round trip finishes within 60 s");
 }
 
 #[tokio::test]
-async fn holds_512_visitor_streams_open_at_once() {
+async fn transfers_100_mib_intact_over_quic() {
+    transfers_intact(Prefer::Auto, 100 * 1024 * 1024).await;
+}
+
+/// Smaller than the QUIC variant to keep CI quick, not because the TCP path caps out here.
+#[tokio::test]
+async fn transfers_8_mib_intact_over_tcp() {
+    transfers_intact(Prefer::Tcp, 8 * 1024 * 1024).await;
+}
+
+/// 512 clears both multiplexers' stock ceilings: quinn grants 100 concurrent bidi streams, and
+/// yamux parks a new outbound stream past an unacknowledged backlog of 256 — a private constant
+/// with no setter, so a failure here cannot be tuned away.
+async fn holds_512_visitor_streams_open_at_once(prefer: Prefer) {
     let _ = rlimit::increase_nofile_limit(8192);
     let (server_id, client_id) = ids();
     let server = start_server(
@@ -216,10 +248,11 @@ async fn holds_512_visitor_streams_open_at_once() {
     );
     let echo = echo_server().await;
     let mut client = start_client(
-        client_config(
+        client_config_over(
             server.addr,
             server.key,
             &[("echo", &echo.to_string(), "any")],
+            prefer,
         ),
         client_id,
     );
@@ -242,8 +275,18 @@ async fn holds_512_visitor_streams_open_at_once() {
     };
     tokio::time::timeout(Duration::from_secs(20), burst)
         .await
-        .expect("512 streams within 20 s; quinn's default credit is 100");
+        .expect("512 concurrent streams within 20 s");
     server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn holds_512_visitor_streams_open_at_once_over_quic() {
+    holds_512_visitor_streams_open_at_once(Prefer::Auto).await;
+}
+
+#[tokio::test]
+async fn holds_512_visitor_streams_open_at_once_over_tcp() {
+    holds_512_visitor_streams_open_at_once(Prefer::Tcp).await;
 }
 
 #[tokio::test]
@@ -546,8 +589,10 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
     server.cancel.cancel();
 }
 
-#[tokio::test]
-async fn a_second_session_for_the_same_key_supersedes_the_first() {
+/// The first session's `ClientError::Shutdown` is what matters here: closing discards whatever is
+/// still in flight, so reading that message at all proves the shutdown linger held this transport
+/// open until the client had it.
+async fn a_second_session_for_the_same_key_supersedes_the_first(prefer: Prefer) {
     let (server_id, client_id) = ids();
     let granted = free_port_outside_pool(&[]).await;
     let server = start_server(
@@ -555,10 +600,11 @@ async fn a_second_session_for_the_same_key_supersedes_the_first() {
         &server_id,
     );
     let echo = echo_server().await.to_string();
-    let cfg = client_config(
+    let cfg = client_config_over(
         server.addr,
         server.key,
         &[("svc", &echo, &granted.to_string())],
+        prefer,
     );
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
@@ -586,39 +632,13 @@ async fn a_second_session_for_the_same_key_supersedes_the_first() {
 }
 
 #[tokio::test]
-async fn tcp_echo_over_the_fallback_transport() {
-    let (server_id, client_id) = ids();
-    let server = start_server(
-        &server_config(&[("test", client_id.public_key(), &[])]),
-        &server_id,
-    );
-    let echo = echo_server().await;
-    let mut cfg = client_config(
-        server.addr,
-        server.key,
-        &[("echo", &echo.to_string(), "any")],
-    );
-    cfg.transport.prefer = Prefer::Tcp;
-    let mut client = start_client(cfg, client_id);
+async fn a_second_session_for_the_same_key_supersedes_the_first_over_quic() {
+    a_second_session_for_the_same_key_supersedes_the_first(Prefer::Auto).await;
+}
 
-    assert!(
-        matches!(next_event(&mut client.events).await, Event::Connected { name, transport, .. } if name == "test" && transport == TransportKind::Tcp)
-    );
-    let port = expect_bound(&mut client.events, "echo").await;
-    assert!(DYNAMIC_PORTS.contains(&port.number));
-
-    let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
-        .await
-        .unwrap();
-    visitor.write_all(b"hello").await.unwrap();
-    let mut buf = [0u8; 5];
-    visitor.read_exact(&mut buf).await.unwrap();
-    assert_eq!(&buf, b"hello");
-
-    client.cancel.cancel();
-    assert!(client.task.await.unwrap().is_ok());
-    server.cancel.cancel();
-    server.task.await.unwrap();
+#[tokio::test]
+async fn a_second_session_for_the_same_key_supersedes_the_first_over_tcp() {
+    a_second_session_for_the_same_key_supersedes_the_first(Prefer::Tcp).await;
 }
 
 #[tokio::test]
