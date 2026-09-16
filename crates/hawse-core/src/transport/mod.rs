@@ -3,13 +3,14 @@ pub mod quic;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use hawse_proto::key::PublicKey;
 use quinn::VarInt;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
+use tokio_util::compat::Compat;
 
 /// The code travels to the peer, so these numbers are part of the protocol, not an internal enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,9 +42,13 @@ pub enum TransportError {
 
 /// `finish` ends the stream cleanly and the peer sees EOF; `reset` aborts it, so the peer sees a
 /// reset rather than a truncated payload delivered as complete.
+///
+/// `Tcp` cannot keep that second promise: yamux has no per-stream error code and hands a reset
+/// stream to its reader as end-of-stream, so a peer cannot tell an abort from a clean finish.
 #[derive(Debug)]
 pub enum SendHalf {
     Quic(quinn::SendStream),
+    Tcp(WriteHalf<Compat<yamux::Stream>>),
 }
 
 impl SendHalf {
@@ -51,6 +56,7 @@ impl SendHalf {
     pub async fn write_bytes(&mut self, data: Bytes) -> io::Result<()> {
         match self {
             Self::Quic(send) => send.write_chunk(data).await.map_err(io::Error::from),
+            Self::Tcp(send) => tokio::io::AsyncWriteExt::write_all(send, &data).await,
         }
     }
 
@@ -58,6 +64,12 @@ impl SendHalf {
         match self {
             Self::Quic(send) => {
                 let _: Result<(), quinn::ClosedStream> = send.reset(VarInt::from_u32(code));
+            }
+            // Best effort: a close yamux cannot queue now still reaches the peer when the stream
+            // is dropped, as a RST frame rather than this FIN.
+            Self::Tcp(send) => {
+                let mut cx = Context::from_waker(Waker::noop());
+                let _: Poll<io::Result<()>> = AsyncWrite::poll_shutdown(Pin::new(send), &mut cx);
             }
         }
     }
@@ -70,14 +82,18 @@ impl SendHalf {
 #[derive(Debug)]
 pub enum RecvHalf {
     Quic(quinn::RecvStream),
+    Tcp(ReadHalf<Compat<yamux::Stream>>),
 }
 
 impl RecvHalf {
+    /// yamux has no equivalent of QUIC's `STOP_SENDING`, so on `Tcp` this does nothing and the peer
+    /// keeps writing until the stream is dropped.
     pub fn stop(&mut self, code: u32) {
         match self {
             Self::Quic(recv) => {
                 let _: Result<(), quinn::ClosedStream> = recv.stop(VarInt::from_u32(code));
             }
+            Self::Tcp(_) => {}
         }
     }
 }
@@ -92,18 +108,21 @@ impl AsyncWrite for SendHalf {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             Self::Quic(send) => AsyncWrite::poll_write(Pin::new(send), cx, buf),
+            Self::Tcp(send) => AsyncWrite::poll_write(Pin::new(send), cx, buf),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Quic(send) => AsyncWrite::poll_flush(Pin::new(send), cx),
+            Self::Tcp(send) => AsyncWrite::poll_flush(Pin::new(send), cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Quic(send) => AsyncWrite::poll_shutdown(Pin::new(send), cx),
+            Self::Tcp(send) => AsyncWrite::poll_shutdown(Pin::new(send), cx),
         }
     }
 }
@@ -118,6 +137,7 @@ impl AsyncRead for RecvHalf {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Quic(recv) => AsyncRead::poll_read(Pin::new(recv), cx, buf),
+            Self::Tcp(recv) => AsyncRead::poll_read(Pin::new(recv), cx, buf),
         }
     }
 }
