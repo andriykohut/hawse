@@ -75,9 +75,17 @@ where
 
     let to_socket = async move {
         let mut total = 0u64;
-        while let Some(bytes) = recv.read_bytes(buffer).await.map_err(PumpError::Stream)? {
-            total += u64::try_from(bytes.len()).expect("usize fits u64");
-            writer.write_all(&bytes).await.map_err(PumpError::Socket)?;
+        let mut buf = vec![0u8; buffer];
+        loop {
+            let n = recv.read(&mut buf).await.map_err(PumpError::Stream)?;
+            if n == 0 {
+                break;
+            }
+            total += u64::try_from(n).expect("usize fits u64");
+            writer
+                .write_all(&buf[..n])
+                .await
+                .map_err(PumpError::Socket)?;
         }
         let _ = writer.shutdown().await;
         Ok::<u64, PumpError>(total)
