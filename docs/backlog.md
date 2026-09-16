@@ -18,9 +18,6 @@ parked for later. Each entry says what it is and why it waits.
 - **`hawse status`.** Needs a local admin socket on the running process to
   report connected clients, bound ports, and unknown keys that knocked.
 - **Windows.** Nothing in the design prevents it; not a v1 target.
-- **MIPS static linking.** The mipsel build links dynamically against
-  `/lib/ld-musl-mipsel-sf.so.1`; release packaging should try `+crt-static` and
-  fall back to documenting the loader requirement.
 - **Per-client allowlist ceiling on the server.** Server-side `allow` that
   intersects with client-declared allowlists. Useful once clients are not the
   server admin.
@@ -136,12 +133,8 @@ phase 1. Each says what the code does today and what the fix would be.
 
 ### Cross builds
 
-- The mipsel binary links dynamically against the musl loader, as the design
-  list above already records.
-- MIPS is proven to build and link, not to run; nothing executes the binary.
 - CI installs `cross` unpinned, so a new release can change the build under
   us; pin the version.
-- The cross workflow has never run on a real runner, only locally.
 
 ### Config
 
