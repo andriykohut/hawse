@@ -16,15 +16,27 @@ fn report(direction: &str, secs: f64) {
     );
 }
 
-// One test rather than two because cargo runs test functions in parallel: as separate tests the
-// two transfers would race over the same loopback and measure contention, not throughput.
+// One test rather than four because cargo runs test functions in parallel: split any further and
+// the transfers race over the same loopback and measure contention, not throughput. A debug build
+// reads about a quarter of these figures.
 #[tokio::test]
-#[ignore = "benchmark, run explicitly with --ignored --nocapture"]
-async fn throughput_over_quic_in_both_directions() {
+#[ignore = "benchmark, run explicitly with --release --ignored --nocapture"]
+async fn throughput_over_quic_and_the_tcp_fallback() {
     socket_to_stream().await;
     stream_to_socket().await;
+    let pair = common::tcp_pair().await;
+    report(
+        "tcp_socket_to_stream",
+        tcp_socket_to_stream(&*pair.client, &*pair.server).await,
+    );
+    let pair = common::tcp_pair().await;
+    report(
+        "tcp_stream_to_socket",
+        tcp_stream_to_socket(&*pair.client, &*pair.server).await,
+    );
     eprintln!(
-        "the two figures stop their clocks differently; compare each only against its own history"
+        "these four stop their clocks at different points and run different transports; \
+         compare each only against its own history"
     );
 }
 
@@ -124,25 +136,6 @@ async fn stream_to_socket() {
     let _ = pumped.await;
     assert_eq!(arrived, PAYLOAD);
     report("stream_to_socket", secs);
-}
-
-// TCP is new, so there is no baseline to defend: this records where the fallback starts.
-#[tokio::test]
-#[ignore = "benchmark, run explicitly with --ignored --nocapture"]
-async fn throughput_over_tcp_in_both_directions() {
-    let pair = common::tcp_pair().await;
-    report(
-        "tcp_socket_to_stream",
-        tcp_socket_to_stream(&*pair.client, &*pair.server).await,
-    );
-    let pair = common::tcp_pair().await;
-    report(
-        "tcp_stream_to_socket",
-        tcp_stream_to_socket(&*pair.client, &*pair.server).await,
-    );
-    eprintln!(
-        "the two figures stop their clocks differently; compare each only against its own history"
-    );
 }
 
 #[allow(clippy::similar_names)]

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::io;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use hawse_core::config::{
     ClientConfig, ClientPolicy, ClientTransport, Expose, Prefer, ServerConfig,
 };
 use hawse_core::identity::Identity;
-use hawse_core::server::Server;
+use hawse_core::server::{Server, ServerError};
 use hawse_core::tls;
 use hawse_core::transport::Transport;
 use hawse_core::transport::quic::{self, QuicTransport, Tuning};
@@ -138,8 +139,24 @@ pub fn server_config(clients: &[(&str, PublicKey, &[&str])]) -> ServerConfig {
     cfg
 }
 
+/// Draws another listen port when the TCP half of the bind loses a race: on port 0 the kernel
+/// picks a port free on *UDP* for QUIC, and the server then demands that same number on TCP, which
+/// the independent port spaces do not promise. No production config reaches this, as
+/// `ConfigError::ListenPort` rejects a listen port of 0.
+fn bind_retrying(cfg: &ServerConfig, identity: &Identity) -> Server {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match Server::bind(cfg, identity) {
+            Err(ServerError::Listen(_, err))
+                if err.kind() == io::ErrorKind::AddrInUse && attempts < 16 => {}
+            result => return result.unwrap(),
+        }
+    }
+}
+
 pub fn start_server(cfg: &ServerConfig, identity: &Identity) -> RunningServer {
-    let server = Server::bind(cfg, identity).unwrap();
+    let server = bind_retrying(cfg, identity);
     let addr = server.local_addr();
     let cancel = CancellationToken::new();
     let task = tokio::spawn(server.serve(cancel.clone()));
