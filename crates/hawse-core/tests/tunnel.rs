@@ -644,12 +644,14 @@ async fn a_second_session_for_the_same_key_supersedes_the_first_over_tcp() {
 #[tokio::test]
 async fn auto_reports_a_retryable_failure_and_never_dials_tcp() {
     let (server_id, client_id) = ids();
-    // Nothing answers UDP on this port, so the QUIC probe cannot finish. An accept on the
-    // listener would mean the client had fallen back to the TCP transport.
+    // Nothing answers UDP on this port, so the QUIC handshake can only end at the idle timeout —
+    // shortened here, since `Auto` carries no deadline of its own. An accept on the listener would
+    // mean the client had fallen back to the TCP transport.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let cfg = client_config(addr, server_id.public_key(), &[]);
+    let mut cfg = client_config(addr, server_id.public_key(), &[]);
     assert_eq!(cfg.transport.prefer, Prefer::Auto);
+    cfg.transport.idle_timeout = Duration::from_secs(1);
 
     let (tx, mut events) = mpsc::channel(256);
     let cancel = CancellationToken::new();
@@ -659,10 +661,13 @@ async fn auto_reports_a_retryable_failure_and_never_dials_tcp() {
         async move { client.run(cancel, tx).await }
     });
 
-    match next_event(&mut events).await {
-        Event::Disconnected {
+    let disconnect = tokio::time::timeout(Duration::from_secs(20), events.recv())
+        .await
+        .expect("a disconnect within 20 s");
+    match disconnect {
+        Some(Event::Disconnected {
             cause: DisconnectCause::Transport(_),
-        } => {}
+        }) => {}
         other => panic!("expected a retryable disconnect, got {other:?}"),
     }
     assert!(

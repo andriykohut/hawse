@@ -29,7 +29,6 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 const DRAIN: Duration = Duration::from_secs(2);
-const QUIC_PROBE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -81,10 +80,6 @@ pub enum ClientError {
     Quic(#[from] QuicError),
     #[error(transparent)]
     Transport(#[from] TransportError),
-    #[error(
-        "no QUIC connection within {0:?}; a network that blocks UDP needs transport.prefer = \"tcp\""
-    )]
-    Probe(Duration),
     #[error("this machine's key {0} is not authorized on the server")]
     Denied(PublicKey),
     #[error("server sent {0} where a greeting was expected")]
@@ -299,18 +294,12 @@ impl Client {
 
     async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
         match self.cfg.transport.prefer {
-            Prefer::Quic => self.connect_quic(remote).await,
+            // `Auto` dials QUIC and nothing else while yamux delivers a reset stream as a clean
+            // end-of-stream: a fallback would answer blocked UDP with a transport on which a
+            // truncated transfer arrives looking complete. Deadline-free for the same reason —
+            // with nothing to fall back to, a probe could only fail a handshake that would land.
+            Prefer::Auto | Prefer::Quic => self.connect_quic(remote).await,
             Prefer::Tcp => self.connect_tcp(remote).await,
-            Prefer::Auto => match tokio::time::timeout(QUIC_PROBE, self.connect_quic(remote)).await
-            {
-                Ok(Ok(dialed)) => Ok(dialed),
-                // The fallback belongs here — `_ => self.connect_tcp(remote).await` — and is
-                // absent because yamux delivers a reset stream as a clean end-of-stream: a
-                // truncated transfer over TCP arrives looking complete. A user gets that by
-                // asking for it, not by having UDP blocked.
-                Ok(Err(err)) => Err(err),
-                Err(_) => Err(ClientError::Probe(QUIC_PROBE)),
-            },
         }
     }
 
@@ -394,8 +383,8 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
 
 /// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
 /// sizing, or a message this config cannot encode. DNS failing (`Resolve`, `NoAddress`) is
-/// transient, not a config problem, so it maps to `Transport` and keeps retrying. So does a
-/// `Probe` that found no QUIC: the server may be down, or UDP blocked only for now.
+/// transient, not a config problem, so it maps to `Transport` and keeps retrying. So does a dial
+/// that found nothing: the server may be down, or the path blocked only for now.
 fn classify(err: &ClientError) -> DisconnectCause {
     match err {
         ClientError::Shutdown(s) => DisconnectCause::Shutdown(s.clone()),
@@ -438,9 +427,11 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_that_found_no_quic_is_worth_retrying() {
-        let probe = ClientError::Probe(QUIC_PROBE);
-        assert!(matches!(classify(&probe), DisconnectCause::Transport(_)));
+    fn a_dial_that_reached_nobody_is_worth_retrying() {
+        let quic = ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
+        let tcp = ClientError::Transport(TransportError::Io(std::io::Error::other("x")));
+        assert!(matches!(classify(&quic), DisconnectCause::Transport(_)));
+        assert!(matches!(classify(&tcp), DisconnectCause::Transport(_)));
     }
 
     #[test]
