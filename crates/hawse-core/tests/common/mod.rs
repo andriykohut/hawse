@@ -13,6 +13,7 @@ use hawse_core::server::Server;
 use hawse_core::tls;
 use hawse_core::transport::Transport;
 use hawse_core::transport::quic::{self, QuicTransport, Tuning};
+use hawse_core::transport::tcp;
 use hawse_proto::key::PublicKey;
 use hawse_proto::port::{Port, PortSpan};
 use quinn::{Connection, Endpoint};
@@ -67,6 +68,27 @@ pub async fn quic_pair() -> Pair {
         server_endpoint,
         client_endpoint,
     }
+}
+
+/// Returns `(client, server)`.
+pub async fn tcp_pair() -> (Arc<dyn Transport>, Arc<dyn Transport>) {
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let (cert, key) = server_id.certificate().unwrap();
+    let server_tls = Arc::new(tls::server_config(cert, key, tls::provider()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (cert, key) = client_id.certificate().unwrap();
+    let client_tls =
+        tls::client_config(cert, key, server_id.public_key(), tls::provider()).unwrap();
+    let (server, client) = tokio::join!(
+        async {
+            let (stream, _) = listener.accept().await.unwrap();
+            tcp::accept(stream, server_tls).await.unwrap()
+        },
+        tcp::connect(addr, client_tls),
+    );
+    (Arc::new(client.unwrap()), Arc::new(server))
 }
 
 pub struct RunningServer {

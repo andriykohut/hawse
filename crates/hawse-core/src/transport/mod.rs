@@ -1,4 +1,5 @@
 pub mod quic;
+pub mod tcp;
 
 use std::io;
 use std::net::SocketAddr;
@@ -12,7 +13,8 @@ use quinn::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
 use tokio_util::compat::Compat;
 
-/// The code travels to the peer, so these numbers are part of the protocol, not an internal enum.
+/// The code travels to a QUIC peer, so these numbers are part of the protocol, not an internal
+/// enum. yamux's go-away has no room for one, so a TCP peer learns only that the connection ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseReason {
     Shutdown,
