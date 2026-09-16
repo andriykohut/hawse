@@ -17,6 +17,8 @@ async fn throughput_over_quic() {
     let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
+    // Started before accept_bi: quinn only reveals a stream to the peer once a frame carries
+    // data for it, so accept_bi would hang forever waiting on a stream nothing has written to.
     let writer = tokio::spawn(async move {
         let chunk = vec![0x5a_u8; 1 << 20];
         let mut sent = 0usize;
@@ -33,6 +35,7 @@ async fn throughput_over_quic() {
     });
 
     let started = Instant::now();
+    // Only this direction is measured; the return path is finished at once so it cannot compete for the link.
     peer_send.finish().unwrap();
     let mut drain = vec![0u8; 1 << 20];
     while far_rd.read(&mut drain).await.unwrap_or(0) > 0 {}
