@@ -201,11 +201,33 @@ phase 1. Each says what the code does today and what the fix would be.
   connection at 2.6x. Shrinking the client's `stream_window` does not move it,
   so the queue is in congestion control and packet scheduling, not stream flow
   control.
-- **Favour streams that have transferred least.** quinn's `SendStream::set_priority`
-  sends buffered data from higher-priority streams first. Start every visitor
-  stream high and step it down as its byte count grows, so a request-shaped
-  stream jumps the queue and a stream pushing a hundred megabytes settles to the
-  back. The pump already counts bytes both ways, and no wire change is needed.
+- **Favour streams that have transferred least.** Written and parked on the
+  local `stream-priority-ladder` branch, unmeasured; `main` does not carry it.
+  A visitor stream keeps quinn's default priority of 0 until it has sent
+  64 KiB, then drops one step per doubling to a floor of -8 at 8 MiB, so a
+  request-shaped stream outranks one pushing a hundred megabytes. No wire
+  change and no config.
+
+  It waits on evidence because two objections look fatal on paper. Priority
+  only reorders what is sent inside one congestion window, so it cannot touch
+  the throughput gap recorded below, which is what motivated it. And every
+  fresh stream starts at 0, so a port taking a trickle of short connections can
+  hold a long transfer at the floor indefinitely: the starvation the ladder
+  exists to prevent, reached from the other side. Lifetime bytes also mislabels
+  a long-lived SSH or database connection as bulk, where a recent-window rate
+  would not.
+
+  To measure it, build the branch and `main`, run the service and `hawse
+  client` beside each other, `hawse server` on the public box, and the load
+  generator from the machine that consumes the traffic, which is the same
+  vantage as the numbers below and not the server. Alternate the two binaries
+  in one sitting under the same cap:
+
+      hawse-bench sink 9000
+      hawse-bench load <public-host>:<port> 30 200 12
+
+  A lower probe p99 at unchanged throughput is the ladder working. Lower
+  throughput is the starvation above, and the floor or the first step is wrong.
 - **Revisit the streaming criterion against evidence.** The 3x rule was written
   before anything existed and no configuration meets it, a direct connection
   included, so it does not discriminate.
@@ -220,3 +242,17 @@ phase 1. Each says what the code does today and what the fix would be.
   This is the evidence for revisiting connection-per-visitor, which was
   dismissed on loopback numbers that could not show the effect: a round trip of
   zero hides everything congestion control does.
+- **A fixed pool of connections per session.** Designed on 2026-09-16 in
+  `docs/superpowers/specs/2026-09-16-connection-pool-design.md`, spiked the
+  same day, and **not built**: the gate failed. Over the real 40 ms path,
+  bulk throughput was flat across one, two, four and eight client
+  connections (144-199 Mbit/s at one, 140-167 at more), because a single QUIC
+  connection already reached the home downlink's ceiling and left no idle
+  capacity for a pool to claim. The probe cost 142 ms idle and 145 ms under
+  load at every N, so there was no starvation to relieve either. The
+  2026-09-15 numbers that motivated the work (cubic 65 vs rathole 214) did
+  not reproduce, so the evidence for the pool did not survive a second look;
+  likely that evening's conditions or a handshake-bound harness, not
+  one-window-vs-many. Revisit only if a deployment shows one connection
+  failing to fill a path that parallel flows fill. The spec and
+  `~/code/hawse-bench-compare/spike/` keep the method.
