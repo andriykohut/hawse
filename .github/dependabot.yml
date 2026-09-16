@@ -4,7 +4,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    versioning-strategy: increase-if-necessary
     groups:
       cargo-compatible:
         update-types: [minor, patch]
