@@ -5,23 +5,23 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
-use hawse_proto::frame::{codec, decode, encode};
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage};
 use hawse_proto::port::{Port, PortRequest};
-use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
+use quinn::{Connection, Endpoint, VarInt};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::config::{ClientConfig, DEFAULT_PORT, split_host_port};
+use crate::control::Control;
 use crate::error::chain;
+use crate::frame::StreamFrameError;
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
 use crate::transport::quic::{self, QuicError, Tuning};
+use crate::transport::{RecvHalf, SendHalf};
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
@@ -29,9 +29,6 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 const DRAIN: Duration = Duration::from_secs(2);
-
-type Tx = FramedWrite<SendStream, LengthDelimitedCodec>;
-type Rx = FramedRead<RecvStream, LengthDelimitedCodec>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -148,7 +145,7 @@ impl Client {
         events: &mpsc::Sender<Event>,
     ) -> Result<(), ClientError> {
         let remote = self.resolve().await?;
-        let (endpoint, conn, mut tx, mut rx) = self.connect(remote).await?;
+        let (endpoint, conn, mut control) = self.connect(remote).await?;
 
         let name = self
             .cfg
@@ -156,7 +153,7 @@ impl Client {
             .clone()
             .or_else(|| Some(gethostname::gethostname().to_string_lossy().into_owned()));
         send_msg(
-            &mut tx,
+            &mut control,
             &ClientMessage::Hello {
                 name,
                 agent: AGENT.to_owned(),
@@ -164,7 +161,7 @@ impl Client {
         )
         .await?;
 
-        let (agent, client_name) = match next(&mut rx).await {
+        let (agent, client_name) = match control.next::<ServerMessage>().await {
             Some(ServerMessage::Welcome { agent, client_name }) => (agent, client_name),
             Some(ServerMessage::Denied { key, .. }) => {
                 emit(events, Event::Denied { key });
@@ -183,7 +180,7 @@ impl Client {
             },
         );
 
-        self.send_binds(&mut tx).await?;
+        self.send_binds(&mut control).await?;
 
         self.targets.write().expect("targets lock").clear();
         let tasks = TaskTracker::new();
@@ -202,11 +199,11 @@ impl Client {
                         break Err(ClientError::Unresponsive);
                     }
                     nonce += 1;
-                    if let Err(err) = send_msg(&mut tx, &ClientMessage::Ping { nonce }).await {
+                    if let Err(err) = send_msg(&mut control, &ClientMessage::Ping { nonce }).await {
                         break Err(err);
                     }
                 }
-                msg = next(&mut rx) => {
+                msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = Instant::now();
                     match msg {
@@ -224,7 +221,7 @@ impl Client {
                             emit(events, Event::BindFailed { service, reason });
                         }
                         ServerMessage::Ping { nonce } => {
-                            if let Err(err) = send_msg(&mut tx, &ClientMessage::Pong { nonce }).await {
+                            if let Err(err) = send_msg(&mut control, &ClientMessage::Pong { nonce }).await {
                                 break Err(err);
                             }
                         }
@@ -256,7 +253,7 @@ impl Client {
     async fn connect(
         &self,
         remote: SocketAddr,
-    ) -> Result<(Endpoint, Connection, Tx, Rx), ClientError> {
+    ) -> Result<(Endpoint, Connection, Control), ClientError> {
         let (cert, key) = self.identity.certificate()?;
         let tls = tls::client_config(cert, key, self.cfg.server_key, tls::provider())?;
         let tuning = Tuning {
@@ -270,12 +267,11 @@ impl Client {
         let endpoint = quic::dialer(tls, tuning, remote)?;
         let conn = quic::connect(&endpoint, remote).await?;
         let (send, recv) = conn.open_bi().await.map_err(QuicError::from)?;
-        let tx = FramedWrite::new(send, codec());
-        let rx = FramedRead::new(recv, codec());
-        Ok((endpoint, conn, tx, rx))
+        let control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
+        Ok((endpoint, conn, control))
     }
 
-    async fn send_binds(&self, tx: &mut Tx) -> Result<(), ClientError> {
+    async fn send_binds(&self, control: &mut Control) -> Result<(), ClientError> {
         for (service, expose) in &self.cfg.expose {
             let (kind, port) = match expose.port {
                 PortRequest::Any(kind) => (kind, None),
@@ -288,7 +284,7 @@ impl Client {
                 allow: expose.allow.clone(),
                 proxy_protocol: expose.proxy_protocol,
             };
-            send_msg(tx, &bind).await?;
+            send_msg(control, &bind).await?;
         }
         Ok(())
     }
@@ -330,14 +326,13 @@ fn classify(err: &ClientError) -> DisconnectCause {
     }
 }
 
-async fn send_msg(tx: &mut Tx, msg: &ClientMessage) -> Result<(), ClientError> {
-    let bytes = encode(msg).map_err(ClientError::Encode)?;
-    tx.send(bytes).await.map_err(|_| ClientError::ControlClosed)
-}
-
-async fn next(rx: &mut Rx) -> Option<ServerMessage> {
-    let frame = rx.next().await?.ok()?;
-    decode(&frame).ok()
+/// A frame the message itself couldn't fill is a config bug worth giving up on; a stream the
+/// peer has already closed is not, so `classify` needs the two kept apart.
+async fn send_msg(control: &mut Control, msg: &ClientMessage) -> Result<(), ClientError> {
+    control.send(msg).await.map_err(|err| match err {
+        StreamFrameError::Io(_) => ClientError::ControlClosed,
+        StreamFrameError::Frame(err) => ClientError::Encode(err),
+    })
 }
 
 #[cfg(test)]

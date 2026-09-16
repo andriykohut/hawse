@@ -2,25 +2,24 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
-use hawse_proto::frame::{codec, decode, encode};
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
-use quinn::{Connection, RecvStream, SendStream, VarInt};
+use quinn::{Connection, VarInt};
 use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
 
 use super::policy::Grant;
 use super::{AGENT, Live, Shared, listener};
+use crate::control::Control;
 use crate::net;
 use crate::transport::quic;
+use crate::transport::{RecvHalf, SendHalf};
 
 const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
@@ -31,9 +30,6 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 
-type Tx = FramedWrite<SendStream, LengthDelimitedCodec>;
-type Rx = FramedRead<RecvStream, LengthDelimitedCodec>;
-
 pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToken) {
     let remote = conn.remote_address();
     let Some(key) = quic::peer_key(&conn) else {
@@ -43,10 +39,9 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
     // Nothing here is authorized yet, so a peer that never speaks must not hold a task open or stall shutdown.
     let greeting = async {
         let (control_send, control_recv) = conn.accept_bi().await?;
-        let tx = FramedWrite::new(control_send, codec());
-        let mut rx = FramedRead::new(control_recv, codec());
-        let hello = next(&mut rx).await;
-        Ok::<_, quinn::ConnectionError>((tx, rx, hello))
+        let mut control = Control::new(SendHalf::Quic(control_send), RecvHalf::Quic(control_recv));
+        let hello = control.next::<ClientMessage>().await;
+        Ok::<_, quinn::ConnectionError>((control, hello))
     };
     let greeted = tokio::select! {
         () = cancel.cancelled() => {
@@ -59,7 +54,7 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
         conn.close(VarInt::from_u32(4), b"no hello");
         return;
     };
-    let Ok((mut tx, rx, hello)) = opened else {
+    let Ok((mut control, hello)) = opened else {
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
@@ -69,16 +64,14 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
 
     let Some(grant) = shared.policy.lookup(&key).cloned() else {
         tracing::info!(%key, %remote, "denied unknown key. authorize it with: hawse authorize {key} --name NAME");
-        let _ = send(
-            &mut tx,
-            &ServerMessage::Denied {
+        let _ = control
+            .send(&ServerMessage::Denied {
                 reason: DenyReason::UnknownKey,
                 key,
-            },
-        )
-        .await;
+            })
+            .await;
         // `close` discards unsent stream data, so let the client read the denial first.
-        let _ = tx.into_inner().finish();
+        control.finish().await;
         tokio::select! {
             () = cancel.cancelled() => {}
             _ = tokio::time::timeout(DENIED_LINGER, conn.closed()) => {}
@@ -107,7 +100,7 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
             agent: AGENT.to_owned(),
             client_name: grant.name.clone(),
         };
-        if send(&mut tx, &welcome).await.is_err() {
+        if control.send(&welcome).await.is_err() {
             retire(&shared, key, &live);
             return;
         }
@@ -122,7 +115,7 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
             ids: ServiceIds::new(),
             tasks: TaskTracker::new(),
         };
-        session.serve(tx, rx, cancel).await;
+        session.serve(control, cancel).await;
     }
     .instrument(span)
     .await;
@@ -183,7 +176,7 @@ impl ServiceIds {
 }
 
 impl Session {
-    async fn serve(mut self, mut tx: Tx, mut rx: Rx, server_cancel: CancellationToken) {
+    async fn serve(mut self, mut control: Control, server_cancel: CancellationToken) {
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
@@ -200,7 +193,7 @@ impl Session {
                     } else {
                         "server shutting down"
                     };
-                    told_client = send(&mut tx, &ServerMessage::Shutdown { reason: why.to_owned() }).await.is_ok();
+                    told_client = control.send(&ServerMessage::Shutdown { reason: why.to_owned() }).await.is_ok();
                     break if superseded { "superseded" } else { "shutdown" };
                 }
                 _ = ping.tick() => {
@@ -208,11 +201,11 @@ impl Session {
                         break "unresponsive";
                     }
                     nonce += 1;
-                    if send(&mut tx, &ServerMessage::Ping { nonce }).await.is_err() {
+                    if control.send(&ServerMessage::Ping { nonce }).await.is_err() {
                         break "control stream closed";
                     }
                 }
-                msg = next(&mut rx) => {
+                msg = control.next::<ClientMessage>() => {
                     let Some(msg) = msg else { break "client left" };
                     last_heard = Instant::now();
                     let reply = match msg {
@@ -228,7 +221,7 @@ impl Session {
                         ClientMessage::Hello { .. } => break "duplicate hello",
                     };
                     if let Some(reply) = reply
-                        && send(&mut tx, &reply).await.is_err()
+                        && control.send(&reply).await.is_err()
                     {
                         break "control stream closed";
                     }
@@ -241,7 +234,7 @@ impl Session {
         for name in names {
             self.unbind(&name);
         }
-        let _ = tx.into_inner().finish();
+        control.finish().await;
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
         retire(&self.shared, self.key, &self.live);
@@ -372,16 +365,6 @@ impl Session {
             .expect("port allocator lock")
             .release(port);
     }
-}
-
-async fn send(tx: &mut Tx, msg: &ServerMessage) -> Result<(), ()> {
-    let bytes = encode(msg).map_err(|_| ())?;
-    tx.send(bytes).await.map_err(|_| ())
-}
-
-async fn next(rx: &mut Rx) -> Option<ClientMessage> {
-    let frame = rx.next().await?.ok()?;
-    decode(&frame).ok()
 }
 
 #[cfg(test)]
