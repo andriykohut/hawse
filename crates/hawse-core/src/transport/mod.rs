@@ -73,6 +73,18 @@ pub enum RecvHalf {
 }
 
 impl RecvHalf {
+    /// Hands back quinn's own buffer, so the stream-to-socket path copies once, not twice. `None`
+    /// once the peer has finished the stream.
+    pub async fn read_bytes(&mut self, max: usize) -> io::Result<Option<Bytes>> {
+        match self {
+            Self::Quic(recv) => recv
+                .read_chunk(max, true)
+                .await
+                .map(|chunk| chunk.map(|chunk| chunk.bytes))
+                .map_err(io::Error::from),
+        }
+    }
+
     pub fn stop(&mut self, code: u32) {
         match self {
             Self::Quic(recv) => {
