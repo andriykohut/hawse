@@ -2,28 +2,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use hawse_proto::msg::{StreamOpen, reset};
-use quinn::{RecvStream, SendStream, VarInt};
+use quinn::{RecvStream, SendStream};
 use tokio::net::TcpStream;
 
 use super::Target;
 use crate::error::chain;
 use crate::frame::read_frame;
 use crate::pump::pump;
+use crate::transport::{RecvHalf, SendHalf};
 
 /// Without the matching `stop`, dropping `recv` sends the server `STOP_SENDING(0)` and the reason
 /// reaches only one half.
-fn refuse(send: &mut SendStream, recv: &mut RecvStream, code: u32) {
-    let _ = send.reset(VarInt::from_u32(code));
-    let _ = recv.stop(VarInt::from_u32(code));
+fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
+    send.reset(code);
+    recv.stop(code);
 }
 
 /// Dials only the `local` address recorded for `service_id` at `Bound` time; nothing in the header can name an address.
 pub async fn serve(
-    mut send: SendStream,
-    mut recv: RecvStream,
+    send: SendStream,
+    recv: RecvStream,
     targets: Arc<RwLock<HashMap<u16, Target>>>,
     buffer: usize,
 ) {
+    let (mut send, mut recv) = (SendHalf::Quic(send), RecvHalf::Quic(recv));
     let header = match read_frame::<StreamOpen>(&mut recv).await {
         Ok(StreamOpen::Visitor(header)) => header,
         Err(err) => {

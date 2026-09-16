@@ -47,6 +47,13 @@ pub enum SendHalf {
 }
 
 impl SendHalf {
+    /// Writes all of `data`. Owned rather than borrowed so quinn can take the buffer without copying it.
+    pub async fn write_bytes(&mut self, data: Bytes) -> io::Result<()> {
+        match self {
+            Self::Quic(send) => send.write_chunk(data).await.map_err(io::Error::from),
+        }
+    }
+
     pub fn reset(&mut self, code: u32) {
         match self {
             Self::Quic(send) => {

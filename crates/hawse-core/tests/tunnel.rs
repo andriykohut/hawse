@@ -334,6 +334,7 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     use futures_util::{SinkExt, StreamExt};
     use hawse_core::frame::write_frame;
     use hawse_core::tls;
+    use hawse_core::transport::SendHalf;
     use hawse_core::transport::quic::{self, Tuning};
     use hawse_proto::frame::{codec, decode, encode};
     use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader, StreamOpen, reset};
@@ -398,7 +399,8 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
         visitor: "203.0.113.9:1".parse().unwrap(),
         listener: "203.0.113.1:40000".parse().unwrap(),
     };
-    let (mut s, mut r) = conn.open_bi().await.unwrap();
+    let (s, mut r) = conn.open_bi().await.unwrap();
+    let mut s = SendHalf::Quic(s);
     write_frame(&mut s, &StreamOpen::Visitor(header(99)))
         .await
         .unwrap();
@@ -418,7 +420,8 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
         "client did not reset the stream as an unknown service: {refusal:?}"
     );
 
-    let (mut s, _r) = conn.open_bi().await.unwrap();
+    let (s, _r) = conn.open_bi().await.unwrap();
+    let mut s = SendHalf::Quic(s);
     write_frame(&mut s, &StreamOpen::Visitor(header(7)))
         .await
         .unwrap();

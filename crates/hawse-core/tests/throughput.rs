@@ -3,6 +3,7 @@ mod common;
 use std::time::Instant;
 
 use hawse_core::pump::pump;
+use hawse_core::transport::{RecvHalf, SendHalf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PAYLOAD: usize = 256 * 1024 * 1024;
@@ -14,7 +15,12 @@ async fn throughput_over_quic() {
     let pair = common::quic_pair().await;
     let (send, recv) = pair.client.open_bi().await.unwrap();
     let (near, far) = tokio::io::duplex(4 * 1024 * 1024);
-    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024));
+    let pumped = tokio::spawn(pump(
+        near,
+        SendHalf::Quic(send),
+        RecvHalf::Quic(recv),
+        16 * 1024,
+    ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
     // Started before accept_bi: quinn only reveals a stream to the peer once a frame carries

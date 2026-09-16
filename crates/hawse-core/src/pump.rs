@@ -1,7 +1,8 @@
 use bytes::BytesMut;
 use hawse_proto::msg::reset::ABORTED;
-use quinn::{RecvStream, SendStream, VarInt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use crate::transport::{RecvHalf, SendHalf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -13,23 +14,21 @@ pub struct Stats {
 pub enum PumpError {
     #[error("socket failed")]
     Socket(#[source] std::io::Error),
-    #[error("stream write failed")]
-    Write(#[source] quinn::WriteError),
-    #[error("stream read failed")]
-    Read(#[source] quinn::ReadError),
+    #[error("stream failed")]
+    Stream(#[source] std::io::Error),
 }
 
 // quinn's own `Drop for SendStream` finishes (not resets) a stream that's dropped mid-transfer,
 // so try_join! cancelling this half on the other side's error would otherwise hand the peer a
 // clean end-of-stream on a truncated payload.
-struct ResetOnDrop(Option<SendStream>);
+struct ResetOnDrop(Option<SendHalf>);
 
 impl ResetOnDrop {
-    fn stream(&mut self) -> &mut SendStream {
+    fn stream(&mut self) -> &mut SendHalf {
         self.0.as_mut().expect("not yet taken")
     }
 
-    fn take(mut self) -> SendStream {
+    fn take(mut self) -> SendHalf {
         self.0.take().expect("not yet taken")
     }
 }
@@ -37,7 +36,7 @@ impl ResetOnDrop {
 impl Drop for ResetOnDrop {
     fn drop(&mut self) {
         if let Some(mut send) = self.0.take() {
-            let _: Result<(), quinn::ClosedStream> = send.reset(VarInt::from_u32(ABORTED));
+            send.reset(ABORTED);
         }
     }
 }
@@ -45,8 +44,8 @@ impl Drop for ResetOnDrop {
 /// Ends when both directions have delivered EOF. An abort on either side resets the send stream, so the peer sees a reset rather than a truncated payload delivered as if complete.
 pub async fn pump<S>(
     socket: S,
-    send: SendStream,
-    mut recv: RecvStream,
+    send: SendHalf,
+    mut recv: RecvHalf,
     buffer: usize,
 ) -> Result<Stats, PumpError>
 where
@@ -66,24 +65,25 @@ where
             }
             total += u64::try_from(n).expect("usize fits u64");
             send.stream()
-                .write_chunk(buf.split().freeze())
+                .write_bytes(buf.split().freeze())
                 .await
-                .map_err(PumpError::Write)?;
+                .map_err(PumpError::Stream)?;
         }
-        let _: Result<(), quinn::ClosedStream> = send.take().finish();
+        send.take().finish().await;
         Ok::<u64, PumpError>(total)
     };
 
     let to_socket = async move {
         let mut total = 0u64;
-        while let Some(chunk) = recv
-            .read_chunk(buffer, true)
-            .await
-            .map_err(PumpError::Read)?
-        {
-            total += u64::try_from(chunk.bytes.len()).expect("usize fits u64");
+        let mut buf = vec![0u8; buffer];
+        loop {
+            let n = recv.read(&mut buf).await.map_err(PumpError::Stream)?;
+            if n == 0 {
+                break;
+            }
+            total += u64::try_from(n).expect("usize fits u64");
             writer
-                .write_all(&chunk.bytes)
+                .write_all(&buf[..n])
                 .await
                 .map_err(PumpError::Socket)?;
         }

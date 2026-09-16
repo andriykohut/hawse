@@ -12,6 +12,7 @@ use super::Shared;
 use crate::error::chain;
 use crate::frame::write_frame;
 use crate::pump::pump;
+use crate::transport::{RecvHalf, SendHalf};
 
 /// Owns `port`'s claim on the allocator for as long as the socket is open.
 pub async fn serve(
@@ -43,13 +44,14 @@ pub async fn serve(
         let _ = socket.set_nodelay(true);
         let conn = conn.clone();
         tasks.spawn(async move {
-            let (mut send, recv) = match conn.open_bi().await {
+            let (send, recv) = match conn.open_bi().await {
                 Ok(streams) => streams,
                 Err(err) => {
                     tracing::debug!(%visitor, err = %chain(&err), "cannot open stream");
                     return;
                 }
             };
+            let (mut send, recv) = (SendHalf::Quic(send), RecvHalf::Quic(recv));
             let header = StreamHeader {
                 service_id,
                 visitor,
