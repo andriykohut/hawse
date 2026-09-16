@@ -1,6 +1,8 @@
 [package]
 name = "hawse-proto"
-description = "Wire types for hawse"
+description = "Wire types for hawse. Internal to the hawse binary, with no stable API."
+keywords = ["tunnel", "quic"]
+categories = ["network-programming"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
