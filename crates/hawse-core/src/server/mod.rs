@@ -157,6 +157,9 @@ impl Server {
                 }
                 // The pause waits inside this arm rather than in its body, so a descriptor
                 // shortage on the TCP side cannot stall QUIC, which needs no descriptor of its own.
+                // It cannot move to a `, if …` precondition on the arm either: a guarded arm
+                // builds no future, so nothing holds the timer, and with QUIC idle the arm would
+                // never wake to re-enable itself.
                 accepted = async move {
                     if let Some(at) = resume_tcp {
                         tokio::time::sleep_until(at).await;
