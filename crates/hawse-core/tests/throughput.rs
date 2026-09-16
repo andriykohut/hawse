@@ -35,7 +35,7 @@ async fn throughput_over_quic() {
     });
 
     let started = Instant::now();
-    // Only this direction is measured; the return path is finished at once so it cannot compete for the link.
+    // Only this direction is measured; the reverse would otherwise compete for the link.
     peer_send.finish().unwrap();
     let mut drain = vec![0u8; 1 << 20];
     while far_rd.read(&mut drain).await.unwrap_or(0) > 0 {}
