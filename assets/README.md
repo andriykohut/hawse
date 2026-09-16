@@ -9,6 +9,7 @@
 | `hawse-mark-mono.svg` | Single-color (stamps, embroidery, faxed docs) |
 | `hawse-app-icon.svg` | Rounded-square icon, navy ground |
 | `hawse-favicon.svg` | 16–32px favicon (simplified, no chain) |
+| `hawse-social-preview.png` | GitHub social preview, 1280×640, favicon on paper |
 
 Colors: ink `#0f1b2d` · paper `#f4f1ea` · line `#e8632b`
 Wordmark: Archivo 500, +20% letter-spacing, uppercase. In the lockups the
