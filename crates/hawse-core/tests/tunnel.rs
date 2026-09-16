@@ -484,8 +484,8 @@ async fn binds_with_phase_two_features_are_refused() {
     assert_eq!(
         refused,
         [
-            ("allowed".to_owned(), BindFailure::BadPort),
-            ("proxied".to_owned(), BindFailure::BadPort),
+            ("allowed".to_owned(), BindFailure::Unsupported),
+            ("proxied".to_owned(), BindFailure::Unsupported),
         ]
     );
 

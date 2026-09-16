@@ -266,23 +266,23 @@ impl Session {
             reason,
         };
         if name::validate(service).is_err() {
-            return failed(BindFailure::BadPort);
+            return failed(BindFailure::BadName);
         }
         if self.services.contains_key(service) {
             return failed(BindFailure::InUse);
         }
         if kind == Kind::Udp {
             tracing::warn!(service, "udp services are not supported yet");
-            return failed(BindFailure::BadPort);
+            return failed(BindFailure::Unsupported);
         }
         // Ignoring these would open a port with weaker guarantees than the client asked for.
         if !allow.is_empty() {
             tracing::warn!(service, "allow lists are not supported yet");
-            return failed(BindFailure::BadPort);
+            return failed(BindFailure::Unsupported);
         }
         if proxy_protocol {
             tracing::warn!(service, "proxy protocol is not supported yet");
-            return failed(BindFailure::BadPort);
+            return failed(BindFailure::Unsupported);
         }
         let live = self.services.values().map(|bound| bound.id).collect();
         let Some(id) = self.ids.claim(&live) else {

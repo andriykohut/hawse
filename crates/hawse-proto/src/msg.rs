@@ -73,6 +73,8 @@ pub enum BindFailure {
     NotGranted,
     InUse,
     BadPort,
+    BadName,
+    Unsupported,
 }
 
 impl fmt::Display for BindFailure {
@@ -81,6 +83,8 @@ impl fmt::Display for BindFailure {
             BindFailure::NotGranted => "port is not granted to this client",
             BindFailure::InUse => "port is already in use on the server",
             BindFailure::BadPort => "port cannot be bound",
+            BindFailure::BadName => "service name is not valid",
+            BindFailure::Unsupported => "this build does not support that bind yet",
         })
     }
 }
@@ -169,7 +173,9 @@ mod tests {
                 prop_oneof![
                     Just(BindFailure::NotGranted),
                     Just(BindFailure::InUse),
-                    Just(BindFailure::BadPort)
+                    Just(BindFailure::BadPort),
+                    Just(BindFailure::BadName),
+                    Just(BindFailure::Unsupported)
                 ]
             )
                 .prop_map(|(service, reason)| ServerMessage::BindFailed { service, reason }),
@@ -207,6 +213,18 @@ mod tests {
             session: 7,
         };
         assert!(encode(&h).unwrap().len() <= 6);
+    }
+
+    #[test]
+    fn bind_failure_display_names_each_case() {
+        assert_eq!(
+            BindFailure::BadName.to_string(),
+            "service name is not valid"
+        );
+        assert_eq!(
+            BindFailure::Unsupported.to_string(),
+            "this build does not support that bind yet"
+        );
     }
 
     #[test]

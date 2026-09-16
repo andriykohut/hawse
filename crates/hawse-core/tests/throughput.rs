@@ -30,9 +30,9 @@ async fn throughput_over_quic() {
     });
 
     let (mut peer_send, mut peer_recv) = pair.server.accept_bi().await.unwrap();
-    tokio::spawn(async move {
-        while let Ok(Some(_)) = peer_recv.read_chunk(1 << 20, true).await {}
-    });
+    tokio::spawn(
+        async move { while let Ok(Some(_)) = peer_recv.read_chunk(1 << 20, true).await {} },
+    );
 
     let started = Instant::now();
     // Only this direction is measured; the reverse would otherwise compete for the link.
