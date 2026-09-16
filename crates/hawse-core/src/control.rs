@@ -38,8 +38,11 @@ impl Control {
         decode(&frame).ok()
     }
 
-    pub async fn finish(self) {
-        let mut send = self.tx.into_inner();
-        send.finish().await;
+    /// Takes `&mut self`, not `self`, so the receive half survives the call. Consuming it here
+    /// would drop an unfinished `RecvStream`, and quinn's `Drop` sends `STOP_SENDING` for an
+    /// unfinished one — telling the peer to stop writing on a stream it may still have a
+    /// legitimate reply in flight for (a `Pong` to a `Ping` this side already sent).
+    pub async fn finish(&mut self) {
+        self.tx.get_mut().finish().await;
     }
 }
