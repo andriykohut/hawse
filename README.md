@@ -148,7 +148,10 @@ dynamic_ports = "40000-41000"
 ```
 
 The server answers on the listen port twice: UDP for QUIC, and TCP for the
-fallback transport. Public ports bound for clients are TCP.
+fallback transport. Both have to be free at startup and reachable through the
+firewall — the server refuses to start if it cannot bind the TCP side, rather
+than come up with the fallback silently missing. Public ports bound for clients
+are TCP.
 
 `congestion` selects the controller, on either end, for the data that end
 sends:

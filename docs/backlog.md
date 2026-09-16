@@ -34,6 +34,17 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
+- **The TCP accept path is unauthenticated and unbounded.** Every socket the
+  listener accepts holds a TLS handshake open for up to `idle_timeout` with no
+  cap on how many may be in flight, and `limits.auth_failures_per_minute` does
+  not take effect yet. QUIC's listen side has `quic_retry` available for the
+  same job and does not use it either.
+- **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
+  resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
+  a QUIC visitor's read fails with that code. On yamux neither half carries one,
+  so the visitor gets a clean empty close and reads a refusal as a service that
+  answered with nothing. Same root cause as the truncation gap below, and the
+  same application-level signal fixes both.
 - **`transport.prefer = "auto"` does not fall back to TCP.** It probes QUIC for
   two seconds and then fails, because yamux hands a reset stream to its reader
   as a clean end-of-stream: a transfer cut short on the fallback arrives looking
@@ -135,7 +146,10 @@ phase 1. Each says what the code does today and what the fix would be.
 - `limits.streams_per_client` bounds the streams the client may open, not the
   visitor streams the server opens toward it.
 - Visitor accept is unbounded: only QUIC stream credit limits how many visitor
-  tasks one session can hold.
+  tasks one session can hold. On the TCP fallback the consequence differs in
+  kind, not degree — yamux has no credit to push back with, and the first
+  stream past `max_num_streams` tears the whole connection down, so a burst
+  QUIC merely queues kills every service on that session at once.
 - A malformed control frame ends the session exactly like a clean EOF, logged
   as "client left".
 - `SO_KEEPALIVE` from spec section 5 is not set on visitor or local sockets.
@@ -177,8 +191,12 @@ phase 1. Each says what the code does today and what the fix would be.
   the transport trait arrives.
 - `client::Event` carries strings where it could carry errors; callers cannot
   match on a cause.
-- The listen port is not reserved from grants or from the dynamic pool, which
-  will collide once the TCP fallback listener shares it.
+- The listen port is reserved from grants and from the pool now: `validate`
+  rejects both, and `Server::bind` reserves the *resolved* port rather than the
+  configured one. The latter also closed a latent bug — a configured port of 0
+  used to reserve 0, and Linux's ephemeral range overlaps the default
+  40000-41000 pool, so the kernel could hand the listener a port the allocator
+  would later hand to a service.
 - Visitor accept needs a per-session bound before UDP sessions add another
   unbounded map.
 

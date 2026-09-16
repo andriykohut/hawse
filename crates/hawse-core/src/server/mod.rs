@@ -28,6 +28,19 @@ pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 const DRAIN: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
+/// The only accept failure worth pausing for. `accept` also reports a connection the peer reset
+/// between the SYN and the accept — `ECONNABORTED`, `EPROTO` — and pausing on those would let a
+/// peer that connects and resets in a loop pace this server's whole accept loop for free.
+///
+/// `io::ErrorKind` names neither of these, and their numbers are identical on every platform hawse
+/// builds for.
+fn out_of_descriptors(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(ENFILE | EMFILE))
+}
+
+const ENFILE: i32 = 23;
+const EMFILE: i32 = 24;
+
 pub struct Shared {
     pub policy: Policy,
     pub ports: Mutex<PortAllocator>,
@@ -52,8 +65,10 @@ pub enum ServerError {
     Tls(#[from] rustls::Error),
     #[error(transparent)]
     Quic(#[from] QuicError),
-    #[error("cannot bind the TCP listener on the listen port")]
-    Listen(#[source] std::io::Error),
+    #[error(
+        "cannot bind TCP {0}: the listen port now carries the TCP fallback transport as well as QUIC, so it must be free on TCP too"
+    )]
+    Listen(SocketAddr, #[source] std::io::Error),
     #[error("stream window {0} bytes does not fit a QUIC window")]
     Window(u64),
 }
@@ -90,7 +105,8 @@ impl Server {
         let bound = endpoint
             .local_addr()
             .expect("a bound endpoint has an address");
-        let tcp = net::bind_tcp(bound.ip(), bound.port()).map_err(ServerError::Listen)?;
+        let tcp = net::bind_tcp(bound.ip(), bound.port())
+            .map_err(|err| ServerError::Listen(bound, err))?;
         let tls = Arc::new(tls::server_config(cert, key, tls::provider())?);
         let mut ports = PortAllocator::new(cfg.dynamic_ports);
         ports.reserve(bound.port());
@@ -138,11 +154,15 @@ impl Server {
                 accepted = self.tcp.accept() => {
                     let socket = match accepted {
                         Ok((socket, _)) => socket,
-                        Err(err) => {
+                        Err(err) if out_of_descriptors(&err) => {
                             tracing::warn!(err = %chain(&err), "tcp accept failed");
-                            // A descriptor shortage fails every accept at once, and without this
-                            // the loop spins on it.
+                            // Every accept fails until something closes, so without this the loop
+                            // spins on it.
                             tokio::time::sleep(ACCEPT_BACKOFF).await;
+                            continue;
+                        }
+                        Err(err) => {
+                            tracing::debug!(err = %chain(&err), "tcp accept failed");
                             continue;
                         }
                     };
@@ -169,5 +189,22 @@ impl Server {
             shutdown.as_str().as_bytes(),
         );
         self.endpoint.wait_idle().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn a_descriptor_shortage_is_told_apart_from_a_reset_connection() {
+        assert!(out_of_descriptors(&io::Error::from_raw_os_error(ENFILE)));
+        assert!(out_of_descriptors(&io::Error::from_raw_os_error(EMFILE)));
+        // What a peer resetting between the SYN and the accept produces.
+        assert!(!out_of_descriptors(&io::Error::from(
+            io::ErrorKind::ConnectionAborted
+        )));
+        assert!(!out_of_descriptors(&io::Error::other("eproto")));
     }
 }

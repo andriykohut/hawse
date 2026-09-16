@@ -10,8 +10,10 @@ use crate::frame::read_frame;
 use crate::pump::pump;
 use crate::transport::{RecvHalf, SendHalf};
 
-/// Without the matching `stop`, dropping `recv` sends the server `STOP_SENDING(0)` and the reason
-/// reaches only one half.
+/// The matching `stop` is what keeps the reason on both halves: dropping `recv` would send the
+/// server `STOP_SENDING(0)` instead. On the TCP transport neither call carries a code — `stop` is a
+/// no-op and `reset` degrades to a clean shutdown — so the visitor cannot tell a refusal from a
+/// service that answered with nothing.
 fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
     send.reset(code);
     recv.stop(code);
