@@ -1,11 +1,13 @@
 pub mod quic;
 
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
+use hawse_proto::key::PublicKey;
 use quinn::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -53,17 +55,8 @@ impl SendHalf {
         }
     }
 
-    #[allow(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "async so a transport that cannot end a stream synchronously fits the signature"
-    )]
     pub async fn finish(&mut self) {
-        match self {
-            Self::Quic(send) => {
-                let _: Result<(), quinn::ClosedStream> = send.finish();
-            }
-        }
+        let _: io::Result<()> = tokio::io::AsyncWriteExt::shutdown(self).await;
     }
 }
 
@@ -82,8 +75,8 @@ impl RecvHalf {
     }
 }
 
-// quinn's streams carry inherent `poll_write`/`poll_read` that shadow these trait methods and
-// return quinn's own error type.
+// quinn's `SendStream` carries an inherent `poll_write` that shadows this one and returns quinn's
+// own error type.
 impl AsyncWrite for SendHalf {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -108,6 +101,8 @@ impl AsyncWrite for SendHalf {
     }
 }
 
+// quinn's `RecvStream` carries an inherent `poll_read` that shadows this one and takes a plain
+// `&mut [u8]`.
 impl AsyncRead for RecvHalf {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -132,4 +127,9 @@ pub trait Transport: Send + Sync + 'static {
     fn max_datagram_size(&self) -> Option<usize>;
     /// Discards stream data still in flight, so anything the peer must read has to land first.
     fn close(&self, reason: CloseReason);
+    /// Ends when either side closes, so waiting here before `close` gives the peer a chance to read
+    /// what is still in flight.
+    fn closed(&self) -> BoxFuture<'_, ()>;
+    fn remote_address(&self) -> SocketAddr;
+    fn peer_key(&self) -> Option<PublicKey>;
 }

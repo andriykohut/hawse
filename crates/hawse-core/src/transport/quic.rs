@@ -170,6 +170,20 @@ impl Transport for QuicTransport {
     fn close(&self, reason: CloseReason) {
         self.0.close(VarInt::from_u32(reason.code()), b"");
     }
+
+    fn closed(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.0.closed().await;
+        })
+    }
+
+    fn remote_address(&self) -> SocketAddr {
+        self.0.remote_address()
+    }
+
+    fn peer_key(&self) -> Option<PublicKey> {
+        peer_key(&self.0)
+    }
 }
 
 pub fn peer_key(conn: &Connection) -> Option<PublicKey> {
