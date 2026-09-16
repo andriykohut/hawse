@@ -23,6 +23,9 @@ fn report(direction: &str, secs: f64) {
 async fn throughput_over_quic_in_both_directions() {
     socket_to_stream().await;
     stream_to_socket().await;
+    eprintln!(
+        "the two figures stop their clocks differently; compare each only against its own history"
+    );
 }
 
 #[allow(clippy::similar_names)]

@@ -75,6 +75,7 @@ where
 
     let to_socket = async move {
         let mut total = 0u64;
+        // Reading into this reused buffer measured the same as quinn's zero-copy read_chunk.
         let mut buf = vec![0u8; buffer];
         loop {
             let n = recv.read(&mut buf).await.map_err(PumpError::Stream)?;
