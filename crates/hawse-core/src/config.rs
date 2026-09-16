@@ -197,17 +197,27 @@ pub enum ConfigError {
     ConnectionWindow,
     #[error("transport stream_window of {0} bytes is larger than connection_window of {1} bytes")]
     Windows(u64, u64),
+    #[error(
+        "transport idle_timeout must be at least 1s, not {0:?}; the TCP fallback sets its keepalive in whole seconds, and anything shorter rounds down to a zero the kernel rejects"
+    )]
+    IdleTimeout(Duration),
+    #[error("limits streams_per_client cannot be 0")]
+    StreamsPerClient,
 }
 
-/// A zero buffer reads nothing at all: `BytesMut` never gains capacity and the pump takes the
-/// empty read for end of stream.
 fn validate_transport(
     buffer: ByteSize,
     stream_window: ByteSize,
     connection_window: ByteSize,
+    idle_timeout: Duration,
 ) -> Result<(), ConfigError> {
+    // A zero buffer reads nothing at all: `BytesMut` never gains capacity and the pump takes the
+    // empty read for end of stream.
     if !(1024..=1 << 30).contains(&buffer.0) {
         return Err(ConfigError::Buffer(buffer.0));
+    }
+    if idle_timeout < Duration::from_secs(1) {
+        return Err(ConfigError::IdleTimeout(idle_timeout));
     }
     if stream_window.0 == 0 || u32::try_from(stream_window.0).is_err() {
         return Err(ConfigError::StreamWindow(stream_window.0));
@@ -243,7 +253,13 @@ impl ServerConfig {
             self.transport.buffer,
             self.transport.stream_window,
             self.transport.connection_window,
+            self.transport.idle_timeout,
         )?;
+        // A zero budget is not "no limit": yamux answers the first stream over the cap by tearing
+        // the connection down.
+        if self.limits.streams_per_client == 0 {
+            return Err(ConfigError::StreamsPerClient);
+        }
         let mut seen: BTreeMap<PublicKey, &str> = BTreeMap::new();
         for (client, policy) in &self.clients {
             name::validate(client).map_err(|e| ConfigError::ClientName(client.clone(), e))?;
@@ -268,6 +284,7 @@ impl ClientConfig {
             self.transport.buffer,
             self.transport.stream_window,
             self.transport.connection_window,
+            self.transport.idle_timeout,
         )?;
         for (service, expose) in &self.expose {
             name::validate(service).map_err(|e| ConfigError::ServiceName(service.clone(), e))?;
@@ -549,6 +566,26 @@ prefer = "tcp"
         cfg.transport.stream_window = ByteSize(2 << 20);
         cfg.transport.connection_window = ByteSize(1 << 20);
         assert_eq!(cfg.validate(), Err(ConfigError::Windows(2 << 20, 1 << 20)));
+    }
+
+    #[test]
+    fn a_sub_second_idle_timeout_is_rejected() {
+        let short = Duration::from_millis(500);
+
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.transport.idle_timeout = short;
+        assert_eq!(cfg.validate(), Err(ConfigError::IdleTimeout(short)));
+
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.transport.idle_timeout = short;
+        assert_eq!(cfg.validate(), Err(ConfigError::IdleTimeout(short)));
+    }
+
+    #[test]
+    fn a_zero_stream_budget_is_rejected() {
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.limits.streams_per_client = 0;
+        assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
     }
 
     #[test]

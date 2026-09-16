@@ -104,9 +104,10 @@ type OpenRequest = oneshot::Sender<Result<yamux::Stream, TransportError>>;
 /// the one past the limit by tearing the whole connection down, inbound and outbound alike, so the
 /// error `open_bi` returns there is not a per-stream failure — the transport is already dead.
 ///
-/// Liveness is the kernel's: a peer that vanishes silently is noticed after `Tuning::idle_timeout`
-/// of quiet *plus* the OS keepalive probe schedule, not within `idle_timeout` the way QUIC's idle
-/// timer bounds it. There is no hawse-level heartbeat on this transport.
+/// Liveness is the kernel's, and it is slow: a peer that vanishes silently is noticed after
+/// `Tuning::idle_timeout` of quiet *plus* the OS keepalive probe schedule, which on stock Linux and
+/// macOS runs another nine or ten minutes. Size a reconnect policy against that, not against QUIC's
+/// thirty-second idle timer. There is no hawse-level heartbeat on this transport.
 #[derive(Debug)]
 pub struct TcpTransport {
     open: mpsc::Sender<OpenRequest>,
@@ -232,7 +233,8 @@ impl Driver {
             () = self.serve() => {}
         }
         // yamux flushes every queued frame before its go-away, which on a wedged socket is
-        // unbounded. Both are dropped first so a caller queued for a stream fails now, not then.
+        // unbounded: past the grace the connection is dropped mid-flush and whatever is still
+        // queued goes with it. Both are dropped first so a caller queued for a stream fails now.
         drop(self.requests);
         drop(self.pending);
         let goodbye = poll_fn(|cx| self.conn.poll_close(cx));
