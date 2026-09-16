@@ -471,16 +471,20 @@ prefer = "tcp"
 
     #[test]
     fn listen_port_inside_the_dynamic_pool_is_rejected() {
-        let mut cfg = ServerConfig::default();
-        cfg.listen = "127.0.0.1:40500".parse().unwrap();
-        cfg.dynamic_ports = "40000-41000".parse().unwrap();
+        let cfg = ServerConfig {
+            listen: "127.0.0.1:40500".parse().unwrap(),
+            dynamic_ports: "40000-41000".parse().unwrap(),
+            ..Default::default()
+        };
         assert_eq!(cfg.validate(), Err(ConfigError::ListenInPool(40500)));
     }
 
     #[test]
     fn a_grant_naming_the_listen_port_is_rejected() {
-        let mut cfg = ServerConfig::default();
-        cfg.listen = "127.0.0.1:4433".parse().unwrap();
+        let mut cfg = ServerConfig {
+            listen: "127.0.0.1:4433".parse().unwrap(),
+            ..Default::default()
+        };
         cfg.clients.insert(
             "laptop".into(),
             ClientPolicy {
