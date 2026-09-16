@@ -192,11 +192,10 @@ Client settings: `server` and `server_key` are required, `key` defaults to
 prefer = "auto"    # or "quic", or "tcp"
 ```
 
-`auto`, the default, dials QUIC and gives up if the server has not answered
-within two seconds; the client then retries from the beginning every five
-seconds. `quic` pins it to QUIC with no probe deadline. `tcp` selects the
-fallback transport, which carries every stream over one TLS connection
-multiplexed with yamux — for networks that block outbound UDP.
+`auto` is the default and today dials QUIC and only QUIC, exactly as `quic`
+does; a failed connection is retried from the beginning every five seconds.
+`tcp` selects the fallback transport, which carries every stream over one TLS
+connection multiplexed with yamux — for networks that block outbound UDP.
 
 **The TCP fallback cannot detect a truncated transfer.** yamux has no way to
 abort a stream distinguishably from finishing one: the reader sees
@@ -206,6 +205,18 @@ and neither end can tell. On QUIC the stream is reset and the read fails
 loudly. This is why `auto` does not fall back on its own — blocked UDP is not
 consent to silent truncation. Choose `tcp` when the traffic can survive
 arriving short, or when UDP leaves you no other way through.
+
+`auto` stays a separate setting because it is where the fallback returns once a
+visitor stream can report that it arrived whole. Until then it means "let hawse
+choose", and hawse chooses the transport that can tell you when a transfer was
+cut short.
+
+The rest of `[transport]` is not honoured equally by the two. Both use
+`idle_timeout` (on TCP it is the quiet time before the kernel starts probing),
+`connection_window` and `buffer`. `stream_window` and `congestion` are QUIC's
+alone: yamux gives every stream a fixed 256 KiB window and TCP's congestion
+control belongs to the kernel, so under `prefer = "tcp"` both settings are
+accepted, validated and then ignored.
 
 ## Logging
 

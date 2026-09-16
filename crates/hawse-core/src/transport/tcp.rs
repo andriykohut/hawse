@@ -104,10 +104,15 @@ type OpenRequest = oneshot::Sender<Result<yamux::Stream, TransportError>>;
 /// the one past the limit by tearing the whole connection down, inbound and outbound alike, so the
 /// error `open_bi` returns there is not a per-stream failure — the transport is already dead.
 ///
-/// Liveness is the kernel's, and it is slow: a peer that vanishes silently is noticed after
-/// `Tuning::idle_timeout` of quiet *plus* the OS keepalive probe schedule, which on stock Linux and
-/// macOS runs another nine or ten minutes. Size a reconnect policy against that, not against QUIC's
-/// thirty-second idle timer. There is no hawse-level heartbeat on this transport.
+/// What notices a peer that vanished silently is the control-stream heartbeat, which runs on both
+/// transports and reports in 45 to 60 s. The kernel keepalive configured here is only the backstop
+/// under it, and is far slower: `Tuning::idle_timeout` of quiet plus a probe schedule that on
+/// stock Linux and macOS runs another nine or ten minutes.
+///
+/// Nothing drains `accept_bi` after the server has taken the control stream, so every further
+/// stream an authenticated client opens sits unread in an unbounded channel while still counting
+/// against yamux's stream budget — which, unlike QUIC's, counts both directions in one number and
+/// tears the connection down rather than backpressuring when it is reached.
 #[derive(Debug)]
 pub struct TcpTransport {
     open: mpsc::Sender<OpenRequest>,

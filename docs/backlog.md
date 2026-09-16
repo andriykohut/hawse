@@ -34,25 +34,55 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **The TCP accept path is unauthenticated and unbounded.** Every socket the
-  listener accepts holds a TLS handshake open for up to `idle_timeout` with no
-  cap on how many may be in flight, and `limits.auth_failures_per_minute` does
-  not take effect yet. QUIC's listen side has `quic_retry` available for the
-  same job and does not use it either.
+- **The TCP accept path is unauthenticated.** A semaphore now caps concurrent
+  in-flight TLS handshakes at 256, so exhaustion queues in the kernel backlog
+  instead of reaching EMFILE, but nothing yet rate-limits a peer that keeps
+  completing handshakes: `limits.auth_failures_per_minute` does not take effect,
+  and QUIC's listen side has `quic_retry` available for the same job and does
+  not use it either.
+- **No way to decline the TCP listener entirely.** The bind is mandatory and
+  fatal, so a deployment that will only ever use QUIC still publishes an
+  unauthenticated TCP accept path. A `transport.tcp_fallback = false` switch is
+  the right shape for it; it was left out as new config surface belonging to a
+  later phase.
+- **Streams past the control stream are never accepted on a session.** The
+  server calls `accept_bi` once, for the control stream, and never again. On
+  QUIC the extras sit in quinn's accept queue against the client's stream
+  credit; on TCP they accumulate in `TcpTransport`'s unbounded inbound channel
+  and hold slots in yamux's stream budget, which counts both directions in one
+  number and kills the connection rather than backpressuring when it is full.
+  Harmless against our own client, which never opens one, but it is an
+  authenticated client's way to end its own session.
 - **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
   resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
   a QUIC visitor's read fails with that code. On yamux neither half carries one,
   so the visitor gets a clean empty close and reads a refusal as a service that
   answered with nothing. Same root cause as the truncation gap below, and the
   same application-level signal fixes both.
-- **`transport.prefer = "auto"` does not fall back to TCP.** It probes QUIC for
-  two seconds and then fails, because yamux hands a reset stream to its reader
-  as a clean end-of-stream: a transfer cut short on the fallback arrives looking
-  complete, and neither end can tell. Moving a user onto that because their
-  network blocks UDP trades a loud failure for a silent one, so the fallback is
-  reachable only by asking for it. Give the tunnel an application-level
-  completeness signal — a trailer on each visitor stream, or a length the reader
-  checks — and `Client::connect`'s `Prefer::Auto` arm can fall back again.
+- **`transport.prefer = "auto"` does not fall back to TCP.** It dials QUIC and
+  nothing else, because yamux hands a reset stream to its reader as a clean
+  end-of-stream: a transfer cut short on the fallback arrives looking complete,
+  and neither end can tell. Moving a user onto that because their network blocks
+  UDP trades a loud failure for a silent one, so the fallback is reachable only
+  by asking for it. Give the tunnel an application-level completeness signal — a
+  trailer on each visitor stream, or a length the reader checks — and
+  `Client::connect`'s `Prefer::Auto` arm can fall back again. Lifting the gate
+  means splitting `Prefer::Auto` back off `Prefer::Quic`, choosing a probe
+  deadline and racing `connect_tcp` after it; the deadline wants measuring
+  against a real high-latency path, since the 2 s this branch carried for a
+  while was sized on loopback and would fail a satellite handshake that works.
+- **`Transport::close()` does not complete symmetrically.** On QUIC it is
+  immediate and `endpoint.wait_idle()` bounds the flush; on TCP it only cancels
+  a token, and the driver then flushes yamux's queue for up to `idle_timeout` in
+  a task the server's `TaskTracker` does not know about. The process still
+  exits, but a shutdown that looks drained may not be.
+- **`SendHalf::Tcp::reset` is nondeterministic in the peer's write direction.**
+  Its single noop-waker `poll_shutdown` normally emits FIN, but when that poll
+  returns `Pending` the close reaches the peer as an RST from the stream drop
+  instead — leaving it in `RecvClosed` or in `Closed`, and only the latter fails
+  its next write. This matters for the completeness signal above: a probe-write
+  was the leading candidate for telling an abort from a clean finish, and it
+  cannot be, while `reset` picks between FIN and RST on timing.
 
 ## Deferred from the phase 1 reviews
 
@@ -121,6 +151,10 @@ phase 1. Each says what the code does today and what the fix would be.
   grant does not name the listen port; both would fail later at bind time.
 - `quic_retry`, `auth_failures_per_minute` and `udp_sessions_per_service`
   parse but do not take effect yet, and nothing warns that they are ignored.
+  `transport.stream_window` and `transport.congestion` join them under
+  `prefer = "tcp"`, where yamux fixes the stream window and the kernel owns
+  congestion control: both are validated and then silently inert. The README
+  and `Tuning` now say so; a warning at startup would say it louder.
 
 ### Pump
 

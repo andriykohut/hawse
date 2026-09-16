@@ -61,6 +61,9 @@ pub struct ClientPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub auth_failures_per_minute: u32,
+    /// Costs 256 KiB of receive window per stream on the TCP fallback, where yamux guarantees
+    /// every stream that much and the connection window has to cover the whole guarantee: the
+    /// default 4096 reserves ~1 GiB per session against QUIC's 64 MiB for the same config.
     pub streams_per_client: u32,
     pub udp_sessions_per_service: u32,
 }
@@ -136,6 +139,9 @@ pub struct Expose {
     pub proxy_protocol: bool,
 }
 
+/// `Auto` dials exactly what `Quic` does today. It stays a distinct setting because it is where
+/// the TCP fallback returns once a visitor stream can report that it arrived whole; until then
+/// hawse will not pick a transport on which a truncated transfer looks complete.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Prefer {
