@@ -1,9 +1,9 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/hawse-mark-inverse.svg">
-  <img src="assets/hawse-mark.svg" width="72" alt="Hawse">
-</picture>
-
-# hawse
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/hawse-lockup-inverse.svg">
+    <img src="assets/hawse-lockup.svg" width="296" alt="hawse">
+  </picture>
+</h1>
 
 hawse publishes TCP services on a server's ports. The client opens one outbound
 QUIC connection to the server. The server listens on the configured ports and
