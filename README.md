@@ -134,9 +134,11 @@ client's network.
 ## Configuration
 
 Configuration is read from `$XDG_CONFIG_HOME/hawse/` (`~/.config/hawse/` by
-default), or from `/etc/hawse/` when running as root. `--config PATH` and the
-`HAWSE_CONFIG` environment variable override the location. Relative key paths
-resolve against the directory containing the config file.
+default), falling back to `/etc/hawse/` when the file is not there. `--config
+PATH` and the `HAWSE_CONFIG` environment variable override the location.
+Relative key paths resolve against the directory containing the config file.
+When neither directory has a config, keys are written to `/etc/hawse/` if
+running as root and to `$XDG_CONFIG_HOME/hawse/` otherwise.
 
 Server settings and their defaults:
 
@@ -151,7 +153,7 @@ The server answers on the listen port twice: UDP for QUIC, and TCP for the
 fallback transport. Both have to be free at startup and reachable through the
 firewall — the server refuses to start if it cannot bind the TCP side, rather
 than come up with the fallback silently missing. Public ports bound for clients
-are TCP.
+are TCP. `hawse server --listen ADDR` overrides `listen` for that run.
 
 `congestion` selects the controller, on either end, for the data that end
 sends:
@@ -182,6 +184,15 @@ ports = ["8096"]
 A client may override the server-wide value with its own `bind`, so one server
 can keep some services behind a proxy and publish others directly.
 
+`limits.streams_per_client` caps how many streams one client's connection may
+carry, one per visitor connection, and defaults to 4096. On the TCP fallback,
+yamux promises every stream 256 KiB of receive window and drops the whole
+connection when the cap is passed, so the default lets a session hold about
+1 GiB of unread data. Lower it on a server with little memory, but not below the
+number of visitor connections a client carries at once.
+`limits.auth_failures_per_minute`, `limits.udp_sessions_per_service` and
+`quic_retry` are parsed but not enforced yet.
+
 Client settings: `server` and `server_key` are required, `key` defaults to
 `client.key`, and each `[expose.NAME]` table needs a `local` address.
 
@@ -211,6 +222,19 @@ visitor stream can report that it arrived whole. Until then it means "let hawse
 choose", and hawse chooses the transport that can tell you when a transfer was
 cut short.
 
+Defaults for the other `[transport]` settings, on the server:
+
+```toml
+[transport]
+idle_timeout = "30s"
+stream_window = "8MiB"
+connection_window = "64MiB"
+buffer = "16KiB"
+```
+
+The client uses the same values except `stream_window = "2MiB"` and
+`connection_window = "16MiB"`.
+
 The rest of `[transport]` is not honoured equally by the two. Both use
 `idle_timeout` (on TCP it is the quiet time before the kernel starts probing),
 `connection_window` and `buffer`. `stream_window` and `congestion` are QUIC's
@@ -219,13 +243,17 @@ connection window's slack, so there is no per-stream knob to set, and TCP's
 congestion control belongs to the kernel — so under `prefer = "tcp"` both
 settings are accepted, validated and then ignored.
 
+`--threads` sets the number of worker threads and defaults to the number of
+CPUs.
+
 ## Logging
 
 Logs go to stderr, formatted for a terminal when stderr is one and as JSON
-otherwise; `--log` overrides that choice. `-v` adds per-connection events, `-vv`
-adds trace output, and `-q` restricts output to warnings and errors. The
-`HAWSE_LOG` environment variable takes a `tracing` filter directive and
-overrides all of them.
+otherwise; `--log` overrides that choice. Colour follows the same rule, and
+`--color` overrides it. `-v` adds per-connection events, `-vv` adds trace
+output, and `-q` restricts output to warnings and errors. The `HAWSE_LOG`
+environment variable takes a `tracing` filter directive and overrides all of
+them.
 
 ## License
 
