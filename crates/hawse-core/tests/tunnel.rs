@@ -334,7 +334,7 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     use hawse_core::tls;
     use hawse_core::transport::quic::{self, Tuning};
     use hawse_proto::frame::{codec, decode, encode};
-    use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader, reset};
+    use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader, StreamOpen, reset};
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     let (server_id, client_id) = ids();
@@ -397,7 +397,9 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
         listener: "203.0.113.1:40000".parse().unwrap(),
     };
     let (mut s, mut r) = conn.open_bi().await.unwrap();
-    write_frame(&mut s, &header(99)).await.unwrap();
+    write_frame(&mut s, &StreamOpen::Visitor(header(99)))
+        .await
+        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(500), local.accept())
             .await
@@ -415,7 +417,9 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     );
 
     let (mut s, _r) = conn.open_bi().await.unwrap();
-    write_frame(&mut s, &header(7)).await.unwrap();
+    write_frame(&mut s, &StreamOpen::Visitor(header(7)))
+        .await
+        .unwrap();
     assert!(
         tokio::time::timeout(Duration::from_secs(2), local.accept())
             .await

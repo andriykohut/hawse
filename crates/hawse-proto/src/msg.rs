@@ -96,6 +96,12 @@ pub struct StreamHeader {
     pub listener: SocketAddr,
 }
 
+/// The first frame on every stream the server opens toward the client. UDP adds a `Bulk` variant in phase 2b.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamOpen {
+    Visitor(StreamHeader),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatagramHeader {
     pub service_id: u16,
@@ -225,6 +231,18 @@ mod tests {
             BindFailure::Unsupported.to_string(),
             "this build does not support that bind yet"
         );
+    }
+
+    #[test]
+    fn stream_open_visitor_round_trips() {
+        let header = StreamHeader {
+            service_id: 7,
+            visitor: "203.0.113.9:5000".parse().unwrap(),
+            listener: "127.0.0.1:2222".parse().unwrap(),
+        };
+        let open = StreamOpen::Visitor(header);
+        let bytes = crate::frame::encode(&open).unwrap();
+        assert_eq!(crate::frame::decode::<StreamOpen>(&bytes).unwrap(), open);
     }
 
     #[test]

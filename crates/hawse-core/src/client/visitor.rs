@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use hawse_proto::msg::{StreamHeader, reset};
+use hawse_proto::msg::{StreamOpen, reset};
 use quinn::{RecvStream, SendStream, VarInt};
 use tokio::net::TcpStream;
 
@@ -24,8 +24,8 @@ pub async fn serve(
     targets: Arc<RwLock<HashMap<u16, Target>>>,
     buffer: usize,
 ) {
-    let header: StreamHeader = match read_frame(&mut recv).await {
-        Ok(header) => header,
+    let header = match read_frame::<StreamOpen>(&mut recv).await {
+        Ok(StreamOpen::Visitor(header)) => header,
         Err(err) => {
             tracing::debug!(err = %chain(&err), "bad stream header");
             return;

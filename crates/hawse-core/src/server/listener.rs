@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hawse_proto::msg::StreamHeader;
+use hawse_proto::msg::{StreamHeader, StreamOpen};
 use hawse_proto::port::Port;
 use quinn::Connection;
 use tokio::net::TcpListener;
@@ -55,7 +55,7 @@ pub async fn serve(
                 visitor,
                 listener: listener_addr,
             };
-            if let Err(err) = write_frame(&mut send, &header).await {
+            if let Err(err) = write_frame(&mut send, &StreamOpen::Visitor(header)).await {
                 tracing::debug!(%visitor, err = %chain(&err), "header write failed");
                 return;
             }
