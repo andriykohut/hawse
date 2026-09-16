@@ -11,6 +11,7 @@ use std::time::Duration;
 use hawse_proto::key::PublicKey;
 use quinn::{Endpoint, VarInt};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -27,6 +28,14 @@ pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
 const DRAIN: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// How many TCP sockets may be mid-handshake at once. Nothing is authenticated until the TLS
+/// handshake finishes, and each one holds a descriptor for up to `idle_timeout`, so an unbounded
+/// accept lets a stranger reach EMFILE and take every public port's `accept` down with it. A real
+/// deployment has one connection per configured client and reconnects them one at a time, so this
+/// is several orders of magnitude of headroom; past it the sockets wait in the kernel's backlog,
+/// where they cost this process nothing.
+const TCP_HANDSHAKES: usize = 256;
 
 /// The only accept failure worth pausing for. `accept` also reports a connection the peer reset
 /// between the SYN and the accept — `ECONNABORTED`, `EPROTO` — and pausing on those would let a
@@ -138,10 +147,12 @@ impl Server {
     pub async fn serve(self, cancel: CancellationToken) {
         let sessions = TaskTracker::new();
         let tcp = &self.tcp;
+        let handshakes = Arc::new(Semaphore::new(TCP_HANDSHAKES));
         // An instant, not a duration: the arm holding it is rebuilt every time another arm wins,
         // and a relative sleep would restart from zero each time and never elapse.
         let mut resume_tcp: Option<tokio::time::Instant> = None;
         loop {
+            let handshakes = Arc::clone(&handshakes);
             tokio::select! {
                 () = cancel.cancelled() => break,
                 incoming = self.endpoint.accept() => {
@@ -159,12 +170,15 @@ impl Server {
                 // shortage on the TCP side cannot stall QUIC, which needs no descriptor of its own.
                 // It cannot move to a `, if …` precondition on the arm either: a guarded arm
                 // builds no future, so nothing holds the timer, and with QUIC idle the arm would
-                // never wake to re-enable itself.
-                accepted = async move {
+                // never wake to re-enable itself. The permit is taken before the accept and not
+                // after it: a socket this process has not accepted waits in the kernel's backlog,
+                // where it holds no descriptor of ours.
+                (permit, accepted) = async move {
                     if let Some(at) = resume_tcp {
                         tokio::time::sleep_until(at).await;
                     }
-                    tcp.accept().await
+                    let permit = handshakes.acquire_owned().await.expect("never closed");
+                    (permit, tcp.accept().await)
                 } => {
                     let socket = match accepted {
                         Ok((socket, _)) => {
@@ -188,7 +202,11 @@ impl Server {
                     let tls = Arc::clone(&self.tls);
                     let tuning = self.tuning;
                     sessions.spawn(async move {
-                        match tcp::accept(socket, tls, tuning).await {
+                        let accepted = tcp::accept(socket, tls, tuning).await;
+                        // Released here rather than with the task: what is bounded is the
+                        // unauthenticated part, and a session that got this far is authenticated.
+                        drop(permit);
+                        match accepted {
                             Ok(transport) => session::run(Arc::new(transport), shared, cancel).await,
                             Err(err) => tracing::debug!(err = %chain(&err), "tcp handshake failed"),
                         }
