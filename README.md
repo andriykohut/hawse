@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/hawse-mark-inverse.svg">
+  <img src="assets/hawse-mark.svg" width="72" alt="Hawse">
+</picture>
+
 # hawse
 
 hawse publishes TCP services on a server's ports. The client opens one outbound
