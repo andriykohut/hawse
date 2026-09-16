@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use hawse_proto::msg::{StreamHeader, StreamOpen};
 use hawse_proto::port::Port;
-use quinn::Connection;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -12,11 +11,11 @@ use super::Shared;
 use crate::error::chain;
 use crate::frame::write_frame;
 use crate::pump::pump;
-use crate::transport::{RecvHalf, SendHalf};
+use crate::transport::Transport;
 
 /// Owns `port`'s claim on the allocator for as long as the socket is open.
 pub async fn serve(
-    conn: Connection,
+    transport: Arc<dyn Transport>,
     listener: TcpListener,
     service_id: u16,
     port: Port,
@@ -42,16 +41,17 @@ pub async fn serve(
             continue;
         };
         let _ = socket.set_nodelay(true);
-        let conn = conn.clone();
+        // Held by the task for the whole pump, not just for `open_bi`: on the TCP transport the
+        // stream halves do not keep the connection alive, and the last `Arc` dropped ends it.
+        let transport = Arc::clone(&transport);
         tasks.spawn(async move {
-            let (send, recv) = match conn.open_bi().await {
+            let (mut send, recv) = match transport.open_bi().await {
                 Ok(streams) => streams,
                 Err(err) => {
                     tracing::debug!(%visitor, err = %chain(&err), "cannot open stream");
                     return;
                 }
             };
-            let (mut send, recv) = (SendHalf::Quic(send), RecvHalf::Quic(recv));
             let header = StreamHeader {
                 service_id,
                 visitor,

@@ -36,9 +36,12 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
             match event {
                 Event::Connected {
                     remote,
+                    transport,
                     name,
                     agent,
-                } => tracing::info!(%remote, name = %name, server = %agent, "connected"),
+                } => {
+                    tracing::info!(%remote, %transport, name = %name, server = %agent, "connected");
+                }
                 Event::Bound { service, port } => {
                     let local = locals.get(&service).cloned().unwrap_or_default();
                     tracing::info!("{service}  {host}:{port} <- {local}");

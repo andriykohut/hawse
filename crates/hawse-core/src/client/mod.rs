@@ -8,20 +8,20 @@ use std::time::{Duration, Instant};
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage};
 use hawse_proto::port::{Port, PortRequest};
-use quinn::{Connection, Endpoint, VarInt};
+use quinn::Endpoint;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::config::{ClientConfig, DEFAULT_PORT, split_host_port};
+use crate::config::{ClientConfig, DEFAULT_PORT, Prefer, split_host_port};
 use crate::control::Control;
 use crate::error::chain;
 use crate::frame::StreamFrameError;
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
-use crate::transport::quic::{self, QuicError, Tuning};
-use crate::transport::{RecvHalf, SendHalf};
+use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
+use crate::transport::{CloseReason, Transport, TransportError, TransportKind, tcp};
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
@@ -29,11 +29,13 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 const DRAIN: Duration = Duration::from_secs(2);
+const QUIC_PROBE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Connected {
         remote: SocketAddr,
+        transport: TransportKind,
         name: String,
         agent: String,
     },
@@ -77,6 +79,12 @@ pub enum ClientError {
     Tls(#[from] rustls::Error),
     #[error(transparent)]
     Quic(#[from] QuicError),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+    #[error(
+        "no QUIC connection within {0:?}; a network that blocks UDP needs transport.prefer = \"tcp\""
+    )]
+    Probe(Duration),
     #[error("this machine's key {0} is not authorized on the server")]
     Denied(PublicKey),
     #[error("server sent {0} where a greeting was expected")]
@@ -100,6 +108,20 @@ pub struct Target {
 }
 
 type Targets = Arc<RwLock<HashMap<u16, Target>>>;
+
+/// Carries the QUIC endpoint only so `wait_idle` can flush the close frame; the TCP transport has
+/// none.
+struct Dialed {
+    transport: Arc<dyn Transport>,
+    kind: TransportKind,
+    endpoint: Option<Endpoint>,
+    control: Control,
+}
+
+async fn open_control(transport: &Arc<dyn Transport>) -> Result<Control, ClientError> {
+    let (send, recv) = transport.open_bi().await?;
+    Ok(Control::new(send, recv))
+}
 
 pub struct Client {
     cfg: ClientConfig,
@@ -145,36 +167,19 @@ impl Client {
         events: &mpsc::Sender<Event>,
     ) -> Result<(), ClientError> {
         let remote = self.resolve().await?;
-        let (endpoint, conn, mut control) = self.connect(remote).await?;
+        let Dialed {
+            transport,
+            kind,
+            endpoint,
+            mut control,
+        } = self.connect(remote).await?;
 
-        let name = self
-            .cfg
-            .name
-            .clone()
-            .or_else(|| Some(gethostname::gethostname().to_string_lossy().into_owned()));
-        send_msg(
-            &mut control,
-            &ClientMessage::Hello {
-                name,
-                agent: AGENT.to_owned(),
-            },
-        )
-        .await?;
-
-        let (agent, client_name) = match control.next::<ServerMessage>().await {
-            Some(ServerMessage::Welcome { agent, client_name }) => (agent, client_name),
-            Some(ServerMessage::Denied { key, .. }) => {
-                emit(events, Event::Denied { key });
-                conn.close(VarInt::from_u32(0), b"denied");
-                return Err(ClientError::Denied(key));
-            }
-            Some(_) => return Err(ClientError::Protocol("another message")),
-            None => return Err(ClientError::ControlClosed),
-        };
+        let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
         emit(
             events,
             Event::Connected {
                 remote,
+                transport: kind,
                 name: client_name,
                 agent,
             },
@@ -232,28 +237,110 @@ impl Client {
                         }
                     }
                 }
-                incoming = conn.accept_bi() => {
+                incoming = transport.accept_bi() => {
                     match incoming {
                         Ok((send, recv)) => {
-                            tasks.spawn(visitor::serve(send, recv, Arc::clone(&self.targets), buffer));
+                            let visitor = visitor::serve(send, recv, Arc::clone(&self.targets), buffer);
+                            // A yamux stream dies with the transport that opened it, so the task
+                            // keeps one alive for as long as it pumps.
+                            let held = Arc::clone(&transport);
+                            tasks.spawn(async move {
+                                visitor.await;
+                                drop(held);
+                            });
                         }
-                        Err(err) => break Err(QuicError::from(err).into()),
+                        Err(err) => break Err(err.into()),
                     }
                 }
             }
         };
 
         tasks.close();
-        conn.close(VarInt::from_u32(0), b"bye");
+        transport.close(CloseReason::Shutdown);
         let _ = tokio::time::timeout(DRAIN, tasks.wait()).await;
-        endpoint.wait_idle().await;
+        if let Some(endpoint) = endpoint {
+            endpoint.wait_idle().await;
+        }
         outcome
     }
 
-    async fn connect(
+    /// Returns the server's agent and the name it knows this client by. A refusal is reported and
+    /// closed here, so a caller that sees `ClientError::Denied` has nothing left to do.
+    async fn greet(
         &self,
-        remote: SocketAddr,
-    ) -> Result<(Endpoint, Connection, Control), ClientError> {
+        control: &mut Control,
+        transport: &Arc<dyn Transport>,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<(String, String), ClientError> {
+        let name = self
+            .cfg
+            .name
+            .clone()
+            .or_else(|| Some(gethostname::gethostname().to_string_lossy().into_owned()));
+        send_msg(
+            control,
+            &ClientMessage::Hello {
+                name,
+                agent: AGENT.to_owned(),
+            },
+        )
+        .await?;
+        match control.next::<ServerMessage>().await {
+            Some(ServerMessage::Welcome { agent, client_name }) => Ok((agent, client_name)),
+            Some(ServerMessage::Denied { key, .. }) => {
+                emit(events, Event::Denied { key });
+                transport.close(CloseReason::Denied);
+                Err(ClientError::Denied(key))
+            }
+            Some(_) => Err(ClientError::Protocol("another message")),
+            None => Err(ClientError::ControlClosed),
+        }
+    }
+
+    async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        match self.cfg.transport.prefer {
+            Prefer::Quic => self.connect_quic(remote).await,
+            Prefer::Tcp => self.connect_tcp(remote).await,
+            Prefer::Auto => match tokio::time::timeout(QUIC_PROBE, self.connect_quic(remote)).await
+            {
+                Ok(Ok(dialed)) => Ok(dialed),
+                // The fallback belongs here — `_ => self.connect_tcp(remote).await` — and is
+                // absent because yamux delivers a reset stream as a clean end-of-stream: a
+                // truncated transfer over TCP arrives looking complete. A user gets that by
+                // asking for it, not by having UDP blocked.
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(ClientError::Probe(QUIC_PROBE)),
+            },
+        }
+    }
+
+    async fn connect_quic(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        let (tls, tuning) = self.dial_settings()?;
+        let endpoint = quic::dialer(tls, tuning, remote)?;
+        let transport: Arc<dyn Transport> =
+            Arc::new(QuicTransport(quic::connect(&endpoint, remote).await?));
+        let control = open_control(&transport).await?;
+        Ok(Dialed {
+            transport,
+            kind: TransportKind::Quic,
+            endpoint: Some(endpoint),
+            control,
+        })
+    }
+
+    async fn connect_tcp(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        let (tls, tuning) = self.dial_settings()?;
+        let transport: Arc<dyn Transport> = Arc::new(tcp::connect(remote, tls, tuning).await?);
+        let control = open_control(&transport).await?;
+        Ok(Dialed {
+            transport,
+            kind: TransportKind::Tcp,
+            endpoint: None,
+            control,
+        })
+    }
+
+    fn dial_settings(&self) -> Result<(rustls::ClientConfig, Tuning), ClientError> {
         let (cert, key) = self.identity.certificate()?;
         let tls = tls::client_config(cert, key, self.cfg.server_key, tls::provider())?;
         let tuning = Tuning {
@@ -264,11 +351,7 @@ impl Client {
             connection_window: self.cfg.transport.connection_window.0,
             max_streams: Tuning::CLIENT.max_streams,
         };
-        let endpoint = quic::dialer(tls, tuning, remote)?;
-        let conn = quic::connect(&endpoint, remote).await?;
-        let (send, recv) = conn.open_bi().await.map_err(QuicError::from)?;
-        let control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
-        Ok((endpoint, conn, control))
+        Ok((tls, tuning))
     }
 
     async fn send_binds(&self, control: &mut Control) -> Result<(), ClientError> {
@@ -311,7 +394,8 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
 
 /// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
 /// sizing, or a message this config cannot encode. DNS failing (`Resolve`, `NoAddress`) is
-/// transient, not a config problem, so it maps to `Transport` and keeps retrying.
+/// transient, not a config problem, so it maps to `Transport` and keeps retrying. So does a
+/// `Probe` that found no QUIC: the server may be down, or UDP blocked only for now.
 fn classify(err: &ClientError) -> DisconnectCause {
     match err {
         ClientError::Shutdown(s) => DisconnectCause::Shutdown(s.clone()),
@@ -351,6 +435,12 @@ mod tests {
             classify(&no_address),
             DisconnectCause::Transport(_)
         ));
+    }
+
+    #[test]
+    fn a_probe_that_found_no_quic_is_worth_retrying() {
+        let probe = ClientError::Probe(QUIC_PROBE);
+        assert!(matches!(classify(&probe), DisconnectCause::Transport(_)));
     }
 
     #[test]

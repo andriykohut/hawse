@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use hawse_proto::msg::{StreamOpen, reset};
-use quinn::{RecvStream, SendStream};
 use tokio::net::TcpStream;
 
 use super::Target;
@@ -20,12 +19,11 @@ fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
 
 /// Dials only the `local` address recorded for `service_id` at `Bound` time; nothing in the header can name an address.
 pub async fn serve(
-    send: SendStream,
-    recv: RecvStream,
+    mut send: SendHalf,
+    mut recv: RecvHalf,
     targets: Arc<RwLock<HashMap<u16, Target>>>,
     buffer: usize,
 ) {
-    let (mut send, mut recv) = (SendHalf::Quic(send), RecvHalf::Quic(recv));
     let header = match read_frame::<StreamOpen>(&mut recv).await {
         Ok(StreamOpen::Visitor(header)) => header,
         Err(err) => {

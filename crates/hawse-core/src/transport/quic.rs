@@ -168,7 +168,8 @@ impl Transport for QuicTransport {
     }
 
     fn close(&self, reason: CloseReason) {
-        self.0.close(VarInt::from_u32(reason.code()), b"");
+        self.0
+            .close(VarInt::from_u32(reason.code()), reason.as_str().as_bytes());
     }
 
     fn closed(&self) -> BoxFuture<'_, ()> {

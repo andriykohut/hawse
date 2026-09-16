@@ -39,6 +39,9 @@ Working today, with TCP forwarding and key-based authorization:
 - **A doorway into one network.** Since `local` can name any host the client
   reaches, a single client can publish services running on several machines
   beside it.
+- **Networks that block outbound UDP.** `transport.prefer = "tcp"` carries the
+  tunnel over TLS instead of QUIC. Read the caveat under Configuration first:
+  the fallback cannot report a transfer cut short.
 
 Waiting on features that are not implemented yet:
 
@@ -49,7 +52,6 @@ Waiting on features that are not implemented yet:
 - **Services that log or rate-limit by client address** need PROXY protocol v2
   to see the real visitor address rather than the client's own connection.
 - **Many HTTPS services on one port 443** need SNI routing.
-- **Networks that block outbound UDP** need the TCP fallback transport.
 
 ## Status
 
@@ -145,8 +147,8 @@ key = "server.key"
 dynamic_ports = "40000-41000"
 ```
 
-The listen port is UDP, because QUIC runs over UDP. Public ports bound for
-clients are TCP.
+The server answers on the listen port twice: UDP for QUIC, and TCP for the
+fallback transport. Public ports bound for clients are TCP.
 
 `congestion` selects the controller, on either end, for the data that end
 sends:
@@ -179,6 +181,28 @@ can keep some services behind a proxy and publish others directly.
 
 Client settings: `server` and `server_key` are required, `key` defaults to
 `client.key`, and each `[expose.NAME]` table needs a `local` address.
+
+`transport.prefer` chooses how the client reaches the server:
+
+```toml
+[transport]
+prefer = "auto"    # or "quic", or "tcp"
+```
+
+`auto`, the default, dials QUIC and gives up if the server has not answered
+within two seconds; the client then retries from the beginning every five
+seconds. `quic` pins it to QUIC with no probe deadline. `tcp` selects the
+fallback transport, which carries every stream over one TLS connection
+multiplexed with yamux — for networks that block outbound UDP.
+
+**The TCP fallback cannot detect a truncated transfer.** yamux has no way to
+abort a stream distinguishably from finishing one: the reader sees
+end-of-stream either way. So if a visitor connection is cut short in the
+middle, the data that did arrive is delivered as if it were the whole thing,
+and neither end can tell. On QUIC the stream is reset and the read fails
+loudly. This is why `auto` does not fall back on its own — blocked UDP is not
+consent to silent truncation. Choose `tcp` when the traffic can survive
+arriving short, or when UDP leaves you no other way through.
 
 ## Logging
 

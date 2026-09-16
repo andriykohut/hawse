@@ -8,7 +8,9 @@ use common::{
     server_config, start_client, start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
+use hawse_core::config::Prefer;
 use hawse_core::identity::Identity;
+use hawse_core::transport::TransportKind;
 use hawse_core::transport::quic::QuicError;
 use hawse_proto::msg::BindFailure;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -84,7 +86,7 @@ async fn tcp_echo_through_the_tunnel() {
     );
 
     assert!(
-        matches!(next_event(&mut client.events).await, Event::Connected { name, .. } if name == "test")
+        matches!(next_event(&mut client.events).await, Event::Connected { name, transport, .. } if name == "test" && transport == TransportKind::Quic)
     );
     let port = expect_bound(&mut client.events, "echo").await;
     assert!(DYNAMIC_PORTS.contains(&port.number));
@@ -581,4 +583,75 @@ async fn a_second_session_for_the_same_key_supersedes_the_first() {
     );
     second.cancel.cancel();
     server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn tcp_echo_over_the_fallback_transport() {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let echo = echo_server().await;
+    let mut cfg = client_config(
+        server.addr,
+        server.key,
+        &[("echo", &echo.to_string(), "any")],
+    );
+    cfg.transport.prefer = Prefer::Tcp;
+    let mut client = start_client(cfg, client_id);
+
+    assert!(
+        matches!(next_event(&mut client.events).await, Event::Connected { name, transport, .. } if name == "test" && transport == TransportKind::Tcp)
+    );
+    let port = expect_bound(&mut client.events, "echo").await;
+    assert!(DYNAMIC_PORTS.contains(&port.number));
+
+    let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
+        .await
+        .unwrap();
+    visitor.write_all(b"hello").await.unwrap();
+    let mut buf = [0u8; 5];
+    visitor.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"hello");
+
+    client.cancel.cancel();
+    assert!(client.task.await.unwrap().is_ok());
+    server.cancel.cancel();
+    server.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_reports_a_retryable_failure_and_never_dials_tcp() {
+    let (server_id, client_id) = ids();
+    // Nothing answers UDP on this port, so the QUIC probe cannot finish. An accept on the
+    // listener would mean the client had fallen back to the TCP transport.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = client_config(addr, server_id.public_key(), &[]);
+    assert_eq!(cfg.transport.prefer, Prefer::Auto);
+
+    let (tx, mut events) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+    let client = Client::new(cfg, client_id);
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { client.run(cancel, tx).await }
+    });
+
+    match next_event(&mut events).await {
+        Event::Disconnected {
+            cause: DisconnectCause::Transport(_),
+        } => {}
+        other => panic!("expected a retryable disconnect, got {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "auto dialed the TCP fallback"
+    );
+
+    cancel.cancel();
+    task.await.unwrap();
 }

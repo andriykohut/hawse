@@ -32,6 +32,17 @@ parked for later. Each entry says what it is and why it waits.
   Revisit only if the streaming benchmark shows the fallback transport is
   unusable for streaming; QUIC, the primary path, does not have this problem.
 
+## Deferred from the phase 2a transport work
+
+- **`transport.prefer = "auto"` does not fall back to TCP.** It probes QUIC for
+  two seconds and then fails, because yamux hands a reset stream to its reader
+  as a clean end-of-stream: a transfer cut short on the fallback arrives looking
+  complete, and neither end can tell. Moving a user onto that because their
+  network blocks UDP trades a loud failure for a silent one, so the fallback is
+  reachable only by asking for it. Give the tunnel an application-level
+  completeness signal — a trailer on each visitor stream, or a length the reader
+  checks — and `Client::connect`'s `Prefer::Auto` arm can fall back again.
+
 ## Deferred from the phase 1 reviews
 
 Findings from the task and branch reviews that were real but out of scope for
@@ -97,9 +108,8 @@ phase 1. Each says what the code does today and what the fix would be.
   each.
 - Nothing checks that `listen` falls outside `dynamic_ports`, or that a fixed
   grant does not name the listen port; both would fail later at bind time.
-- `congestion`, `quic_retry`, `auth_failures_per_minute`,
-  `udp_sessions_per_service` and `prefer` parse but do not take effect yet,
-  and nothing warns that they are ignored.
+- `quic_retry`, `auth_failures_per_minute` and `udp_sessions_per_service`
+  parse but do not take effect yet, and nothing warns that they are ignored.
 
 ### Pump
 
@@ -126,8 +136,6 @@ phase 1. Each says what the code does today and what the fix would be.
   visitor streams the server opens toward it.
 - Visitor accept is unbounded: only QUIC stream credit limits how many visitor
   tasks one session can hold.
-- Connection close codes are ad hoc integer literals; name them next to the
-  `reset` codes in the proto crate.
 - A malformed control frame ends the session exactly like a clean EOF, logged
   as "client left".
 - `SO_KEEPALIVE` from spec section 5 is not set on visitor or local sockets.

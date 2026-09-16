@@ -187,7 +187,7 @@ impl Transport for TcpTransport {
 
     /// yamux's go-away carries no room for `reason`, so the peer learns only that we are done.
     fn close(&self, reason: CloseReason) {
-        tracing::debug!(?reason, "closing the tcp transport");
+        tracing::debug!(reason = reason.as_str(), "closing the tcp transport");
         self.closed.cancel();
     }
 

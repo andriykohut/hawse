@@ -7,7 +7,6 @@ use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
-use quinn::{Connection, VarInt};
 use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -18,8 +17,7 @@ use super::policy::Grant;
 use super::{AGENT, Live, Shared, listener};
 use crate::control::Control;
 use crate::net;
-use crate::transport::quic;
-use crate::transport::{RecvHalf, SendHalf};
+use crate::transport::{CloseReason, Transport, TransportError};
 
 const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
@@ -30,35 +28,35 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 
-pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToken) {
-    let remote = conn.remote_address();
-    let Some(key) = quic::peer_key(&conn) else {
-        conn.close(VarInt::from_u32(2), b"no key");
+pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: CancellationToken) {
+    let remote = transport.remote_address();
+    let Some(key) = transport.peer_key() else {
+        transport.close(CloseReason::NoKey);
         return;
     };
     // Nothing here is authorized yet, so a peer that never speaks must not hold a task open or stall shutdown.
     let greeting = async {
-        let (control_send, control_recv) = conn.accept_bi().await?;
-        let mut control = Control::new(SendHalf::Quic(control_send), RecvHalf::Quic(control_recv));
+        let (control_send, control_recv) = transport.accept_bi().await?;
+        let mut control = Control::new(control_send, control_recv);
         let hello = control.next::<ClientMessage>().await;
-        Ok::<_, quinn::ConnectionError>((control, hello))
+        Ok::<_, TransportError>((control, hello))
     };
     let greeted = tokio::select! {
         () = cancel.cancelled() => {
-            conn.close(VarInt::from_u32(0), b"shutdown");
+            transport.close(CloseReason::Shutdown);
             return;
         }
         greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
     };
     let Ok(opened) = greeted else {
-        conn.close(VarInt::from_u32(4), b"no hello");
+        transport.close(CloseReason::NoHello);
         return;
     };
     let Ok((mut control, hello)) = opened else {
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
-        conn.close(VarInt::from_u32(3), b"expected hello");
+        transport.close(CloseReason::BadHello);
         return;
     };
 
@@ -70,13 +68,13 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
                 key,
             })
             .await;
-        // `close` discards unsent stream data, so let the client read the denial first.
+        // A QUIC `close` discards unsent stream data, so let the client read the denial first.
         control.finish().await;
         tokio::select! {
             () = cancel.cancelled() => {}
-            _ = tokio::time::timeout(DENIED_LINGER, conn.closed()) => {}
+            _ = tokio::time::timeout(DENIED_LINGER, transport.closed()) => {}
         }
-        conn.close(VarInt::from_u32(1), b"denied");
+        transport.close(CloseReason::Denied);
         return;
     };
 
@@ -106,7 +104,7 @@ pub async fn run(conn: Connection, shared: Arc<Shared>, cancel: CancellationToke
         }
         tracing::info!(%agent, "client connected");
         let session = Session {
-            conn,
+            transport,
             shared,
             grant,
             key,
@@ -135,7 +133,7 @@ fn retire(shared: &Shared, key: PublicKey, live: &Arc<Live>) {
 }
 
 struct Session {
-    conn: Connection,
+    transport: Arc<dyn Transport>,
     shared: Arc<Shared>,
     grant: Grant,
     key: PublicKey,
@@ -194,19 +192,19 @@ impl Session {
                         "server shutting down"
                     };
                     told_client = control.send(&ServerMessage::Shutdown { reason: why.to_owned() }).await.is_ok();
-                    break if superseded { "superseded" } else { "shutdown" };
+                    break if superseded { CloseReason::Superseded } else { CloseReason::Shutdown };
                 }
                 _ = ping.tick() => {
                     if last_heard.elapsed() > PONG_DEADLINE {
-                        break "unresponsive";
+                        break CloseReason::Unresponsive;
                     }
                     nonce += 1;
                     if control.send(&ServerMessage::Ping { nonce }).await.is_err() {
-                        break "control stream closed";
+                        break CloseReason::ControlClosed;
                     }
                 }
                 msg = control.next::<ClientMessage>() => {
-                    let Some(msg) = msg else { break "client left" };
+                    let Some(msg) = msg else { break CloseReason::PeerLeft };
                     last_heard = Instant::now();
                     let reply = match msg {
                         ClientMessage::Bind { service, kind, port, allow, proxy_protocol } => {
@@ -218,18 +216,18 @@ impl Session {
                         }
                         ClientMessage::Ping { nonce } => Some(ServerMessage::Pong { nonce }),
                         ClientMessage::Pong { .. } => None,
-                        ClientMessage::Hello { .. } => break "duplicate hello",
+                        ClientMessage::Hello { .. } => break CloseReason::DuplicateHello,
                     };
                     if let Some(reply) = reply
                         && control.send(&reply).await.is_err()
                     {
-                        break "control stream closed";
+                        break CloseReason::ControlClosed;
                     }
                 }
             }
         };
 
-        tracing::info!(reason, "session ended");
+        tracing::info!(reason = reason.as_str(), "session ended");
         let names: Vec<String> = self.services.keys().cloned().collect();
         for name in names {
             self.unbind(&name);
@@ -238,12 +236,12 @@ impl Session {
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
         retire(&self.shared, self.key, &self.live);
-        // `close` drops whatever quinn has not put on the wire, so let a client that was told why
+        // A QUIC `close` drops whatever is not yet on the wire, so let a client that was told why
         // read it and close first.
         if told_client {
-            let _ = tokio::time::timeout(SHUTDOWN_LINGER, self.conn.closed()).await;
+            let _ = tokio::time::timeout(SHUTDOWN_LINGER, self.transport.closed()).await;
         }
-        self.conn.close(VarInt::from_u32(0), reason.as_bytes());
+        self.transport.close(reason);
     }
 
     fn bind(
@@ -288,7 +286,7 @@ impl Session {
         };
         let cancel = CancellationToken::new();
         self.tasks.spawn(listener::serve(
-            self.conn.clone(),
+            Arc::clone(&self.transport),
             listener,
             id,
             port,

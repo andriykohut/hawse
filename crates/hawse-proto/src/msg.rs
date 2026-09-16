@@ -116,6 +116,21 @@ pub mod reset {
     pub const ABORTED: u32 = 0x12;
 }
 
+/// Error codes for `Transport::close`. Only the QUIC transport carries them to the peer; yamux's
+/// go-away has no room for one, so a TCP peer learns nothing but that the connection ended.
+pub mod close {
+    pub const SHUTDOWN: u32 = 0x00;
+    pub const SUPERSEDED: u32 = 0x01;
+    pub const DENIED: u32 = 0x02;
+    pub const NO_KEY: u32 = 0x03;
+    pub const NO_HELLO: u32 = 0x04;
+    pub const BAD_HELLO: u32 = 0x05;
+    pub const DUPLICATE_HELLO: u32 = 0x06;
+    pub const UNRESPONSIVE: u32 = 0x07;
+    pub const PEER_LEFT: u32 = 0x08;
+    pub const CONTROL_CLOSED: u32 = 0x09;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

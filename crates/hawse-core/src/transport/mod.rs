@@ -1,6 +1,7 @@
 pub mod quic;
 pub mod tcp;
 
+use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -9,26 +10,71 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use hawse_proto::key::PublicKey;
+use hawse_proto::msg::close;
 use quinn::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
 use tokio_util::compat::Compat;
 
-/// The code travels to a QUIC peer, so these numbers are part of the protocol, not an internal
-/// enum. yamux's go-away has no room for one, so a TCP peer learns only that the connection ended.
+/// Why a connection is being closed. The code and the text both travel to a QUIC peer, so they are
+/// part of the protocol; on the TCP transport neither does, and only the local log keeps them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseReason {
     Shutdown,
     Superseded,
-    Fatal,
+    Denied,
+    NoKey,
+    NoHello,
+    BadHello,
+    DuplicateHello,
+    Unresponsive,
+    PeerLeft,
+    ControlClosed,
 }
 
 impl CloseReason {
     pub fn code(self) -> u32 {
         match self {
-            Self::Shutdown => 0,
-            Self::Superseded => 1,
-            Self::Fatal => 2,
+            Self::Shutdown => close::SHUTDOWN,
+            Self::Superseded => close::SUPERSEDED,
+            Self::Denied => close::DENIED,
+            Self::NoKey => close::NO_KEY,
+            Self::NoHello => close::NO_HELLO,
+            Self::BadHello => close::BAD_HELLO,
+            Self::DuplicateHello => close::DUPLICATE_HELLO,
+            Self::Unresponsive => close::UNRESPONSIVE,
+            Self::PeerLeft => close::PEER_LEFT,
+            Self::ControlClosed => close::CONTROL_CLOSED,
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shutdown => "shutdown",
+            Self::Superseded => "superseded",
+            Self::Denied => "denied",
+            Self::NoKey => "no key",
+            Self::NoHello => "no hello",
+            Self::BadHello => "expected hello",
+            Self::DuplicateHello => "duplicate hello",
+            Self::Unresponsive => "unresponsive",
+            Self::PeerLeft => "peer left",
+            Self::ControlClosed => "control stream closed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportKind {
+    Quic,
+    Tcp,
+}
+
+impl fmt::Display for TransportKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Quic => "quic",
+            Self::Tcp => "tcp",
+        })
     }
 }
 
@@ -162,4 +208,37 @@ pub trait Transport: Send + Sync + 'static {
     fn closed(&self) -> BoxFuture<'_, ()>;
     fn remote_address(&self) -> SocketAddr;
     fn peer_key(&self) -> Option<PublicKey>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    const EVERY_REASON: [CloseReason; 10] = [
+        CloseReason::Shutdown,
+        CloseReason::Superseded,
+        CloseReason::Denied,
+        CloseReason::NoKey,
+        CloseReason::NoHello,
+        CloseReason::BadHello,
+        CloseReason::DuplicateHello,
+        CloseReason::Unresponsive,
+        CloseReason::PeerLeft,
+        CloseReason::ControlClosed,
+    ];
+
+    #[test]
+    fn no_two_close_reasons_share_a_code_or_a_name() {
+        let codes: BTreeSet<u32> = EVERY_REASON.iter().map(|r| r.code()).collect();
+        let names: BTreeSet<&str> = EVERY_REASON.iter().map(|r| r.as_str()).collect();
+        assert_eq!(codes.len(), EVERY_REASON.len(), "{codes:?}");
+        assert_eq!(names.len(), EVERY_REASON.len(), "{names:?}");
+    }
+
+    #[test]
+    fn transport_kinds_print_in_lowercase() {
+        assert_eq!(TransportKind::Quic.to_string(), "quic");
+        assert_eq!(TransportKind::Tcp.to_string(), "tcp");
+    }
 }
