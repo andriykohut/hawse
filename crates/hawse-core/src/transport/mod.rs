@@ -236,6 +236,28 @@ mod tests {
         assert_eq!(names.len(), EVERY_REASON.len(), "{names:?}");
     }
 
+    /// Against literals rather than the constants: these numbers go out on a QUIC close frame, so a
+    /// reason pointed at a different constant has to fail here and not just stay distinct.
+    #[test]
+    fn every_close_reason_keeps_its_wire_code() {
+        let expected = [
+            (CloseReason::Shutdown, 0x00),
+            (CloseReason::Superseded, 0x01),
+            (CloseReason::Denied, 0x02),
+            (CloseReason::NoKey, 0x03),
+            (CloseReason::NoHello, 0x04),
+            (CloseReason::BadHello, 0x05),
+            (CloseReason::DuplicateHello, 0x06),
+            (CloseReason::Unresponsive, 0x07),
+            (CloseReason::PeerLeft, 0x08),
+            (CloseReason::ControlClosed, 0x09),
+        ];
+        assert_eq!(expected.len(), EVERY_REASON.len());
+        for (reason, code) in expected {
+            assert_eq!(reason.code(), code, "{reason:?}");
+        }
+    }
+
     #[test]
     fn transport_kinds_print_in_lowercase() {
         assert_eq!(TransportKind::Quic.to_string(), "quic");

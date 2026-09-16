@@ -240,6 +240,15 @@ mod tests {
     #[test]
     fn bind_failure_display_names_each_case() {
         assert_eq!(
+            BindFailure::NotGranted.to_string(),
+            "port is not granted to this client"
+        );
+        assert_eq!(
+            BindFailure::InUse.to_string(),
+            "port is already in use on the server"
+        );
+        assert_eq!(BindFailure::BadPort.to_string(), "port cannot be bound");
+        assert_eq!(
             BindFailure::BadName.to_string(),
             "service name is not valid"
         );

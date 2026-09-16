@@ -98,6 +98,15 @@ async fn quic_transport_reports_a_datagram_size() {
 }
 
 #[tokio::test]
+async fn quic_transport_reports_the_address_it_dialed() {
+    let pair = common::quic_pair().await;
+    assert_eq!(
+        pair.client_transport().remote_address(),
+        pair.server_endpoint.local_addr().unwrap()
+    );
+}
+
+#[tokio::test]
 async fn closed_resolves_only_once_the_peer_has_closed() {
     let pair = common::quic_pair().await;
     let client = pair.client_transport();
