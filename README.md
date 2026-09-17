@@ -25,7 +25,7 @@ client may bind.
 
 ## What it is for
 
-Working today, with TCP forwarding and key-based authorization:
+Working today, with TCP and UDP forwarding and key-based authorization:
 
 - **Reaching machines you cannot port-forward into.** A home server behind
   CGNAT, a build machine on a corporate network, a Raspberry Pi at a relative's
@@ -46,10 +46,12 @@ Working today, with TCP forwarding and key-based authorization:
 - **Networks that block outbound UDP.** `transport.prefer = "tcp"` carries the
   tunnel over TLS instead of QUIC. Read the caveat under Configuration first:
   the fallback cannot report a transfer cut short.
+- **WireGuard, DNS, and game servers.** `port = "51820/udp"` exposes a UDP
+  service. Read the note on UDP under Configuration first: a payload too large
+  for one QUIC datagram is carried differently.
 
 Waiting on features that are not implemented yet:
 
-- **WireGuard, DNS, and most game servers** need UDP forwarding.
 - **Databases and admin interfaces** should wait for source-address
   allowlists, or be restricted by a firewall on the server. A public port is
   reachable by anyone today.
@@ -59,7 +61,7 @@ Waiting on features that are not implemented yet:
 
 ## Status
 
-TCP forwarding works, with fixed or dynamically assigned public ports.
+TCP and UDP forwarding work, with fixed or dynamically assigned public ports.
 
 Besides the features named above, configuration hot reload and the `expose`,
 `authorize`, `revoke` and `check` subcommands are not implemented either.
@@ -252,8 +254,12 @@ yamux promises every stream 256 KiB of receive window and drops the whole
 connection when the cap is passed, so the default lets a session hold about
 1 GiB of unread data. Lower it on a server with little memory, but not below the
 number of visitor connections a client carries at once.
-`limits.auth_failures_per_minute`, `limits.udp_sessions_per_service` and
-`quic_retry` are parsed but not enforced yet.
+`limits.udp_sessions_per_service` caps how many visitors one UDP service keeps
+track of at once, and defaults to 4096. Past it the visitor that has been quiet
+longest is forgotten, and any visitor is forgotten after 60 s of silence; its
+next packet starts a new session, which the local service sees arrive from a
+new port. `limits.auth_failures_per_minute` and `quic_retry` are parsed but not
+enforced yet.
 
 Client settings: `server` and `server_key` are required, `key` defaults to
 `client.key`, and each `[expose.NAME]` table needs a `local` address.
@@ -283,6 +289,15 @@ arriving short, or when UDP leaves you no other way through.
 visitor stream can report that it arrived whole. Until then it means "let hawse
 choose", and hawse chooses the transport that can tell you when a transfer was
 cut short.
+
+A UDP service needs `/udp` on both ends: `port = "51820/udp"` or `"any/udp"` in
+the client's `[expose.NAME]` table, and a grant such as `"51820/udp"` in the
+server's `ports`. Each payload crosses the tunnel as one QUIC datagram when it
+fits. One that does not fit — a full-size packet from a WireGuard tunnel at its
+default MTU is one — goes over a reliable stream instead, where packets arrive
+in order and a lost one delays those behind it. With `prefer = "tcp"` every
+payload takes that stream. hawse never holds a UDP sender back: when the tunnel
+cannot keep up, packets are dropped, as on any congested path.
 
 Defaults for the other `[transport]` settings, on the server:
 
