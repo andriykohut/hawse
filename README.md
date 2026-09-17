@@ -82,7 +82,7 @@ install -m755 hawse-0.1.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
 `gh attestation verify FILE --repo andriykohut/hawse` checks that an archive was
 built by this repository's release workflow.
 
-With a Rust toolchain, `cargo install hawse` builds from source and
+With a Rust toolchain, `cargo install --locked hawse` builds from source and
 `cargo binstall hawse` downloads the release binary.
 
 ### Docker
@@ -93,8 +93,8 @@ a client on different versions do not work together, so run the same tag on both
 ends.
 
 The container reads its config from `/etc/hawse` and keeps keys in
-`/var/lib/hawse`, which is the only directory it can write. A key named in the
-config needs the full path:
+`/var/lib/hawse`, which is the only directory it can write. The config has to set
+`key` to a full path, because the default resolves next to the config:
 
 ```toml
 key = "/var/lib/hawse/server.key"
