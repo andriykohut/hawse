@@ -258,9 +258,12 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
         tokio::select! {
             () = session.cancel.cancelled() => break,
             () = tokio::time::sleep_until(expires) => {
-                // `deliver` may have used the session since `expires` was read.
+                // Re-checked and removed under one lock: `deliver` can take the session in
+                // between and touch it, and that packet's reply would be lost.
+                let mut sessions = local.sessions.lock().expect("udp sessions lock");
                 if session.used() + local.idle <= Instant::now() {
-                    break;
+                    forget(&mut sessions, id, &session);
+                    return;
                 }
             }
             ready = session.socket.readable() => {
@@ -279,19 +282,36 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
                         continue;
                     }
                     local.note(&err);
-                    // A service that is not up yet answers every datagram this way; closing the
-                    // session for it would open a new socket per packet.
-                    if err.kind() != io::ErrorKind::ConnectionRefused {
+                    if !survivable(err.kind()) {
                         break;
                     }
                 }
             }
         }
     }
-    let mut sessions = local.sessions.lock().expect("udp sessions lock");
+    forget(
+        &mut local.sessions.lock().expect("udp sessions lock"),
+        id,
+        &session,
+    );
+}
+
+/// A `local` that is down answers every datagram with one of these, and closing the session for
+/// that would open a socket per packet.
+fn survivable(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+    )
+}
+
+/// Only while the id is still this session's: a successor may already hold it.
+fn forget(sessions: &mut HashMap<u32, Arc<LocalSession>>, id: u32, session: &Arc<LocalSession>) {
     if sessions
         .get(&id)
-        .is_some_and(|held| Arc::ptr_eq(held, &session))
+        .is_some_and(|held| Arc::ptr_eq(held, session))
     {
         sessions.remove(&id);
     }
