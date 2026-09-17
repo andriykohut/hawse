@@ -1,7 +1,7 @@
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/hawse-lockup-inverse.svg">
-    <img src="assets/hawse-lockup.svg" width="296" alt="hawse">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andriykohut/hawse/main/assets/hawse-lockup-inverse.svg">
+    <img src="https://raw.githubusercontent.com/andriykohut/hawse/main/assets/hawse-lockup.svg" width="296" alt="hawse">
   </picture>
 </h1>
 
@@ -259,9 +259,9 @@ them.
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/andriykohut/hawse/blob/main/LICENSE-APACHE) or
   <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+- MIT license ([LICENSE-MIT](https://github.com/andriykohut/hawse/blob/main/LICENSE-MIT) or
   <http://opensource.org/licenses/MIT>)
 
 at your option.
