@@ -1,3 +1,4 @@
+mod udp;
 mod visitor;
 
 use std::collections::HashMap;
@@ -6,8 +7,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage};
-use hawse_proto::port::{Port, PortRequest};
+use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage, StreamOpen};
+use hawse_proto::port::{Kind, Port, PortRequest};
 use quinn::Endpoint;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -17,11 +18,14 @@ use tokio_util::task::TaskTracker;
 use crate::config::{ClientConfig, DEFAULT_PORT, Prefer, split_host_port};
 use crate::control::Control;
 use crate::error::chain;
-use crate::frame::StreamFrameError;
+use crate::frame::{StreamFrameError, read_frame};
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
 use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
-use crate::transport::{CloseReason, Transport, TransportError, TransportKind, tcp};
+use crate::transport::{
+    CloseReason, RecvHalf, SendHalf, Transport, TransportError, TransportKind, tcp,
+};
+use crate::udp::IDLE;
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
@@ -113,15 +117,46 @@ struct Dialed {
     control: Control,
 }
 
+/// What `register_bound` needs from `run_once`'s scope to open a UDP service, bundled so the
+/// method itself stays under clippy's argument limit.
+struct BindCtx<'a> {
+    transport: &'a Arc<dyn Transport>,
+    tasks: &'a TaskTracker,
+    udp_cancel: &'a CancellationToken,
+}
+
 async fn open_control(transport: &Arc<dyn Transport>) -> Result<Control, ClientError> {
     let (send, recv) = transport.open_bi().await?;
     Ok(Control::new(send, recv))
+}
+
+fn ping_interval() -> tokio::time::Interval {
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ping
+}
+
+async fn serve_stream(
+    send: SendHalf,
+    mut recv: RecvHalf,
+    targets: Targets,
+    udp: Arc<udp::Registry>,
+    buffer: usize,
+) {
+    match read_frame::<StreamOpen>(&mut recv).await {
+        Ok(StreamOpen::Visitor(header)) => {
+            visitor::serve(header, send, recv, targets, buffer).await;
+        }
+        Ok(StreamOpen::Bulk { service_id }) => udp::serve_bulk(service_id, send, recv, udp).await,
+        Err(err) => tracing::debug!(err = %chain(&err), "bad stream header"),
+    }
 }
 
 pub struct Client {
     cfg: ClientConfig,
     identity: Identity,
     targets: Targets,
+    udp: Arc<udp::Registry>,
 }
 
 impl Client {
@@ -130,6 +165,7 @@ impl Client {
             cfg,
             identity,
             targets: Arc::default(),
+            udp: Arc::default(),
         }
     }
 
@@ -184,10 +220,16 @@ impl Client {
 
         self.targets.write().expect("targets lock").clear();
         let tasks = TaskTracker::new();
+        self.udp.clear();
+        let udp_cancel = CancellationToken::new();
+        let bind_ctx = BindCtx {
+            transport: &transport,
+            tasks: &tasks,
+            udp_cancel: &udp_cancel,
+        };
+        tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
         let buffer = usize::try_from(self.cfg.transport.buffer.0).expect("a validated buffer");
-        let mut ping =
-            tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
-        ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut ping = ping_interval();
         let mut last_heard = Instant::now();
         let mut nonce = 0u64;
 
@@ -212,9 +254,9 @@ impl Client {
                                 tracing::warn!(service, "server bound a service we never asked for");
                                 continue;
                             };
-                            let target = Target { service: service.clone(), local: expose.local.clone() };
-                            self.targets.write().expect("targets lock").insert(service_id, target);
-                            let port = Port { number: port, kind: expose.port.kind() };
+                            let kind = expose.port.kind();
+                            self.register_bound(service.clone(), service_id, expose.local.clone(), kind, &bind_ctx);
+                            let port = Port { number: port, kind };
                             emit(events, Event::Bound { service, port });
                         }
                         ServerMessage::BindFailed { service, reason } => {
@@ -235,12 +277,12 @@ impl Client {
                 incoming = transport.accept_bi() => {
                     match incoming {
                         Ok((send, recv)) => {
-                            let visitor = visitor::serve(send, recv, Arc::clone(&self.targets), buffer);
+                            let stream = serve_stream(send, recv, Arc::clone(&self.targets), Arc::clone(&self.udp), buffer);
                             // A yamux stream dies with the transport that opened it, so the task
                             // keeps one alive for as long as it pumps.
                             let held = Arc::clone(&transport);
                             tasks.spawn(async move {
-                                visitor.await;
+                                stream.await;
                                 drop(held);
                             });
                         }
@@ -250,6 +292,10 @@ impl Client {
             }
         };
 
+        udp_cancel.cancel();
+        // Each service holds the transport through its `Sender`; on the TCP transport the
+        // connection lives until the last handle drops.
+        self.udp.clear();
         tasks.close();
         transport.close(CloseReason::Shutdown);
         let _ = tokio::time::timeout(DRAIN, tasks.wait()).await;
@@ -257,6 +303,32 @@ impl Client {
             endpoint.wait_idle().await;
         }
         outcome
+    }
+
+    fn register_bound(
+        &self,
+        service: String,
+        service_id: u16,
+        local: String,
+        kind: Kind,
+        ctx: &BindCtx<'_>,
+    ) {
+        if kind == Kind::Udp {
+            self.udp.insert(udp::UdpLocal::new(
+                service,
+                service_id,
+                local,
+                IDLE,
+                Arc::clone(ctx.transport),
+                ctx.tasks.clone(),
+                ctx.udp_cancel.clone(),
+            ));
+        } else {
+            self.targets
+                .write()
+                .expect("targets lock")
+                .insert(service_id, Target { service, local });
+        }
     }
 
     /// Returns the server's agent and the name it knows this client by. A refusal is reported and
