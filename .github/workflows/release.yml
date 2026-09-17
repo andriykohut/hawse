@@ -1,0 +1,119 @@
+name: release
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - id: read
+        run: |
+          version=$(.github/scripts/version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: --no-default-features --features ring
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            features: --no-default-features --features ring
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            features: --no-default-features --features ring
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+      # cross's own dependencies do not build under the workflow's -D warnings.
+      - if: runner.os == 'Linux'
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        env:
+          RUSTFLAGS: ""
+      - if: runner.os == 'Linux'
+        run: cross build --release --target "$TARGET" -p hawse ${{ matrix.features }}
+      - if: runner.os == 'macOS'
+        run: cargo build --release --target "$TARGET" -p hawse ${{ matrix.features }}
+      - run: >-
+          cargo about generate --fail --locked -c about.toml -m crates/hawse/Cargo.toml
+          --target "$TARGET" ${{ matrix.features }} -o target/notices.txt about.hbs
+      - run: .github/scripts/package.sh "$TARGET" "$VERSION" target/notices.txt dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hawse-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  crates-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --workspace
+
+  image:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hawse-*-linux-*
+          path: dist
+          merge-multiple: true
+      - run: .github/scripts/image-context.sh dist "$VERSION" context
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: context
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+      - uses: docker/build-push-action@v7
+        with:
+          context: context
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: hawse:ci
+      - run: |
+          got=$(docker run --rm hawse:ci --version)
+          if [[ "$got" != "hawse $VERSION" ]]; then
+            echo "::error::expected 'hawse $VERSION' from the image, got '$got'"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-context
+          path: context
+          if-no-files-found: error
