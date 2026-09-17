@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use hawse_core::frame::{read_body, write_body};
 use hawse_core::transport::{RecvHalf, SendHalf};
-use hawse_core::udp::{BULK_QUEUE, Drops, Sender};
+use hawse_core::udp::{BULK_QUEUE, Drops, Sender, SentCounts};
 use hawse_proto::msg::DatagramHeader;
 use hawse_proto::packet;
 
@@ -32,6 +32,31 @@ async fn a_small_payload_travels_as_a_quic_datagram() {
     assert!(bulk.try_recv().is_err());
 }
 
+/// quinn starts at an MTU of 1200, so a fresh connection carries about 1160 bytes per datagram
+/// and only MTU discovery raises that; 1100 is what the throughput harness offers.
+#[tokio::test]
+async fn an_1100_byte_payload_still_fits_a_datagram_on_a_fresh_connection() {
+    let pair = common::quic_pair().await;
+    let (sender, mut bulk) = Sender::new(pair.server_transport(), Arc::default());
+    let payload = vec![7u8; 1100];
+
+    sender.send(HEADER, &payload);
+
+    let packet = tokio::time::timeout(Duration::from_secs(2), pair.client.read_datagram())
+        .await
+        .expect("a datagram within 2 s")
+        .unwrap();
+    assert_eq!(packet::decode(&packet).unwrap(), (HEADER, &payload[..]));
+    assert!(bulk.try_recv().is_err());
+    assert_eq!(
+        sender.sent(),
+        SentCounts {
+            datagram: 1,
+            bulk: 0
+        }
+    );
+}
+
 #[tokio::test]
 async fn an_oversized_payload_is_queued_for_the_bulk_stream_on_quic() {
     let pair = common::quic_pair().await;
@@ -42,6 +67,13 @@ async fn an_oversized_payload_is_queued_for_the_bulk_stream_on_quic() {
 
     let packet = bulk.try_recv().expect("queued without waiting");
     assert_eq!(packet::decode(&packet).unwrap(), (HEADER, &payload[..]));
+    assert_eq!(
+        sender.sent(),
+        SentCounts {
+            datagram: 0,
+            bulk: 1
+        }
+    );
 }
 
 #[tokio::test]
@@ -53,6 +85,13 @@ async fn every_payload_is_queued_for_the_bulk_stream_on_tcp() {
 
     let packet = bulk.try_recv().expect("queued without waiting");
     assert_eq!(packet::decode(&packet).unwrap(), (HEADER, &b"ping"[..]));
+    assert_eq!(
+        sender.sent(),
+        SentCounts {
+            datagram: 0,
+            bulk: 1
+        }
+    );
 }
 
 #[tokio::test]

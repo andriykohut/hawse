@@ -18,7 +18,7 @@ use super::visitor::refuse;
 use crate::error::chain;
 use crate::frame::read_body;
 use crate::transport::{RecvHalf, SendHalf, Transport};
-use crate::udp::{DropCounts, Drops, FINISH_WAIT, MAX_PAYLOAD, Sender, drain, report_drops};
+use crate::udp::{Drops, FINISH_WAIT, MAX_PAYLOAD, Sender, drain, report_drops};
 
 /// The server's cap does not bound this table: it evicts at its own without telling us.
 pub const SESSION_CAP: usize = 4096;
@@ -356,10 +356,12 @@ pub async fn serve_bulk(
     if let Some(err) = ended {
         tracing::debug!(service = local.service, err = %chain(&err), "bulk stream ended");
     }
-    let counts = local.drops.snapshot();
-    if counts != DropCounts::default() {
-        tracing::info!(service = local.service, ?counts, "udp packets dropped");
-    }
+    tracing::info!(
+        service = local.service,
+        sent = ?local.sender.sent(),
+        drops = ?local.drops.snapshot(),
+        "udp service ended"
+    );
     let _ = tokio::time::timeout(FINISH_WAIT, send.finish()).await;
 }
 
