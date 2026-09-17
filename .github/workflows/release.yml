@@ -119,9 +119,14 @@ jobs:
           path: context
           if-no-files-found: error
 
+  # Pull requests and main already run ci.yml on their own; a tag push does not.
+  ci:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+
   publish-crates:
     if: github.ref_type == 'tag'
-    needs: [version, build, crates-check, image]
+    needs: [version, build, crates-check, image, ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
