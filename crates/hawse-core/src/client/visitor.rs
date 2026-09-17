@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use hawse_proto::msg::{StreamOpen, reset};
+use hawse_proto::msg::{StreamHeader, reset};
 use tokio::net::TcpStream;
 
 use super::Target;
 use crate::error::chain;
-use crate::frame::read_frame;
 use crate::pump::pump;
 use crate::transport::{RecvHalf, SendHalf};
 
@@ -14,30 +13,19 @@ use crate::transport::{RecvHalf, SendHalf};
 /// server `STOP_SENDING(0)` instead. On the TCP transport neither call carries a code — `stop` is a
 /// no-op and `reset` degrades to a clean shutdown — so the visitor cannot tell a refusal from a
 /// service that answered with nothing.
-fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
+pub(super) fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
     send.reset(code);
     recv.stop(code);
 }
 
 /// Dials only the `local` address recorded for `service_id` at `Bound` time; nothing in the header can name an address.
 pub async fn serve(
+    header: StreamHeader,
     mut send: SendHalf,
     mut recv: RecvHalf,
     targets: Arc<RwLock<HashMap<u16, Target>>>,
     buffer: usize,
 ) {
-    let header = match read_frame::<StreamOpen>(&mut recv).await {
-        Ok(StreamOpen::Visitor(header)) => header,
-        Ok(StreamOpen::Bulk { service_id }) => {
-            tracing::warn!(service_id, "bulk stream for a service we never bound");
-            refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
-            return;
-        }
-        Err(err) => {
-            tracing::debug!(err = %chain(&err), "bad stream header");
-            return;
-        }
-    };
     let target = targets
         .read()
         .expect("targets lock")
