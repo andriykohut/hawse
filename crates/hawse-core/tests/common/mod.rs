@@ -407,3 +407,40 @@ pub async fn udp_recv(socket: &UdpSocket) -> Option<Vec<u8>> {
     buf.truncate(len);
     Some(buf)
 }
+
+pub async fn udp_echo_server() -> SocketAddr {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        while let Ok((len, peer)) = socket.recv_from(&mut buf).await {
+            let _ = socket.send_to(&buf[..len], peer).await;
+        }
+    });
+    addr
+}
+
+/// Answers every datagram with `len` bytes of `0xAB`.
+pub async fn udp_replier(len: usize) -> SocketAddr {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 64];
+        let reply = vec![0xAB; len];
+        while let Ok((_, peer)) = socket.recv_from(&mut buf).await {
+            let _ = socket.send_to(&reply, peer).await;
+        }
+    });
+    addr
+}
+
+/// Asks up to five times, half a second apart: UDP may lose a packet without the tunnel being wrong.
+pub async fn udp_ask(visitor: &UdpSocket, port: u16, payload: &[u8]) -> Vec<u8> {
+    for _ in 0..5 {
+        visitor.send_to(payload, ("127.0.0.1", port)).await.unwrap();
+        if let Some(reply) = udp_recv(visitor).await {
+            return reply;
+        }
+    }
+    panic!("no reply from port {port} in five tries");
+}
