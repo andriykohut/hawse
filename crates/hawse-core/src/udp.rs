@@ -14,6 +14,7 @@ pub const IDLE: Duration = Duration::from_secs(60);
 pub const BULK_QUEUE: usize = 256;
 /// The largest datagram a socket can hand us, headers included, so a receive never truncates.
 pub const MAX_PAYLOAD: usize = 65535;
+pub const FINISH_WAIT: Duration = Duration::from_secs(1);
 const REPORT_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]

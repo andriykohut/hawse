@@ -17,7 +17,7 @@ use super::Shared;
 use crate::error::chain;
 use crate::frame::{read_body, write_frame};
 use crate::transport::Transport;
-use crate::udp::{DropCounts, Drops, IDLE, MAX_PAYLOAD, Sender, drain, report_drops};
+use crate::udp::{DropCounts, Drops, FINISH_WAIT, IDLE, MAX_PAYLOAD, Sender, drain, report_drops};
 
 const SWEEP_EVERY: Duration = Duration::from_secs(10);
 
@@ -160,7 +160,11 @@ async fn bulk(
     let open = StreamOpen::Bulk {
         service_id: service.id,
     };
-    if let Err(err) = write_frame(&mut send, &open).await {
+    let wrote = tokio::select! {
+        () = cancel.cancelled() => return,
+        wrote = write_frame(&mut send, &open) => wrote,
+    };
+    if let Err(err) = wrote {
         tracing::warn!(service = service.name, err = %chain(&err), "cannot open the bulk stream");
         return;
     }
@@ -186,7 +190,9 @@ async fn bulk(
             "bulk stream ended; payloads too large for a datagram will drop"
         );
     }
-    send.finish().await;
+    // On the TCP transport a finish waits on the stream's command channel, which a stalled link
+    // fills, and this task holds the service's port until it returns.
+    let _ = tokio::time::timeout(FINISH_WAIT, send.finish()).await;
 }
 
 /// Datagrams from the client, routed to the service each names. Ends with `cancel` or the
