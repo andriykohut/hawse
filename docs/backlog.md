@@ -141,11 +141,6 @@ phase 1. Each says what the code does today and what the fix would be.
 - `client/mod.rs` dials only the first address the resolver returns; try the
   rest before giving up.
 
-### Cross builds
-
-- CI installs `cross` unpinned, so a new release can change the build under
-  us; pin the version.
-
 ### Config
 
 - `ConfigError::ServiceName` and `::ListenPort` have no direct tests; add one
