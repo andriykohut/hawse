@@ -209,6 +209,8 @@ pub enum ConfigError {
     IdleTimeout(Duration),
     #[error("limits streams_per_client cannot be 0")]
     StreamsPerClient,
+    #[error("limits udp_sessions_per_service cannot be 0")]
+    UdpSessions,
 }
 
 fn validate_transport(
@@ -265,6 +267,9 @@ impl ServerConfig {
         // the connection down.
         if self.limits.streams_per_client == 0 {
             return Err(ConfigError::StreamsPerClient);
+        }
+        if self.limits.udp_sessions_per_service == 0 {
+            return Err(ConfigError::UdpSessions);
         }
         let mut seen: BTreeMap<PublicKey, &str> = BTreeMap::new();
         for (client, policy) in &self.clients {
@@ -592,6 +597,13 @@ prefer = "tcp"
         let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
         cfg.limits.streams_per_client = 0;
         assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
+    }
+
+    #[test]
+    fn a_zero_udp_session_cap_is_rejected() {
+        let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
+        cfg.limits.udp_sessions_per_service = 0;
+        assert_eq!(cfg.validate(), Err(ConfigError::UdpSessions));
     }
 
     #[test]

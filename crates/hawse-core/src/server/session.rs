@@ -15,6 +15,7 @@ use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
 
 use super::policy::Grant;
+use super::udp::{self, UdpService, UdpServices};
 use super::{AGENT, Live, Shared, listener};
 use crate::control::Control;
 use crate::net;
@@ -113,6 +114,7 @@ pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: Can
             services: HashMap::new(),
             ids: ServiceIds::new(),
             tasks: TaskTracker::new(),
+            udp: Arc::default(),
         };
         session.serve(control, cancel).await;
     }
@@ -142,6 +144,7 @@ struct Session {
     services: HashMap<String, BoundService>,
     ids: ServiceIds,
     tasks: TaskTracker,
+    udp: UdpServices,
 }
 
 struct BoundService {
@@ -176,6 +179,13 @@ impl ServiceIds {
 
 impl Session {
     async fn serve(mut self, mut control: Control, server_cancel: CancellationToken) {
+        let demux = CancellationToken::new();
+        self.tasks.spawn(udp::demux(
+            Arc::clone(&self.transport),
+            Arc::clone(&self.udp),
+            demux.clone(),
+        ));
+
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
@@ -233,6 +243,7 @@ impl Session {
         for name in names {
             self.unbind(&name);
         }
+        demux.cancel();
         control.finish().await;
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
@@ -263,10 +274,6 @@ impl Session {
         if self.services.contains_key(service) {
             return failed(BindFailure::InUse);
         }
-        if kind == Kind::Udp {
-            tracing::warn!(service, "udp services are not supported yet");
-            return failed(BindFailure::Unsupported);
-        }
         // Ignoring these would open a port with weaker guarantees than the client asked for.
         if !allow.is_empty() {
             tracing::warn!(service, "allow lists are not supported yet");
@@ -281,20 +288,48 @@ impl Session {
             tracing::warn!(service, "every service id is taken");
             return failed(BindFailure::InUse);
         };
-        let (port, listener) = match self.open(service, kind, port, net::bind_tcp) {
-            Ok(opened) => opened,
-            Err(reason) => return failed(reason),
-        };
         let cancel = CancellationToken::new();
-        self.tasks.spawn(listener::serve(
-            Arc::clone(&self.transport),
-            listener,
-            id,
-            port,
-            Arc::clone(&self.shared),
-            cancel.clone(),
-            self.tasks.clone(),
-        ));
+        let port = match kind {
+            Kind::Tcp => {
+                let (port, listener) = match self.open(service, kind, port, net::bind_tcp) {
+                    Ok(opened) => opened,
+                    Err(reason) => return failed(reason),
+                };
+                self.tasks.spawn(listener::serve(
+                    Arc::clone(&self.transport),
+                    listener,
+                    id,
+                    port,
+                    Arc::clone(&self.shared),
+                    cancel.clone(),
+                    self.tasks.clone(),
+                ));
+                port
+            }
+            Kind::Udp => {
+                let (port, socket) = match self.open(service, kind, port, net::bind_udp) {
+                    Ok(opened) => opened,
+                    Err(reason) => return failed(reason),
+                };
+                let bound = Arc::new(UdpService::new(
+                    id,
+                    service.to_owned(),
+                    socket,
+                    port,
+                    Arc::clone(&self.shared),
+                ));
+                self.udp
+                    .write()
+                    .expect("udp services lock")
+                    .insert(id, Arc::clone(&bound));
+                self.tasks.spawn(udp::serve(
+                    bound,
+                    Arc::clone(&self.transport),
+                    cancel.clone(),
+                ));
+                port
+            }
+        };
         self.services
             .insert(service.to_owned(), BoundService { id, port, cancel });
         tracing::info!(service, %port, bind = %self.grant.bind, "bound");
@@ -350,9 +385,14 @@ impl Session {
         outcome
     }
 
-    /// The listener task holds the port's claim until its socket is gone, so this only stops it.
+    /// Only stops the service: a TCP listener task releases its port once its socket is gone, and
+    /// a UDP service does the same when its last handle drops.
     fn unbind(&mut self, service: &str) {
         if let Some(bound) = self.services.remove(service) {
+            self.udp
+                .write()
+                .expect("udp services lock")
+                .remove(&bound.id);
             bound.cancel.cancel();
             tracing::info!(service, port = %bound.port, "unbound");
         }
