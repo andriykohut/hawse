@@ -76,14 +76,12 @@ async fn keeps_two_visitors_apart(prefer: Prefer) {
     let tunnel = tunnel(prefer, &[("echo", &echo)]).await;
     let (one, two) = (udp_visitor().await, udp_visitor().await);
 
-    assert_eq!(
-        udp_ask(&one, tunnel.ports[0], b"from one").await,
-        b"from one"
+    let (from_one, from_two) = tokio::join!(
+        udp_ask(&one, tunnel.ports[0], b"from one"),
+        udp_ask(&two, tunnel.ports[0], b"from two"),
     );
-    assert_eq!(
-        udp_ask(&two, tunnel.ports[0], b"from two").await,
-        b"from two"
-    );
+    assert_eq!(from_one, b"from one");
+    assert_eq!(from_two, b"from two");
 
     assert_eq!(udp_recv(&one).await, None);
     assert_eq!(udp_recv(&two).await, None);

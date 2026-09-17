@@ -50,6 +50,29 @@ mod tests {
     }
 
     #[test]
+    fn small_ids_take_a_byte_each_and_the_payload_follows_untouched() {
+        let header = DatagramHeader {
+            service_id: 7,
+            session: 9,
+        };
+        assert_eq!(&encode(header, b"hi").unwrap()[..], [7, 9, b'h', b'i']);
+    }
+
+    /// postcard varints are little-endian base 128 with the high bit set while more follows:
+    /// 300 is `0xAC 0x02` and 70000 is `0xF0 0xA2 0x04`.
+    #[test]
+    fn ids_past_127_spread_over_several_varint_bytes() {
+        let header = DatagramHeader {
+            service_id: 300,
+            session: 70000,
+        };
+        assert_eq!(
+            &encode(header, b"x").unwrap()[..],
+            [0xAC, 0x02, 0xF0, 0xA2, 0x04, b'x']
+        );
+    }
+
+    #[test]
     fn a_truncated_header_does_not_decode() {
         assert!(decode(&[0xff]).is_err());
     }

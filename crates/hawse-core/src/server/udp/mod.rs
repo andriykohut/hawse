@@ -183,8 +183,9 @@ async fn bulk(
         } => Some(err),
         () = report_drops(&service.name, &service.drops) => None,
     };
+    // An ordinary client disconnect reaches this read before the cancel does, so not a warning.
     if let Some(err) = ended {
-        tracing::warn!(
+        tracing::debug!(
             service = service.name,
             err = %chain(&err),
             "bulk stream ended; payloads too large for a datagram will drop"
