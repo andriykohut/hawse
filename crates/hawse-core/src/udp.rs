@@ -74,6 +74,18 @@ pub async fn report_drops(service: &str, drops: &Drops) {
     }
 }
 
+#[derive(Debug, Default)]
+struct Sent {
+    datagram: AtomicU64,
+    bulk: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SentCounts {
+    pub datagram: u64,
+    pub bulk: u64,
+}
+
 /// Never waits: a payload that fits goes out as a datagram, anything else is queued for the bulk
 /// stream, and a full queue drops it. A UDP sender must not feel the tunnel's back-pressure.
 #[derive(Clone)]
@@ -81,6 +93,7 @@ pub struct Sender {
     transport: Arc<dyn Transport>,
     bulk: mpsc::Sender<Bytes>,
     drops: Arc<Drops>,
+    sent: Arc<Sent>,
 }
 
 impl Sender {
@@ -92,9 +105,19 @@ impl Sender {
                 transport,
                 bulk,
                 drops,
+                sent: Arc::default(),
             },
             queue,
         )
+    }
+
+    /// What went by each path: quinn's datagram size starts near 1160 and only grows with MTU
+    /// discovery, so a payload can take the bulk stream for the life of a connection.
+    pub fn sent(&self) -> SentCounts {
+        SentCounts {
+            datagram: self.sent.datagram.load(Ordering::Relaxed),
+            bulk: self.sent.bulk.load(Ordering::Relaxed),
+        }
     }
 
     pub fn send(&self, header: DatagramHeader, payload: &[u8]) {
@@ -111,11 +134,17 @@ impl Sender {
             match self.transport.send_datagram(packet.clone()) {
                 // The path MTU can shrink between the size check and the send.
                 Err(TransportError::DatagramTooLarge | TransportError::NoDatagrams) => {}
-                Ok(()) | Err(_) => return,
+                Ok(()) => {
+                    self.sent.datagram.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                Err(_) => return,
             }
         }
         if self.bulk.try_send(packet).is_err() {
             self.drops.bulk_full();
+        } else {
+            self.sent.bulk.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

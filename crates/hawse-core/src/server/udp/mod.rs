@@ -17,7 +17,7 @@ use super::Shared;
 use crate::error::chain;
 use crate::frame::{read_body, write_frame};
 use crate::transport::Transport;
-use crate::udp::{DropCounts, Drops, FINISH_WAIT, IDLE, MAX_PAYLOAD, Sender, drain, report_drops};
+use crate::udp::{Drops, FINISH_WAIT, IDLE, MAX_PAYLOAD, Sender, drain, report_drops};
 
 const SWEEP_EVERY: Duration = Duration::from_secs(10);
 
@@ -99,10 +99,12 @@ pub async fn serve(
         inbound(&service, &sender, &cancel),
         bulk(&service, &*transport, queue, &cancel),
     );
-    let counts = service.drops.snapshot();
-    if counts != DropCounts::default() {
-        tracing::info!(service = service.name, ?counts, "udp packets dropped");
-    }
+    tracing::info!(
+        service = service.name,
+        sent = ?sender.sent(),
+        drops = ?service.drops.snapshot(),
+        "udp service ended"
+    );
 }
 
 async fn inbound(service: &UdpService, sender: &Sender, cancel: &CancellationToken) {

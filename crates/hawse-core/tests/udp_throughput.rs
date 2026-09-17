@@ -121,8 +121,8 @@ async fn tunnelled(label: &str, prefer: Prefer, len: usize) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "benchmark, run explicitly with --release --ignored --nocapture"]
 async fn udp_packet_rate_over_quic_and_the_tcp_fallback() {
-    direct(1200).await;
-    tunnelled("quic_datagram_1200", Prefer::Quic, 1200).await;
+    direct(1100).await;
+    tunnelled("quic_datagram_1100", Prefer::Quic, 1100).await;
     tunnelled("quic_bulk_1472", Prefer::Quic, 1472).await;
     tunnelled("tcp_bulk_1200", Prefer::Tcp, 1200).await;
     eprintln!("loopback: no loss, no round trip. Compare each line only against its own history.");
