@@ -100,22 +100,28 @@ parked for later. Each entry says what it is and why it waits.
 - **A hostname `local` is resolved on the client's datagram path.** Each new
   session looks `local` up before it opens its socket, and the one task that
   routes datagrams waits for it, so a slow resolver pauses every UDP service on
-  the connection for the length of the lookup, once per new visitor. A literal
-  address is never looked up. Resolving per session is what lets a hostname
-  follow DNS the way the TCP path does: caching per service would go stale
-  until the client reconnects, and handing each first packet to a task of its
-  own is unbounded under a burst. Waits for a design that keeps both.
-- **Each client session holds a 64 KiB receive buffer.** The server has one
-  socket per service and one buffer; the client has a socket per session and a
-  buffer for each, about 256 MiB for one service at the 4096-session cap. File
-  descriptors run out first on most hosts. Sizing the buffer to what the path
-  can carry would cut it a hundredfold.
+  the connection for the length of the lookup, once per new visitor. Sessions
+  are opened by whoever sends to the public port, so the lookup rate is theirs
+  to set, and the lookup has no timeout. A literal address is never looked up.
+  Resolving per session is what lets a hostname follow DNS the way the TCP path
+  does: caching per service would go stale until the client reconnects, and
+  handing each first packet to a task of its own is unbounded under a burst.
+  Waits for a design that keeps both. The README tells users to give a literal
+  address.
 - **Service ids wrap.** `ServiceIds` reuses an id after 65,536 binds in one
   session, skipping only ids still bound. With UDP, a reply still in flight for
   the old service names an id the new service now holds, and the new service's
   sessions start again from 0, so that reply could reach a different visitor.
   Not reachable until hot reload can bind and unbind in a loop; worth closing
   before reload lands.
+- **The client's session table can be filled from outside.** The server evicts
+  at its cap without telling the client, so what bounds the client's sockets is
+  its own cap of 4096 per service, a constant, and a sender rotating source
+  ports holds it there whatever `udp_sessions_per_service` says. At the cap the
+  client drops the session quiet longest, as the server does, so new visitors
+  still get in. 4096 is above the usual soft descriptor limit of 1024. Waits
+  for a decision between a knob, a shorter life for a session `local` never
+  answered, and an eviction notice on the wire.
 
 ## Deferred from the release work
 
