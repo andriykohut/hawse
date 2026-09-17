@@ -84,6 +84,8 @@ pub enum TransportError {
     Connection(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("this transport has no datagrams")]
     NoDatagrams,
+    #[error("payload does not fit a datagram on this path")]
+    DatagramTooLarge,
     #[error("stream i/o failed")]
     Io(#[source] io::Error),
 }
