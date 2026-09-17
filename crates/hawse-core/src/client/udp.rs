@@ -18,7 +18,7 @@ use super::visitor::refuse;
 use crate::error::chain;
 use crate::frame::read_body;
 use crate::transport::{RecvHalf, SendHalf, Transport};
-use crate::udp::{DropCounts, Drops, MAX_PAYLOAD, Sender, drain, report_drops};
+use crate::udp::{DropCounts, Drops, FINISH_WAIT, MAX_PAYLOAD, Sender, drain, report_drops};
 
 /// Against a server that ignores its own cap; ours evicts long before a service holds this many.
 const SESSION_CAP: usize = 4096;
@@ -295,7 +295,7 @@ pub async fn serve_bulk(
     if counts != DropCounts::default() {
         tracing::info!(service = local.service, ?counts, "udp packets dropped");
     }
-    send.finish().await;
+    let _ = tokio::time::timeout(FINISH_WAIT, send.finish()).await;
 }
 
 /// Ends with the transport; on the TCP transport, which has no datagrams, that is at once.

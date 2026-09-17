@@ -3,8 +3,9 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    RunningClient, RunningServer, client_config, client_config_over, expect_bound, server_config,
-    start_client, start_server, udp_ask, udp_echo_server, udp_recv, udp_replier, udp_visitor,
+    RunningClient, RunningServer, client_config, client_config_over, expect_bound,
+    free_udp_port_outside_pool, server_config, start_client, start_server, udp_ask,
+    udp_echo_server, udp_recv, udp_replier, udp_visitor,
 };
 use hawse_core::config::Prefer;
 use hawse_core::identity::Identity;
@@ -180,6 +181,52 @@ async fn a_silent_local_service_costs_only_silence_over_quic() {
 #[tokio::test]
 async fn a_silent_local_service_costs_only_silence_over_tcp() {
     a_silent_local_service_costs_only_silence(Prefer::Tcp).await;
+}
+
+async fn a_fixed_udp_port_is_free_for_the_next_session(prefer: Prefer) {
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let granted = free_udp_port_outside_pool().await;
+    let grant = format!("{granted}/udp");
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[&grant])]),
+        &server_id,
+    );
+    let echo = udp_echo_server().await.to_string();
+    let cfg = client_config_over(server.addr, server.key, &[("echo", &echo, &grant)], prefer);
+    let visitor = udp_visitor().await;
+
+    let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
+    let mut first = start_client(cfg.clone(), twin);
+    assert_eq!(
+        expect_bound(&mut first.events, "echo").await.number,
+        granted
+    );
+    assert_eq!(udp_ask(&visitor, granted, b"first").await, b"first");
+    first.cancel.cancel();
+    assert!(first.task.await.unwrap().is_ok());
+
+    let mut second = start_client(cfg, client_id);
+    assert_eq!(
+        expect_bound(&mut second.events, "echo").await.number,
+        granted
+    );
+    assert_eq!(udp_ask(&visitor, granted, b"second").await, b"second");
+
+    second.cancel.cancel();
+    assert!(second.task.await.unwrap().is_ok());
+    server.cancel.cancel();
+    server.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_fixed_udp_port_is_free_for_the_next_session_over_quic() {
+    a_fixed_udp_port_is_free_for_the_next_session(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn a_fixed_udp_port_is_free_for_the_next_session_over_tcp() {
+    a_fixed_udp_port_is_free_for_the_next_session(Prefer::Tcp).await;
 }
 
 /// No retries here, on purpose: each session's first packet is oversized, so it rides the bulk
