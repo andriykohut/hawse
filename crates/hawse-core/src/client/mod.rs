@@ -318,6 +318,7 @@ impl Client {
                 service_id,
                 local,
                 IDLE,
+                udp::SESSION_CAP,
                 Arc::clone(ctx.transport),
                 ctx.tasks.clone(),
                 ctx.udp_cancel.clone(),

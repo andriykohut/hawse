@@ -20,8 +20,8 @@ use crate::frame::read_body;
 use crate::transport::{RecvHalf, SendHalf, Transport};
 use crate::udp::{DropCounts, Drops, FINISH_WAIT, MAX_PAYLOAD, Sender, drain, report_drops};
 
-/// Against a server that ignores its own cap; ours evicts long before a service holds this many.
-const SESSION_CAP: usize = 4096;
+/// The server's cap does not bound this table: it evicts at its own without telling us.
+pub const SESSION_CAP: usize = 4096;
 pub const BOUND_WAIT: Duration = Duration::from_secs(5);
 
 /// The UDP services of one connection, by the id the server gave each.
@@ -74,6 +74,7 @@ pub struct UdpLocal {
     id: u16,
     local: String,
     idle: Duration,
+    cap: usize,
     sender: Sender,
     /// Taken by the one bulk stream the server opens for this service.
     queue: Mutex<Option<mpsc::Receiver<Bytes>>>,
@@ -87,6 +88,8 @@ struct LocalSession {
     socket: UdpSocket,
     used: Mutex<Instant>,
     warned: AtomicBool,
+    /// A child of the service's, so eviction ends one reader and unbinding ends them all.
+    cancel: CancellationToken,
 }
 
 impl LocalSession {
@@ -109,11 +112,13 @@ impl LocalSession {
 }
 
 impl UdpLocal {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         service: String,
         id: u16,
         local: String,
         idle: Duration,
+        cap: usize,
         transport: Arc<dyn Transport>,
         tasks: TaskTracker,
         cancel: CancellationToken,
@@ -125,6 +130,7 @@ impl UdpLocal {
             id,
             local,
             idle,
+            cap,
             sender,
             queue: Mutex::new(Some(queue)),
             sessions: Mutex::new(HashMap::new()),
@@ -155,15 +161,8 @@ impl UdpLocal {
     }
 
     async fn session(self: &Arc<Self>, id: u32) -> Option<Arc<LocalSession>> {
-        {
-            let sessions = self.sessions.lock().expect("udp sessions lock");
-            if let Some(found) = sessions.get(&id) {
-                return Some(Arc::clone(found));
-            }
-            if sessions.len() >= SESSION_CAP {
-                self.drops.at_cap();
-                return None;
-            }
+        if let Some(found) = self.sessions.lock().expect("udp sessions lock").get(&id) {
+            return Some(Arc::clone(found));
         }
         let socket = match connect(&self.local).await {
             Ok(socket) => socket,
@@ -177,16 +176,21 @@ impl UdpLocal {
             socket,
             used: Mutex::new(Instant::now()),
             warned: AtomicBool::new(false),
+            cancel: self.cancel.child_token(),
         });
-        // The datagram path and the bulk stream deliver from different tasks, so another one may
-        // have opened this session while the socket above was being connected.
-        let session = Arc::clone(
-            self.sessions
-                .lock()
-                .expect("udp sessions lock")
-                .entry(id)
-                .or_insert_with(|| Arc::clone(&fresh)),
-        );
+        let session = {
+            let mut sessions = self.sessions.lock().expect("udp sessions lock");
+            // Evicting under the lock that inserts is what makes the cap exact.
+            let full = sessions.len() >= self.cap && !sessions.contains_key(&id);
+            let oldest = full.then(|| quietest(&sessions)).flatten();
+            if let Some(gone) = oldest.and_then(|id| sessions.remove(&id)) {
+                gone.cancel.cancel();
+                self.drops.at_cap();
+            }
+            // The datagram path and the bulk stream deliver from different tasks, so another one
+            // may have opened this session while the socket above was being connected.
+            Arc::clone(sessions.entry(id).or_insert_with(|| Arc::clone(&fresh)))
+        };
         if Arc::ptr_eq(&session, &fresh) {
             tracing::debug!(service = self.service, session = id, "udp session opened");
             self.tasks
@@ -194,6 +198,14 @@ impl UdpLocal {
         }
         Some(session)
     }
+}
+
+/// A linear scan: it runs only at the cap, once per new session.
+fn quietest(sessions: &HashMap<u32, Arc<LocalSession>>) -> Option<u32> {
+    sessions
+        .iter()
+        .min_by_key(|(_, session)| session.used())
+        .map(|(&id, _)| id)
 }
 
 async fn connect(local: &str) -> io::Result<UdpSocket> {
@@ -220,7 +232,7 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
     loop {
         let expires = session.used() + local.idle;
         tokio::select! {
-            () = local.cancel.cancelled() => break,
+            () = session.cancel.cancelled() => break,
             () = tokio::time::sleep_until(expires) => {
                 // `deliver` may have used the session since `expires` was read.
                 if session.used() + local.idle <= Instant::now() {
@@ -356,11 +368,20 @@ mod tests {
     const ID: u16 = 4;
 
     fn service(local: SocketAddr, idle: Duration) -> (Arc<UdpLocal>, mpsc::Receiver<Bytes>) {
+        capped(local, idle, SESSION_CAP)
+    }
+
+    fn capped(
+        local: SocketAddr,
+        idle: Duration,
+        cap: usize,
+    ) -> (Arc<UdpLocal>, mpsc::Receiver<Bytes>) {
         let service = UdpLocal::new(
             "svc".to_owned(),
             ID,
             local.to_string(),
             idle,
+            cap,
             Arc::new(NoTransport),
             TaskTracker::new(),
             CancellationToken::new(),
@@ -451,6 +472,24 @@ mod tests {
         }
 
         assert_eq!(service.sessions.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn at_the_cap_the_session_quiet_longest_makes_room_for_a_new_one() {
+        let (service, mut replies) = capped(port_teller().await, IDLE, 2);
+        for session in 1..=2 {
+            service.deliver(&packet_for(session, b"?")).await;
+            reply(&mut replies).await;
+        }
+
+        service.deliver(&packet_for(3, b"?")).await;
+
+        let (newest, _) = reply(&mut replies).await;
+        assert_eq!(newest.session, 3);
+        assert_eq!(service.drops.snapshot().at_cap, 1);
+        let sessions = service.sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(!sessions.contains_key(&1));
     }
 
     #[tokio::test]
