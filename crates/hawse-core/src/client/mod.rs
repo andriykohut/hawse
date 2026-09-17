@@ -117,8 +117,7 @@ struct Dialed {
     control: Control,
 }
 
-/// What `register_bound` needs from `run_once`'s scope to open a UDP service, bundled so the
-/// method itself stays under clippy's argument limit.
+/// Bundled only to keep `register_bound` under clippy's argument-count limit.
 struct BindCtx<'a> {
     transport: &'a Arc<dyn Transport>,
     tasks: &'a TaskTracker,
