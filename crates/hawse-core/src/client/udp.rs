@@ -79,6 +79,9 @@ pub struct UdpLocal {
     /// Taken by the one bulk stream the server opens for this service.
     queue: Mutex<Option<mpsc::Receiver<Bytes>>>,
     sessions: Mutex<HashMap<u32, Arc<LocalSession>>>,
+    /// One buffer for every reader: a socket per session with 64 KiB of its own would be 256 MiB
+    /// at the cap, and a shorter buffer would truncate a 65507-byte reply.
+    buf: Mutex<Vec<u8>>,
     drops: Arc<Drops>,
     tasks: TaskTracker,
     cancel: CancellationToken,
@@ -134,6 +137,7 @@ impl UdpLocal {
             sender,
             queue: Mutex::new(Some(queue)),
             sessions: Mutex::new(HashMap::new()),
+            buf: Mutex::new(vec![0u8; MAX_PAYLOAD]),
             drops,
             tasks,
             cancel,
@@ -228,7 +232,6 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
         service_id: local.id,
         session: id,
     };
-    let mut buf = vec![0u8; MAX_PAYLOAD];
     loop {
         let expires = session.used() + local.idle;
         tokio::select! {
@@ -239,12 +242,20 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
                     break;
                 }
             }
-            received = session.socket.recv(&mut buf) => match received {
-                Ok(len) => {
+            ready = session.socket.readable() => {
+                let received = ready.and_then(|()| {
+                    let mut buf = local.buf.lock().expect("udp buffer lock");
+                    let len = session.socket.try_recv(&mut buf)?;
                     session.touch();
+                    // Synchronous, so the shared buffer is never held across an await.
                     local.sender.send(header, &buf[..len]);
-                }
-                Err(err) => {
+                    Ok(())
+                });
+                if let Err(err) = received {
+                    // `readable` wakes on readiness the kernel may withdraw before `try_recv`.
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        continue;
+                    }
                     session.note(&local.service, &local.local, &err);
                     // A service that is not up yet answers every datagram this way; closing the
                     // session for it would open a new socket per packet.
