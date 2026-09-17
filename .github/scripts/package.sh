@@ -16,6 +16,14 @@ trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/$name" "$out"
 cp "${CARGO_TARGET_DIR:-target}/$target/release/hawse" LICENSE-MIT LICENSE-APACHE README.md "$stage/$name/"
 cp "$notices" "$stage/$name/THIRD-PARTY-LICENSES.txt"
+# musl targets link musl itself into the binary, and cargo-about only sees crates.
+if [[ $target == *-musl* ]]; then
+  {
+    printf '\n%s\n' --------------------------------------------------------------------------------
+    printf 'MIT License\n\nUsed by:\n  musl, the C library linked statically into this binary\n\n'
+    cat .github/licenses/musl-COPYRIGHT
+  } >> "$stage/$name/THIRD-PARTY-LICENSES.txt"
+fi
 cp -R contrib "$stage/$name/"
 
 # tar run as root restores the stored owner, so store root rather than the build account.
