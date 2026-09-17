@@ -81,6 +81,42 @@ parked for later. Each entry says what it is and why it waits.
   was the leading candidate for telling an abort from a clean finish, and it
   cannot be, while `reset` picks between FIN and RST on timing.
 
+## Deferred from the phase 2b UDP work
+
+- **PROXY protocol for UDP needs the visitor's address on the wire.** A packet
+  carries a service id and a session id; the client never learns who the
+  visitor is. PROXY v2 on a UDP service needs the address sent once per
+  session, which is a wire change.
+- **A bulk stream that ends is not reopened.** If the stream fails while the
+  session lives, payloads too large for a datagram drop, and on the TCP
+  transport all of them do, until the service is bound again. A transport
+  failure ends the session anyway, so this waits for a case where the stream
+  dies alone.
+- **Some drops are not counted.** quinn discards the oldest queued datagrams
+  when its send buffer is full and does not say so, and a datagram naming a
+  service id nobody holds has no service to be counted against.
+- **The idle time and the bulk queue depth are constants**, 60 s and 256
+  packets. A knob for either waits for a measurement that asks for one.
+- **A hostname `local` is resolved on the client's datagram path.** Each new
+  session looks `local` up before it opens its socket, and the one task that
+  routes datagrams waits for it, so a slow resolver pauses every UDP service on
+  the connection for the length of the lookup, once per new visitor. A literal
+  address is never looked up. Resolving per session is what lets a hostname
+  follow DNS the way the TCP path does: caching per service would go stale
+  until the client reconnects, and handing each first packet to a task of its
+  own is unbounded under a burst. Waits for a design that keeps both.
+- **Each client session holds a 64 KiB receive buffer.** The server has one
+  socket per service and one buffer; the client has a socket per session and a
+  buffer for each, about 256 MiB for one service at the 4096-session cap. File
+  descriptors run out first on most hosts. Sizing the buffer to what the path
+  can carry would cut it a hundredfold.
+- **Service ids wrap.** `ServiceIds` reuses an id after 65,536 binds in one
+  session, skipping only ids still bound. With UDP, a reply still in flight for
+  the old service names an id the new service now holds, and the new service's
+  sessions start again from 0, so that reply could reach a different visitor.
+  Not reachable until hot reload can bind and unbind in a loop; worth closing
+  before reload lands.
+
 ## Deferred from the release work
 
 - **Keys default to the config directory.** `paths::locate` gives config and
@@ -147,8 +183,8 @@ phase 1. Each says what the code does today and what the fix would be.
   each.
 - Nothing checks that `listen` falls outside `dynamic_ports`, or that a fixed
   grant does not name the listen port; both would fail later at bind time.
-- `quic_retry`, `auth_failures_per_minute` and `udp_sessions_per_service`
-  parse but do not take effect yet, and nothing warns that they are ignored.
+- `quic_retry` and `auth_failures_per_minute` parse but do not take effect yet,
+  and nothing warns that they are ignored.
   `transport.stream_window` and `transport.congestion` join them under
   `prefer = "tcp"`, where yamux guarantees every stream 256 KiB and grows it
   only into the connection window's slack, leaving no per-stream knob, and the
@@ -217,9 +253,6 @@ phase 1. Each says what the code does today and what the fix would be.
 
 ### Phase 2 shape
 
-- `BindFailure` needs `Unsupported` and `BadName`, and stream opens need a
-  `StreamOpen` enum, before UDP bulk streams go on the wire; today every
-  refusal is `BadPort`.
 - The control-channel scaffolding (framed stream, ping bookkeeping, `send`
   and `next`) is duplicated in the server and the client; extract it before
   the transport trait arrives.
@@ -231,8 +264,9 @@ phase 1. Each says what the code does today and what the fix would be.
   used to reserve 0, and Linux's ephemeral range overlaps the default
   40000-41000 pool, so the kernel could hand the listener a port the allocator
   would later hand to a service.
-- Visitor accept needs a per-session bound before UDP sessions add another
-  unbounded map.
+- Visitor accept needs a per-session bound: past `streams_per_client` every
+  accepted socket waits on a stream while holding a descriptor. UDP sessions
+  have their own cap.
 
 ### From the final re-review
 
