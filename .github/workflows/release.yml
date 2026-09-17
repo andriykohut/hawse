@@ -112,6 +112,7 @@ jobs:
             echo "::error::expected 'hawse $VERSION' from the image, got '$got'"
             exit 1
           fi
+          docker run --rm hawse:ci keygen
       - uses: actions/upload-artifact@v7
         with:
           name: image-context
