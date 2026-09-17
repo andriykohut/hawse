@@ -132,3 +132,71 @@ fn echo_round_trip_through_real_binaries() {
     visitor.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"ping");
 }
+
+#[test]
+fn udp_echo_round_trip_through_real_binaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let client_key = keygen(&dir.path().join("client.key"));
+    let server_port = free_listen_port();
+    let pool = ServerConfig::default().dynamic_ports;
+    let public_port = loop {
+        let port = free_udp_port();
+        if port != server_port && !pool.contains_number(port) {
+            break port;
+        }
+    };
+
+    let echo = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let echo_addr = echo.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while let Ok((len, peer)) = echo.recv_from(&mut buf) {
+            let _ = echo.send_to(&buf[..len], peer);
+        }
+    });
+
+    fs::write(
+        dir.path().join("server.toml"),
+        format!("listen = \"127.0.0.1:{server_port}\"\n\n[clients.e2e]\nkey = \"{client_key}\"\nports = [\"{public_port}/udp\"]\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("client.toml"),
+        format!("server = \"127.0.0.1:{server_port}\"\nserver_key = \"{server_key}\"\nname = \"e2e\"\n\n[expose.echo]\nlocal = \"{echo_addr}\"\nport = \"{public_port}/udp\"\n"),
+    )
+    .unwrap();
+
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(dir.path().join("server.toml"))
+            .spawn()
+            .unwrap(),
+    );
+    let _client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(dir.path().join("client.toml"))
+            .spawn()
+            .unwrap(),
+    );
+
+    let visitor = UdpSocket::bind("127.0.0.1:0").unwrap();
+    visitor
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut buf = [0u8; 16];
+    // Until the service is bound nothing answers, so keep asking.
+    let len = loop {
+        visitor
+            .send_to(b"ping", ("127.0.0.1", public_port))
+            .unwrap();
+        if let Ok((len, _)) = visitor.recv_from(&mut buf) {
+            break len;
+        }
+        assert!(Instant::now() < deadline, "no UDP reply through the tunnel");
+    };
+    assert_eq!(&buf[..len], b"ping");
+}
