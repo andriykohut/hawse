@@ -55,6 +55,7 @@ pub struct Shared {
     pub policy: Policy,
     pub ports: Mutex<PortAllocator>,
     pub buffer: usize,
+    pub udp_sessions: usize,
     /// One live session per client key, so a reconnecting client is not locked out of its own
     /// ports by the session its previous connection left behind.
     pub sessions: Mutex<HashMap<PublicKey, Arc<Live>>>,
@@ -124,6 +125,8 @@ impl Server {
             policy: Policy::from_config(cfg),
             ports: Mutex::new(ports),
             buffer: usize::try_from(cfg.transport.buffer.0).expect("a validated buffer"),
+            udp_sessions: usize::try_from(cfg.limits.udp_sessions_per_service)
+                .expect("a u32 fits usize on every target hawse builds for"),
             sessions: Mutex::new(HashMap::new()),
         });
         Ok(Self {

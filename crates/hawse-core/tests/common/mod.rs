@@ -11,17 +11,20 @@ use hawse_core::client::{Client, ClientError, Event};
 use hawse_core::config::{
     ClientConfig, ClientPolicy, ClientTransport, Expose, Prefer, ServerConfig,
 };
+use hawse_core::control::Control;
+use hawse_core::frame::read_frame;
 use hawse_core::identity::Identity;
 use hawse_core::server::{Server, ServerError};
 use hawse_core::tls;
-use hawse_core::transport::Transport;
 use hawse_core::transport::quic::{self, QuicTransport, Tuning};
 use hawse_core::transport::tcp;
+use hawse_core::transport::{RecvHalf, SendHalf, Transport};
 use hawse_proto::key::PublicKey;
-use hawse_proto::port::{Port, PortSpan};
+use hawse_proto::msg::{ClientMessage, ServerMessage, StreamOpen};
+use hawse_proto::port::{Kind, Port, PortSpan};
 use quinn::{Connection, Endpoint};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -285,4 +288,122 @@ pub async fn free_port_outside_pool(taken: &[u16]) -> u16 {
             return port;
         }
     }
+}
+
+/// A client that speaks the protocol by hand, for testing the server without ours.
+pub struct RawClient {
+    pub conn: Connection,
+    pub control: Control,
+    _endpoint: Endpoint,
+}
+
+pub async fn raw_client(server: &RunningServer, identity: &Identity) -> RawClient {
+    let (cert, key) = identity.certificate().unwrap();
+    let endpoint = quic::dialer(
+        tls::client_config(cert, key, server.key, tls::provider()).unwrap(),
+        Tuning::CLIENT,
+        server.addr,
+    )
+    .unwrap();
+    let conn = quic::connect(&endpoint, server.addr).await.unwrap();
+    let (send, recv) = conn.open_bi().await.unwrap();
+    let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
+    control
+        .send(&ClientMessage::Hello {
+            name: None,
+            agent: "raw".to_owned(),
+        })
+        .await
+        .unwrap();
+    let mut client = RawClient {
+        conn,
+        control,
+        _endpoint: endpoint,
+    };
+    assert!(matches!(
+        client.reply().await,
+        ServerMessage::Welcome { .. }
+    ));
+    client
+}
+
+impl RawClient {
+    /// The next message that is not a keepalive; the server pings as soon as a session starts.
+    pub async fn reply(&mut self) -> ServerMessage {
+        loop {
+            let msg =
+                tokio::time::timeout(Duration::from_secs(5), self.control.next::<ServerMessage>())
+                    .await
+                    .expect("a reply within 5 s")
+                    .expect("control stream open");
+            if !matches!(msg, ServerMessage::Ping { .. }) {
+                return msg;
+            }
+        }
+    }
+
+    pub async fn bind_udp(&mut self, service: &str, port: Option<u16>) -> ServerMessage {
+        self.control
+            .send(&ClientMessage::Bind {
+                service: service.to_owned(),
+                kind: Kind::Udp,
+                port,
+                allow: vec![],
+                proxy_protocol: false,
+            })
+            .await
+            .unwrap();
+        self.reply().await
+    }
+
+    /// `(service_id, public port)` of a dynamic UDP bind.
+    pub async fn bound_udp(&mut self, service: &str) -> (u16, u16) {
+        match self.bind_udp(service, None).await {
+            ServerMessage::Bound {
+                service_id, port, ..
+            } => (service_id, port),
+            other => panic!("expected Bound, got {other:?}"),
+        }
+    }
+
+    pub async fn accept_bulk(&self) -> (u16, SendHalf, RecvHalf) {
+        let (send, recv) = tokio::time::timeout(Duration::from_secs(5), self.conn.accept_bi())
+            .await
+            .expect("a bulk stream within 5 s")
+            .unwrap();
+        let mut recv = RecvHalf::Quic(recv);
+        match read_frame::<StreamOpen>(&mut recv).await.unwrap() {
+            StreamOpen::Bulk { service_id } => (service_id, SendHalf::Quic(send), recv),
+            other @ StreamOpen::Visitor(_) => panic!("expected Bulk, got {other:?}"),
+        }
+    }
+}
+
+pub async fn free_udp_port_outside_pool() -> u16 {
+    loop {
+        let port = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if !DYNAMIC_PORTS.contains(&port) {
+            return port;
+        }
+    }
+}
+
+pub async fn udp_visitor() -> UdpSocket {
+    UdpSocket::bind("127.0.0.1:0").await.unwrap()
+}
+
+/// `None` after half a second of silence.
+pub async fn udp_recv(socket: &UdpSocket) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 65536];
+    let len = tokio::time::timeout(Duration::from_millis(500), socket.recv(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    buf.truncate(len);
+    Some(buf)
 }

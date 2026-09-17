@@ -78,10 +78,13 @@ impl SessionTable {
         removed
     }
 
+    // Exercised only by the tests below; `is_empty` exists alongside it for `clippy::len_without_is_empty`.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.by_session.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.by_session.is_empty()
     }
