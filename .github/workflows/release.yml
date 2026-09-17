@@ -117,3 +117,102 @@ jobs:
           name: image-context
           path: context
           if-no-files-found: error
+
+  publish-crates:
+    if: github.ref_type == 'tag'
+    needs: [version, build, crates-check, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - id: pending
+        run: |
+          crates=$(.github/scripts/unpublished-crates.sh "$VERSION" hawse-proto hawse-core hawse | paste -sd' ' -)
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+      - if: steps.pending.outputs.crates != ''
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATES: ${{ steps.pending.outputs.crates }}
+        run: |
+          read -ra crates <<<"$CRATES"
+          for crate in "${crates[@]}"; do
+            cargo publish -p "$crate"
+          done
+
+  github-release:
+    if: github.ref_type == 'tag'
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hawse-*
+          path: dist
+          merge-multiple: true
+      - working-directory: dist
+        run: sha256sum hawse-*.tar.gz > SHA256SUMS
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/hawse-*.tar.gz
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*
+
+  publish-image:
+    if: github.ref_type == 'tag'
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: image-context
+          path: context
+      # Artifact uploads drop empty directories, and the Dockerfile copies this one.
+      - run: mkdir -p context/state
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: context
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
