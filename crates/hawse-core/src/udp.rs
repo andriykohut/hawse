@@ -98,6 +98,7 @@ impl Sender {
 
     pub fn send(&self, header: DatagramHeader, payload: &[u8]) {
         let Ok(packet) = packet::encode(header, payload) else {
+            // No socket returns this: UDP caps a payload at 65527 bytes, which fits a frame with its header.
             tracing::debug!(len = payload.len(), "payload does not fit a frame");
             return;
         };
