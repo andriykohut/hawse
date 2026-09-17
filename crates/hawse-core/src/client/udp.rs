@@ -82,6 +82,9 @@ pub struct UdpLocal {
     /// One buffer for every reader: a socket per session with 64 KiB of its own would be 256 MiB
     /// at the cap, and a shorter buffer would truncate a 65507-byte reply.
     buf: Mutex<Vec<u8>>,
+    /// Whoever sends to the public port opens sessions, so trouble with `local` is warned about
+    /// once per service and logged at `debug` after, until a reply clears it.
+    warned: AtomicBool,
     drops: Arc<Drops>,
     tasks: TaskTracker,
     cancel: CancellationToken,
@@ -90,7 +93,6 @@ pub struct UdpLocal {
 struct LocalSession {
     socket: UdpSocket,
     used: Mutex<Instant>,
-    warned: AtomicBool,
     /// A child of the service's, so eviction ends one reader and unbinding ends them all.
     cancel: CancellationToken,
 }
@@ -102,15 +104,6 @@ impl LocalSession {
 
     fn used(&self) -> Instant {
         *self.used.lock().expect("session clock lock")
-    }
-
-    fn note(&self, service: &str, local: &str, err: &io::Error) {
-        let refused = err.kind() == io::ErrorKind::ConnectionRefused;
-        if refused && !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!(service, local, "local service refused a datagram");
-        } else {
-            tracing::debug!(service, local, err = %chain(err), "local socket error");
-        }
     }
 }
 
@@ -138,6 +131,7 @@ impl UdpLocal {
             queue: Mutex::new(Some(queue)),
             sessions: Mutex::new(HashMap::new()),
             buf: Mutex::new(vec![0u8; MAX_PAYLOAD]),
+            warned: AtomicBool::new(false),
             drops,
             tasks,
             cancel,
@@ -159,8 +153,36 @@ impl UdpLocal {
         };
         session.touch();
         if let Err(err) = session.socket.send(payload).await {
-            session.note(&self.service, &self.local, &err);
+            self.note(&err);
             self.drops.socket();
+        }
+    }
+
+    fn note(&self, err: &io::Error) {
+        let refused = err.kind() == io::ErrorKind::ConnectionRefused;
+        if refused && !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                service = self.service,
+                local = self.local,
+                "local service refused a datagram"
+            );
+        } else {
+            tracing::debug!(service = self.service, local = self.local, err = %chain(err), "local socket error");
+        }
+    }
+
+    fn no_socket(&self, err: &io::Error) {
+        if self.warned.swap(true, Ordering::Relaxed) {
+            tracing::debug!(service = self.service, local = self.local, err = %chain(err), "cannot open a socket toward the local service");
+        } else {
+            tracing::warn!(service = self.service, local = self.local, err = %chain(err), "cannot open a socket toward the local service");
+        }
+    }
+
+    /// Read before the store, so the common path leaves a line shared by every reader alone.
+    fn heard_from_local(&self) {
+        if self.warned.load(Ordering::Relaxed) {
+            self.warned.store(false, Ordering::Relaxed);
         }
     }
 
@@ -171,7 +193,7 @@ impl UdpLocal {
         let socket = match connect(&self.local).await {
             Ok(socket) => socket,
             Err(err) => {
-                tracing::warn!(service = self.service, local = self.local, err = %chain(&err), "cannot open a socket toward the local service");
+                self.no_socket(&err);
                 self.drops.socket();
                 return None;
             }
@@ -179,7 +201,6 @@ impl UdpLocal {
         let fresh = Arc::new(LocalSession {
             socket,
             used: Mutex::new(Instant::now()),
-            warned: AtomicBool::new(false),
             cancel: self.cancel.child_token(),
         });
         let session = {
@@ -247,6 +268,7 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
                     let mut buf = local.buf.lock().expect("udp buffer lock");
                     let len = session.socket.try_recv(&mut buf)?;
                     session.touch();
+                    local.heard_from_local();
                     // Synchronous, so the shared buffer is never held across an await.
                     local.sender.send(header, &buf[..len]);
                     Ok(())
@@ -256,7 +278,7 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
                     if err.kind() == io::ErrorKind::WouldBlock {
                         continue;
                     }
-                    session.note(&local.service, &local.local, &err);
+                    local.note(&err);
                     // A service that is not up yet answers every datagram this way; closing the
                     // session for it would open a new socket per packet.
                     if err.kind() != io::ErrorKind::ConnectionRefused {
@@ -483,6 +505,34 @@ mod tests {
         }
 
         assert_eq!(service.sessions.lock().unwrap().len(), 1);
+    }
+
+    /// The flag is the service's, not the session's, so a stranger opening sessions cannot
+    /// multiply the warning it gates.
+    #[tokio::test]
+    async fn a_refusal_raises_the_services_warned_flag() {
+        let closed = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (service, _replies) = service(closed, IDLE);
+
+        service.deliver(&packet_for(5, b"?")).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(service.warned.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_reply_lowers_the_services_warned_flag() {
+        let (service, mut replies) = service(port_teller().await, IDLE);
+        service.warned.store(true, Ordering::Relaxed);
+
+        service.deliver(&packet_for(5, b"?")).await;
+        reply(&mut replies).await;
+
+        assert!(!service.warned.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
