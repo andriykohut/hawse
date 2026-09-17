@@ -149,8 +149,10 @@ jobs:
           CRATES: ${{ steps.pending.outputs.crates }}
         run: |
           read -ra crates <<<"$CRATES"
+          # crates-check verified these without credentials. Verifying here would run dependency
+          # build scripts beside the crates.io token.
           for crate in "${crates[@]}"; do
-            cargo publish -p "$crate"
+            cargo publish --no-verify -p "$crate"
           done
 
   github-release:
