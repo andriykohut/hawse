@@ -2,6 +2,7 @@ mod listener;
 pub mod policy;
 pub mod ports;
 mod session;
+mod udp;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
