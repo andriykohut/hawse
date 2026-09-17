@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,7 +9,6 @@ use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
-use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -280,7 +281,7 @@ impl Session {
             tracing::warn!(service, "every service id is taken");
             return failed(BindFailure::InUse);
         };
-        let (port, listener) = match self.open_listener(service, kind, port) {
+        let (port, listener) = match self.open(service, kind, port, net::bind_tcp) {
             Ok(opened) => opened,
             Err(reason) => return failed(reason),
         };
@@ -306,12 +307,13 @@ impl Session {
 
     /// A dynamic request walks on past pool ports the host refuses; a fixed one is that port or
     /// nothing. Refused ports stay claimed for the length of the walk, so an exhausted pool ends it.
-    fn open_listener(
+    fn open<T>(
         &self,
         service: &str,
         kind: Kind,
         fixed: Option<u16>,
-    ) -> Result<(Port, TcpListener), BindFailure> {
+        bind: impl Fn(IpAddr, u16) -> io::Result<T>,
+    ) -> Result<(Port, T), BindFailure> {
         let mut refused = Vec::new();
         let outcome = loop {
             let claimed = {
@@ -331,8 +333,8 @@ impl Session {
                 Ok(port) => port,
                 Err(reason) => break Err(reason),
             };
-            match net::bind_tcp(self.grant.bind, port.number) {
-                Ok(listener) => break Ok((port, listener)),
+            match bind(self.grant.bind, port.number) {
+                Ok(socket) => break Ok((port, socket)),
                 Err(err) => {
                     tracing::warn!(service, %port, %err, "cannot bind");
                     refused.push(port);
