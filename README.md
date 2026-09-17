@@ -299,6 +299,16 @@ in order and a lost one delays those behind it. With `prefer = "tcp"` every
 payload takes that stream. hawse never holds a UDP sender back: when the tunnel
 cannot keep up, packets are dropped, as on any congested path.
 
+Give a UDP service's `local` as a literal address such as `127.0.0.1:51820`. A
+hostname is looked up again for every new visitor, only its first address is
+tried, and while a lookup runs every UDP service on the connection waits. The
+client holds one socket for each visitor seen in the last 60 s, up to 4096 per
+service, and past that the visitor quiet longest is dropped to make room, so a
+busy or publicly reachable UDP service needs a descriptor limit to match, such
+as `LimitNOFILE=` under systemd. On a server with several addresses, set `bind`
+to the one visitors use: a reply from a wildcard bind leaves from whichever
+address the route picks.
+
 Defaults for the other `[transport]` settings, on the server:
 
 ```toml

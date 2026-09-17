@@ -111,8 +111,8 @@ impl Sender {
         )
     }
 
-    /// What went by each path: quinn's datagram size starts near 1160 and only grows with MTU
-    /// discovery, so a payload can take the bulk stream for the life of a connection.
+    /// quinn's datagram size starts near 1160 and only grows with MTU discovery, so a payload
+    /// under 1200 bytes can still take the bulk stream for the life of a connection.
     pub fn sent(&self) -> SentCounts {
         SentCounts {
             datagram: self.sent.datagram.load(Ordering::Relaxed),
