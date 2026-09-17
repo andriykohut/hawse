@@ -1,0 +1,225 @@
+name: release
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - id: read
+        run: |
+          version=$(.github/scripts/version.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            features: --no-default-features --features ring
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            features: --no-default-features --features ring
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            features: --no-default-features --features ring
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+      # cross's own dependencies do not build under the workflow's -D warnings.
+      - if: runner.os == 'Linux'
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        env:
+          RUSTFLAGS: ""
+      - if: runner.os == 'Linux'
+        run: cross build --release --target "$TARGET" -p hawse ${{ matrix.features }}
+      - if: runner.os == 'macOS'
+        run: cargo build --release --target "$TARGET" -p hawse ${{ matrix.features }}
+      - run: >-
+          cargo about generate --fail --locked -c about.toml -m crates/hawse/Cargo.toml
+          --target "$TARGET" ${{ matrix.features }} -o target/notices.txt about.hbs
+      - run: .github/scripts/package.sh "$TARGET" "$VERSION" target/notices.txt dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hawse-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  crates-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --workspace
+
+  image:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hawse-*-linux-*
+          path: dist
+          merge-multiple: true
+      - run: .github/scripts/image-context.sh dist "$VERSION" context
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: context
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+      - uses: docker/build-push-action@v7
+        with:
+          context: context
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: hawse:ci
+      - run: |
+          got=$(docker run --rm hawse:ci --version)
+          if [[ "$got" != "hawse $VERSION" ]]; then
+            echo "::error::expected 'hawse $VERSION' from the image, got '$got'"
+            exit 1
+          fi
+          docker run --rm hawse:ci keygen
+
+  # Pull requests and main already run ci.yml on their own; a tag push does not.
+  ci:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+
+  publish-crates:
+    if: github.ref_type == 'tag'
+    needs: [version, build, crates-check, image, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - id: pending
+        run: |
+          crates=$(.github/scripts/unpublished-crates.sh "$VERSION" hawse-proto hawse-core hawse | paste -sd' ' -)
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+      - if: steps.pending.outputs.crates != ''
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CRATES: ${{ steps.pending.outputs.crates }}
+        run: |
+          read -ra crates <<<"$CRATES"
+          # crates-check verified these without credentials. Verifying here would run dependency
+          # build scripts beside the crates.io token.
+          for crate in "${crates[@]}"; do
+            cargo publish --no-verify -p "$crate"
+          done
+
+  github-release:
+    if: github.ref_type == 'tag'
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hawse-*
+          path: dist
+          merge-multiple: true
+      - working-directory: dist
+        run: sha256sum hawse-*.tar.gz > SHA256SUMS
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/hawse-*.tar.gz
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes "${flags[@]}" dist/*
+
+  publish-image:
+    if: github.ref_type == 'tag'
+    needs: [version, publish-crates]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: hawse-*-linux-*
+          path: dist
+          merge-multiple: true
+      - run: .github/scripts/image-context.sh dist "$VERSION" context
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=semver,pattern={{version}}
+      - id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: context
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

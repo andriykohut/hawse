@@ -1,6 +1,6 @@
 [package]
 name = "hawse-core"
-description = "Identity, transports, and sessions for hawse"
+description = "Identity, transports, and sessions for hawse. Internal to the hawse binary, with no stable API."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

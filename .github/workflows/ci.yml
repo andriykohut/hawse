@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -25,26 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
-  cross:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - armv7-unknown-linux-musleabihf
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      # cross's own dependencies do not build under the workflow's -D warnings.
-      - run: cargo install cross --git https://github.com/cross-rs/cross --locked
-        env:
-          RUSTFLAGS: ""
-      - run: cross build --release --target ${{ matrix.target }} -p hawse --no-default-features --features ring
   macos:
     runs-on: macos-latest
     steps:
@@ -52,4 +33,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
-      - run: cargo build --release -p hawse

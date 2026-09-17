@@ -1,9 +1,13 @@
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/hawse-lockup-inverse.svg">
-    <img src="assets/hawse-lockup.svg" width="296" alt="hawse">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andriykohut/hawse/main/assets/hawse-lockup-inverse.svg">
+    <img src="https://raw.githubusercontent.com/andriykohut/hawse/main/assets/hawse-lockup.svg" width="296" alt="hawse">
   </picture>
 </h1>
+
+[![CI](https://github.com/andriykohut/hawse/actions/workflows/ci.yml/badge.svg)](https://github.com/andriykohut/hawse/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/hawse.svg)](https://crates.io/crates/hawse)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 hawse publishes TCP services on a server's ports. The client opens one outbound
 QUIC connection to the server. The server listens on the configured ports and
@@ -60,6 +64,64 @@ TCP forwarding works, with fixed or dynamically assigned public ports.
 Besides the features named above, configuration hot reload and the `expose`,
 `authorize`, `revoke` and `check` subcommands are not implemented either.
 `docs/backlog.md` lists everything that is planned or deliberately deferred.
+
+## Install
+
+Each [release](https://github.com/andriykohut/hawse/releases) has a static binary
+for x86_64, aarch64 and armv7 Linux, and one for Apple Silicon macOS. The archive
+holds the binary, its licenses, `THIRD-PARTY-LICENSES.txt` for the crates
+compiled into it, and the systemd units from `contrib/`:
+
+```sh
+curl -LO https://github.com/andriykohut/hawse/releases/download/v0.1.0/hawse-0.1.0-x86_64-unknown-linux-musl.tar.gz
+tar -xzf hawse-0.1.0-x86_64-unknown-linux-musl.tar.gz
+install -m755 hawse-0.1.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
+```
+
+`SHA256SUMS` in the same release covers every archive, and
+`gh attestation verify FILE --repo andriykohut/hawse` checks that an archive was
+built by this repository's release workflow.
+
+With a Rust toolchain, `cargo install --locked hawse` builds from source and
+`cargo binstall hawse` downloads the release binary.
+
+### Docker
+
+Images for `linux/amd64`, `linux/arm64` and `linux/arm/v7` are published to
+`ghcr.io/andriykohut/hawse`, tagged with each version and `latest`. A server and
+a client on different versions do not work together, so run the same tag on both
+ends.
+
+The container reads its config from `/etc/hawse` and keeps keys in
+`/var/lib/hawse`, which is the only directory it can write. The config has to set
+`key` to a full path, because the default resolves next to the config:
+
+```toml
+key = "/var/lib/hawse/server.key"
+```
+
+Run the server with host networking. It binds public ports as clients ask for
+them, and Docker only forwards ports named when the container starts:
+
+```sh
+docker run -d --name hawse-server --network host --restart unless-stopped \
+  -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
+  ghcr.io/andriykohut/hawse:0.1.0 server
+```
+
+The client needs host networking too when a `local` address points at the host.
+On a Compose network it can name other services instead, as in
+`local = "jellyfin:8096"`.
+
+```sh
+docker run -d --name hawse-client --network host --restart unless-stopped \
+  -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
+  ghcr.io/andriykohut/hawse:0.1.0 client
+```
+
+`keygen --out /var/lib/hawse/client.key` with the same volume creates the
+client's key and prints its public key. The container runs as uid 65532, so a
+public port below 1024 needs `--user 0`.
 
 ## Building
 
@@ -259,9 +321,9 @@ them.
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/andriykohut/hawse/blob/main/LICENSE-APACHE) or
   <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+- MIT license ([LICENSE-MIT](https://github.com/andriykohut/hawse/blob/main/LICENSE-MIT) or
   <http://opensource.org/licenses/MIT>)
 
 at your option.

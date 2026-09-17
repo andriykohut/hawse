@@ -11,6 +11,9 @@ systemctl daemon-reload
 systemctl enable --now hawse-server
 ```
 
+Release archives carry these units beside the binary, so the same commands work
+from an unpacked archive with `hawse` in place of `target/release/hawse`.
+
 Both units run under `DynamicUser=yes`, so there is no account to create and no
 uid to keep track of. systemd creates `/etc/hawse` for the config, which stays
 owned by root, and `/var/lib/hawse` for the key, which the service owns. Point

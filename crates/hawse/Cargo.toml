@@ -1,11 +1,19 @@
 [package]
 name = "hawse"
 description = "Reverse TCP tunnel over QUIC with Ed25519 authentication"
+keywords = ["tunnel", "reverse-tunnel", "quic", "port-forwarding", "self-hosted"]
+categories = ["command-line-utilities", "network-programming"]
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
 
 [[bin]]
 name = "hawse"
