@@ -96,10 +96,11 @@ pub struct StreamHeader {
     pub listener: SocketAddr,
 }
 
-/// The first frame on every stream the server opens toward the client. UDP adds a `Bulk` variant in phase 2b.
+/// The first frame on every stream the server opens toward the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamOpen {
     Visitor(StreamHeader),
+    Bulk { service_id: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +268,14 @@ mod tests {
         };
         let open = StreamOpen::Visitor(header);
         let bytes = crate::frame::encode(&open).unwrap();
+        assert_eq!(crate::frame::decode::<StreamOpen>(&bytes).unwrap(), open);
+    }
+
+    #[test]
+    fn stream_open_bulk_round_trips_and_keeps_its_wire_tag() {
+        let open = StreamOpen::Bulk { service_id: 7 };
+        let bytes = crate::frame::encode(&open).unwrap();
+        assert_eq!(&bytes[..], &[1, 7]);
         assert_eq!(crate::frame::decode::<StreamOpen>(&bytes).unwrap(), open);
     }
 

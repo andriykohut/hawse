@@ -28,6 +28,11 @@ pub async fn serve(
 ) {
     let header = match read_frame::<StreamOpen>(&mut recv).await {
         Ok(StreamOpen::Visitor(header)) => header,
+        Ok(StreamOpen::Bulk { service_id }) => {
+            tracing::warn!(service_id, "bulk stream for a service we never bound");
+            refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
+            return;
+        }
         Err(err) => {
             tracing::debug!(err = %chain(&err), "bad stream header");
             return;
