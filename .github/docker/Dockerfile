@@ -4,6 +4,7 @@ FROM scratch
 ARG TARGETPLATFORM
 # Workflow artifacts drop the execute bit.
 COPY --chmod=0755 ${TARGETPLATFORM}/hawse /usr/local/bin/hawse
+COPY ${TARGETPLATFORM}/doc /usr/share/doc/hawse
 # A chowned COPY also chowns the parent directories it creates, so create them as root first.
 COPY state /var/lib
 # A named volume mounted here starts with this ownership.

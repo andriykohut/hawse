@@ -7,9 +7,12 @@ version=$2
 context=$3
 
 while read -r target platform; do
-  mkdir -p "$context/$platform"
-  tar -xzf "$archives/hawse-$version-$target.tar.gz" -C "$context/$platform" \
-    --strip-components=1 "hawse-$version-$target/hawse"
+  archive="$archives/hawse-$version-$target.tar.gz"
+  top="hawse-$version-$target"
+  mkdir -p "$context/$platform/doc"
+  tar -xzf "$archive" -C "$context/$platform" --strip-components=1 "$top/hawse"
+  tar -xzf "$archive" -C "$context/$platform/doc" --strip-components=1 \
+    "$top/LICENSE-APACHE" "$top/LICENSE-MIT" "$top/THIRD-PARTY-LICENSES.txt"
 done <<'EOF'
 x86_64-unknown-linux-musl linux/amd64
 aarch64-unknown-linux-musl linux/arm64
