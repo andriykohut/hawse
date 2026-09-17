@@ -3,15 +3,15 @@ resolver = "3"
 members = ["crates/hawse-proto", "crates/hawse-core", "crates/hawse"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/andriykohut/hawse"
 
 [workspace.dependencies]
-hawse-proto = { path = "crates/hawse-proto", version = "=0.1.0" }
-hawse-core = { path = "crates/hawse-core", version = "=0.1.0", default-features = false }
+hawse-proto = { path = "crates/hawse-proto", version = "=0.1.1" }
+hawse-core = { path = "crates/hawse-core", version = "=0.1.1", default-features = false }
 
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 bytes = "1"
