@@ -155,9 +155,12 @@ impl Transport for QuicTransport {
     }
 
     fn send_datagram(&self, data: Bytes) -> Result<(), TransportError> {
-        self.0
-            .send_datagram(data)
-            .map_err(|e| TransportError::Connection(Box::new(e)))
+        use quinn::SendDatagramError as E;
+        self.0.send_datagram(data).map_err(|err| match err {
+            E::TooLarge => TransportError::DatagramTooLarge,
+            E::UnsupportedByPeer | E::Disabled => TransportError::NoDatagrams,
+            E::ConnectionLost(err) => TransportError::Connection(Box::new(err)),
+        })
     }
 
     fn recv_datagram(&self) -> BoxFuture<'_, Result<Bytes, TransportError>> {
