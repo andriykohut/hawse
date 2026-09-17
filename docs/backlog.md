@@ -81,6 +81,16 @@ parked for later. Each entry says what it is and why it waits.
   was the leading candidate for telling an abort from a clean finish, and it
   cannot be, while `reset` picks between FIN and RST on timing.
 
+## Deferred from the release work
+
+- **Keys default to the config directory.** `paths::locate` gives config and
+  keys one directory, so wherever config is read-only the key needs an absolute
+  path: the systemd units need `key = "/var/lib/hawse/server.key"`, and the image
+  sets `XDG_CONFIG_HOME=/var/lib` so `keygen` and a server without config can
+  write theirs. Defaulting keys to a state directory (`$STATE_DIRECTORY` under
+  systemd, `$XDG_STATE_HOME/hawse`, `/var/lib/hawse` for root) would remove
+  both. Waits because it moves where existing installs look for their keys.
+
 ## Deferred from the phase 1 reviews
 
 Findings from the task and branch reviews that were real but out of scope for
