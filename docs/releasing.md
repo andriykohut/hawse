@@ -41,7 +41,7 @@ cargo publish --workspace
 
 Then add a GitHub trusted publisher to each of `hawse-proto`, `hawse-core` and
 `hawse` on crates.io: owner `andriykohut`, repository `hawse`, workflow
-`release.yml`, no environment. Push the `v0.1.0` tag afterwards.
+`release.yml`, no environment. Push the tag for that version afterwards.
 `publish-crates` finds all three crates published and skips them.
 
 After the first image push, open the `hawse` package on GitHub and make it
