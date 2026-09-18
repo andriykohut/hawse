@@ -14,6 +14,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use super::BindCtx;
 use super::visitor::refuse;
 use crate::error::chain;
 use crate::frame::read_body;
@@ -82,9 +83,12 @@ pub struct UdpLocal {
     /// One buffer for every reader: a socket per session with 64 KiB of its own would be 256 MiB
     /// at the cap, and a shorter buffer would truncate a 65507-byte reply.
     buf: Mutex<Vec<u8>>,
-    /// Whoever sends to the public port opens sessions, so trouble with `local` is warned about
-    /// once per service and logged at `debug` after, until a reply clears it.
-    warned: AtomicBool,
+    /// A refusal from `local` is warned about once per service and logged at `debug` after,
+    /// until a reply clears it.
+    refused_warned: AtomicBool,
+    /// A socket toward `local` that never opens cannot supply the reply that would clear
+    /// `refused_warned`, so this warns once per service for the service's lifetime instead.
+    no_socket_warned: AtomicBool,
     drops: Arc<Drops>,
     tasks: TaskTracker,
     cancel: CancellationToken,
@@ -108,19 +112,16 @@ impl LocalSession {
 }
 
 impl UdpLocal {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         service: String,
         id: u16,
         local: String,
         idle: Duration,
         cap: usize,
-        transport: Arc<dyn Transport>,
-        tasks: TaskTracker,
-        cancel: CancellationToken,
+        ctx: &BindCtx<'_>,
     ) -> Arc<Self> {
         let drops = Arc::new(Drops::default());
-        let (sender, queue) = Sender::new(transport, Arc::clone(&drops));
+        let (sender, queue) = Sender::new(Arc::clone(ctx.transport), Arc::clone(&drops));
         Arc::new(Self {
             service,
             id,
@@ -131,10 +132,11 @@ impl UdpLocal {
             queue: Mutex::new(Some(queue)),
             sessions: Mutex::new(HashMap::new()),
             buf: Mutex::new(vec![0u8; MAX_PAYLOAD]),
-            warned: AtomicBool::new(false),
+            refused_warned: AtomicBool::new(false),
+            no_socket_warned: AtomicBool::new(false),
             drops,
-            tasks,
-            cancel,
+            tasks: ctx.tasks.clone(),
+            cancel: ctx.udp_cancel.clone(),
         })
     }
 
@@ -160,7 +162,7 @@ impl UdpLocal {
 
     fn note(&self, err: &io::Error) {
         let refused = err.kind() == io::ErrorKind::ConnectionRefused;
-        if refused && !self.warned.swap(true, Ordering::Relaxed) {
+        if refused && !self.refused_warned.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 service = self.service,
                 local = self.local,
@@ -172,7 +174,7 @@ impl UdpLocal {
     }
 
     fn no_socket(&self, err: &io::Error) {
-        if self.warned.swap(true, Ordering::Relaxed) {
+        if self.no_socket_warned.swap(true, Ordering::Relaxed) {
             tracing::debug!(service = self.service, local = self.local, err = %chain(err), "cannot open a socket toward the local service");
         } else {
             tracing::warn!(service = self.service, local = self.local, err = %chain(err), "cannot open a socket toward the local service");
@@ -181,8 +183,8 @@ impl UdpLocal {
 
     /// Read before the store, so the common path leaves a line shared by every reader alone.
     fn heard_from_local(&self) {
-        if self.warned.load(Ordering::Relaxed) {
-            self.warned.store(false, Ordering::Relaxed);
+        if self.refused_warned.load(Ordering::Relaxed) {
+            self.refused_warned.store(false, Ordering::Relaxed);
         }
     }
 
@@ -431,16 +433,15 @@ mod tests {
         idle: Duration,
         cap: usize,
     ) -> (Arc<UdpLocal>, mpsc::Receiver<Bytes>) {
-        let service = UdpLocal::new(
-            "svc".to_owned(),
-            ID,
-            local.to_string(),
-            idle,
-            cap,
-            Arc::new(NoTransport),
-            TaskTracker::new(),
-            CancellationToken::new(),
-        );
+        let transport: Arc<dyn Transport> = Arc::new(NoTransport);
+        let tasks = TaskTracker::new();
+        let udp_cancel = CancellationToken::new();
+        let ctx = BindCtx {
+            transport: &transport,
+            tasks: &tasks,
+            udp_cancel: &udp_cancel,
+        };
+        let service = UdpLocal::new("svc".to_owned(), ID, local.to_string(), idle, cap, &ctx);
         let replies = service.queue.lock().unwrap().take().unwrap();
         (service, replies)
     }
@@ -543,18 +544,35 @@ mod tests {
         service.deliver(&packet_for(5, b"?")).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        assert!(service.warned.load(Ordering::Relaxed));
+        assert!(service.refused_warned.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
     async fn a_reply_lowers_the_services_warned_flag() {
         let (service, mut replies) = service(port_teller().await, IDLE);
-        service.warned.store(true, Ordering::Relaxed);
+        service.refused_warned.store(true, Ordering::Relaxed);
 
         service.deliver(&packet_for(5, b"?")).await;
         reply(&mut replies).await;
 
-        assert!(!service.warned.load(Ordering::Relaxed));
+        assert!(!service.refused_warned.load(Ordering::Relaxed));
+    }
+
+    /// Port 0 is not a valid destination for `connect`; `UdpSocket::connect` rejects it
+    /// outright, so the socket never opens. Chosen over an unresolvable hostname so the test
+    /// does not depend on the machine's resolver.
+    #[tokio::test]
+    async fn two_failed_sockets_raise_one_flag_that_a_reply_cannot_lower() {
+        let (service, _replies) = service("127.0.0.1:0".parse().unwrap(), IDLE);
+
+        service.deliver(&packet_for(5, b"?")).await;
+        service.deliver(&packet_for(6, b"?")).await;
+
+        assert!(service.no_socket_warned.load(Ordering::Relaxed));
+        assert_eq!(service.drops.snapshot().socket, 2);
+
+        service.heard_from_local();
+        assert!(service.no_socket_warned.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

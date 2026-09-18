@@ -181,6 +181,9 @@ async fn a_silent_local_service_costs_only_silence_over_tcp() {
     a_silent_local_service_costs_only_silence(Prefer::Tcp).await;
 }
 
+/// Written to guard against a stalled TCP link holding a UDP port past teardown, but loopback
+/// cannot stall a yamux link, so this passes with or without that fix. What it does guard: a
+/// fixed port frees when its session ends, and a superseding session on the same key rebinds it.
 async fn a_fixed_udp_port_is_free_for_the_next_session(prefer: Prefer) {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
