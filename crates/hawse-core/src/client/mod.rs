@@ -117,7 +117,8 @@ struct Dialed {
     control: Control,
 }
 
-/// Bundled only to keep `register_bound` under clippy's argument-count limit.
+/// Bundled to keep `register_bound` under clippy's argument-count limit, and threaded through
+/// to `UdpLocal::new` for the same reason.
 struct BindCtx<'a> {
     transport: &'a Arc<dyn Transport>,
     tasks: &'a TaskTracker,
@@ -319,9 +320,7 @@ impl Client {
                 local,
                 IDLE,
                 udp::SESSION_CAP,
-                Arc::clone(ctx.transport),
-                ctx.tasks.clone(),
-                ctx.udp_cancel.clone(),
+                ctx,
             ));
         } else {
             self.targets
