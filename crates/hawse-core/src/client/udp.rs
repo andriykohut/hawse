@@ -549,8 +549,10 @@ mod tests {
             .unwrap();
         let (service, _replies) = service(closed, IDLE);
 
-        service.deliver(&packet_for(5, b"?")).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..3 {
+            service.deliver(&packet_for(5, b"?")).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         assert!(service.refused_warned.load(Ordering::Relaxed));
     }
