@@ -433,6 +433,14 @@ mod tests {
         idle: Duration,
         cap: usize,
     ) -> (Arc<UdpLocal>, mpsc::Receiver<Bytes>) {
+        with_local(local.to_string(), idle, cap)
+    }
+
+    fn with_local(
+        local: String,
+        idle: Duration,
+        cap: usize,
+    ) -> (Arc<UdpLocal>, mpsc::Receiver<Bytes>) {
         let transport: Arc<dyn Transport> = Arc::new(NoTransport);
         let tasks = TaskTracker::new();
         let udp_cancel = CancellationToken::new();
@@ -441,7 +449,7 @@ mod tests {
             tasks: &tasks,
             udp_cancel: &udp_cancel,
         };
-        let service = UdpLocal::new("svc".to_owned(), ID, local.to_string(), idle, cap, &ctx);
+        let service = UdpLocal::new("svc".to_owned(), ID, local, idle, cap, &ctx);
         let replies = service.queue.lock().unwrap().take().unwrap();
         (service, replies)
     }
@@ -558,12 +566,11 @@ mod tests {
         assert!(!service.refused_warned.load(Ordering::Relaxed));
     }
 
-    /// Port 0 is not a valid destination for `connect`; `UdpSocket::connect` rejects it
-    /// outright, so the socket never opens. Chosen over an unresolvable hostname so the test
-    /// does not depend on the machine's resolver.
+    /// `"no-port"` has no `:port`, so `lookup_host` fails to parse it before any OS call —
+    /// unlike a port-0 `connect`, which Linux (unlike macOS) lets through.
     #[tokio::test]
     async fn two_failed_sockets_raise_one_flag_that_a_reply_cannot_lower() {
-        let (service, _replies) = service("127.0.0.1:0".parse().unwrap(), IDLE);
+        let (service, _replies) = with_local("no-port".to_owned(), IDLE, SESSION_CAP);
 
         service.deliver(&packet_for(5, b"?")).await;
         service.deliver(&packet_for(6, b"?")).await;
