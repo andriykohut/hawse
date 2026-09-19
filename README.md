@@ -297,9 +297,13 @@ the client's `[expose.NAME]` table, and a grant such as `"51820/udp"` in the
 server's `ports`. Each payload crosses the tunnel as one QUIC datagram when it
 fits. One that does not fit — a full-size packet from a WireGuard tunnel at its
 default MTU is one — goes over a reliable stream instead, where packets arrive
-in order and a lost one delays those behind it. With `prefer = "tcp"` every
-payload takes that stream. hawse never holds a UDP sender back: when the tunnel
-cannot keep up, packets are dropped, as on any congested path.
+in order and a lost one delays those behind it. Setting `MTU = 1370` on both
+WireGuard peers keeps their packets inside a datagram on a path with the usual
+1500-byte MTU: payloads up to 1412 bytes crossed as datagrams, and 1370 leaves
+room for hawse's own header to grow as a service sees more visitors. With
+`prefer = "tcp"` every payload takes that stream. hawse never holds a UDP sender
+back: when the tunnel cannot keep up, packets are dropped, as on any congested
+path.
 
 Measured with `iperf3` from a home connection through a Hetzner server: payloads
 of 1100 bytes, small enough for a datagram before QUIC has probed the path,
