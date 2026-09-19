@@ -202,6 +202,8 @@ pub trait Transport: Send + Sync + 'static {
     /// `None` when this connection cannot carry datagrams, and the limit can move with the path MTU,
     /// so it is not safe to cache.
     fn max_datagram_size(&self) -> Option<usize>;
+    /// Bytes free in the outgoing datagram queue. A transport without datagrams returns `0`.
+    fn datagram_send_buffer_space(&self) -> usize;
     /// A QUIC peer loses stream data still in flight; yamux flushes what is queued before its
     /// go-away. Anything the peer must read has to land first either way.
     fn close(&self, reason: CloseReason);

@@ -410,6 +410,9 @@ mod tests {
         fn max_datagram_size(&self) -> Option<usize> {
             None
         }
+        fn datagram_send_buffer_space(&self) -> usize {
+            0
+        }
         fn close(&self, _reason: CloseReason) {}
         fn closed(&self) -> BoxFuture<'_, ()> {
             Box::pin(std::future::pending())

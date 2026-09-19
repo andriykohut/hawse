@@ -190,6 +190,10 @@ impl Transport for TcpTransport {
         None
     }
 
+    fn datagram_send_buffer_space(&self) -> usize {
+        0
+    }
+
     /// yamux's go-away carries no room for `reason`, so the peer learns only that we are done.
     fn close(&self, reason: CloseReason) {
         tracing::debug!(reason = reason.as_str(), "closing the tcp transport");
