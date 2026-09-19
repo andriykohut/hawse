@@ -176,6 +176,10 @@ impl Transport for QuicTransport {
         self.0.max_datagram_size()
     }
 
+    fn datagram_send_buffer_space(&self) -> usize {
+        self.0.datagram_send_buffer_space()
+    }
+
     fn close(&self, reason: CloseReason) {
         self.0
             .close(VarInt::from_u32(reason.code()), reason.as_str().as_bytes());
