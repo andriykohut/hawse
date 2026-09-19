@@ -75,9 +75,9 @@ holds the binary, its licenses, `THIRD-PARTY-LICENSES.txt` for the crates
 compiled into it, and the systemd units from `contrib/`:
 
 ```sh
-curl -LO https://github.com/andriykohut/hawse/releases/download/v0.1.1/hawse-0.1.1-x86_64-unknown-linux-musl.tar.gz
-tar -xzf hawse-0.1.1-x86_64-unknown-linux-musl.tar.gz
-install -m755 hawse-0.1.1-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
+curl -LO https://github.com/andriykohut/hawse/releases/download/v0.2.0/hawse-0.2.0-x86_64-unknown-linux-musl.tar.gz
+tar -xzf hawse-0.2.0-x86_64-unknown-linux-musl.tar.gz
+install -m755 hawse-0.2.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
 ```
 
 `SHA256SUMS` in the same release covers every archive, and
@@ -108,7 +108,7 @@ them, and Docker only forwards ports named when the container starts:
 ```sh
 docker run -d --name hawse-server --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
-  ghcr.io/andriykohut/hawse:0.1.1 server
+  ghcr.io/andriykohut/hawse:0.2.0 server
 ```
 
 The client needs host networking too when a `local` address points at the host.
@@ -118,7 +118,7 @@ On a Compose network it can name other services instead, as in
 ```sh
 docker run -d --name hawse-client --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
-  ghcr.io/andriykohut/hawse:0.1.1 client
+  ghcr.io/andriykohut/hawse:0.2.0 client
 ```
 
 `keygen --out /var/lib/hawse/client.key` with the same volume creates the
