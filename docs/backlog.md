@@ -28,6 +28,11 @@ parked for later. Each entry says what it is and why it waits.
   window, so a video stream at link rate delays interactive requests behind it.
   Revisit only if the streaming benchmark shows the fallback transport is
   unusable for streaming; QUIC, the primary path, does not have this problem.
+  Measured for UDP on 2026-09-18 with one link-rate TCP download beside it:
+  service-to-visitor UDP lost 13-50% at 50-100 Mbit/s over QUIC and 16-45% over
+  the fallback, so for UDP the shared window cost the fallback nothing QUIC did
+  not also pay. The fallback's own limit is the other direction, where one
+  yamux stream carries at most 40-65 Mbit/s.
 
 ## Deferred from the phase 2a transport work
 
@@ -92,9 +97,10 @@ parked for later. Each entry says what it is and why it waits.
   transport all of them do, until the service is bound again. A transport
   failure ends the session anyway, so this waits for a case where the stream
   dies alone.
-- **Some drops are not counted.** quinn discards the oldest queued datagrams
-  when its send buffer is full and does not say so, and a datagram naming a
-  service id nobody holds has no service to be counted against.
+- **Some drops are not counted.** A datagram naming a service id nobody holds
+  has no service to be counted against. quinn's own queue drops are counted as
+  `queue_full` when a send finds the queue full, but one send can evict more
+  than one older datagram, so the count is a floor.
 - **The idle time and the bulk queue depth are constants**, 60 s and 256
   packets. A knob for either waits for a measurement that asks for one.
 - **A hostname `local` is resolved on the client's datagram path.** Each new
@@ -122,6 +128,15 @@ parked for later. Each entry says what it is and why it waits.
   still get in. 4096 is above the usual soft descriptor limit of 1024. Waits
   for a decision between a knob, a shorter life for a session `local` never
   answered, and an eviction notice on the wire.
+- **One yamux stream carries UDP on the TCP fallback.** From visitor to
+  service it tops out between 40 and 65 Mbit/s, about 5,000 packets a second,
+  and the bulk queue drops the rest: the stream's 256 KiB window over the round
+  trip to a home connection is the limit.
+- **The server's QUIC socket keeps the kernel's default receive buffer.** With
+  `bbr` on the client, bursts overran the box's 208 KiB buffer and it dropped
+  13-212 datagrams in 6 of 10 runs at 100 Mbit/s. Raising it needs `SO_RCVBUF`
+  on the socket and a `net.core.rmem_max` above the distribution's default, so
+  it is a deployment note as much as a code change.
 
 ## Deferred from the release work
 
@@ -358,3 +373,15 @@ phase 1. Each says what the code does today and what the fix would be.
   one-window-vs-many. Revisit only if a deployment shows one connection
   failing to fill a path that parallel flows fill. The spec and
   `~/code/hawse-bench-compare/spike/` keep the method.
+- **The client's `cubic` collapses on a path with random loss.** Measured on
+  2026-09-18 and 19 with UDP datagrams at 100 Mbit/s from service to visitor,
+  ten runs per setting: about 0.01% of packets lost on the home uplink cut
+  `cubic`'s window by 30% each time, it regrew over seconds, and the client's
+  1 MiB datagram queue dropped the excess, for a median 28% loss (0.4-41%);
+  `bbr` lost 0.03% (worst 0.3%). A larger initial window (25% median) or a
+  4 MiB queue (11%) did not stop the collapse. The same mechanism fits the
+  2026-09-15 numbers above and their failure to reproduce the next evening,
+  since how much it costs depends on that evening's loss. Whether `bbr` should
+  be the client default waits on a real-path run of `cubic`, `bbr` and a
+  connection-per-visitor tunnel with the interactive probe, because `bbr`
+  queued the probe at 109 ms on 2026-09-15.

@@ -217,7 +217,8 @@ The server answers on the listen port twice: UDP for QUIC, and TCP for the
 fallback transport. Both have to be free at startup and reachable through the
 firewall — the server refuses to start if it cannot bind the TCP side, rather
 than come up with the fallback silently missing. Public ports bound for clients
-are TCP. `hawse server --listen ADDR` overrides `listen` for that run.
+are TCP or UDP, as each service asks. `hawse server --listen ADDR` overrides
+`listen` for that run.
 
 `congestion` selects the controller, on either end, for the data that end
 sends:
@@ -231,7 +232,8 @@ The choice matters most on a path with a long round trip, where `cubic` keeps
 a shorter queue and `bbr` reaches a higher rate. Prefer `cubic` when the tunnel
 carries interactive traffic, `bbr` when it carries bulk transfers and
 throughput is what you are short of. `bench/` measures both on the path you
-have, which is the only way to settle it.
+have, which is the only way to settle it. A client forwarding a UDP service
+that sends near the link's rate is the exception; see the UDP note below.
 
 `bind` is the address those public ports listen on. The default answers on
 every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
@@ -298,6 +300,21 @@ default MTU is one — goes over a reliable stream instead, where packets arrive
 in order and a lost one delays those behind it. With `prefer = "tcp"` every
 payload takes that stream. hawse never holds a UDP sender back: when the tunnel
 cannot keep up, packets are dropped, as on any congested path.
+
+Measured with `iperf3` from a home connection through a Hetzner server: payloads
+of 1100 bytes, small enough for a datagram before QUIC has probed the path,
+crossed from visitor to service with at most 0.04% loss and under 1 ms of
+jitter at 10, 50 and 100 Mbit/s, and from service to visitor with none up to
+50 Mbit/s. At 100 Mbit/s from service to visitor the client's default `cubic`
+controller lost between 0.4% and 41% of packets over ten runs, median 28%: it
+shrinks its window on every packet the path loses, and while it regrows the
+client queues only about 1 MiB of datagrams and drops the oldest. With
+`congestion = "bbr"` in the client's `[transport]` the same runs lost 0.03%,
+worst 0.3%. Set it on a client whose UDP service sends near the link's rate;
+the service end line in the client's log counts these drops as `queue_full`.
+With `prefer = "tcp"`, traffic from visitor to service shares one yamux stream
+and tops out between 40 and 65 Mbit/s, dropping the rest; from service to
+visitor it lost under 2.5% at every rate.
 
 Give a UDP service's `local` as a literal address such as `127.0.0.1:51820`. A
 hostname is looked up again for every new visitor, only its first address is
