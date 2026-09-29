@@ -180,6 +180,9 @@ impl Client {
             let mut welcomed = None;
             let wait = match self.session(cancel.clone(), &events, &mut welcomed).await {
                 Ok(()) => return,
+                // The dial is not cancel-aware, so a failure can land after shutdown began;
+                // announcing a retry then would promise one that never comes.
+                Err(_) if cancel.is_cancelled() => return,
                 Err(err) => {
                     let cause = classify(&err);
                     let lasted = welcomed.map_or(Duration::ZERO, |at| at.elapsed());
