@@ -544,6 +544,43 @@ async fn a_config_that_cannot_be_retried_stops_the_client() {
 }
 
 #[tokio::test]
+async fn a_client_cancelled_mid_dial_announces_no_retry() {
+    let (server_id, client_id) = ids();
+    // Nothing answers UDP here, so the dial can only end at the shortened idle timeout, well
+    // after `cancel` has fired.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = client_config(listener.local_addr().unwrap(), server_id.public_key(), &[]);
+    cfg.transport.idle_timeout = Duration::from_secs(1);
+
+    let (tx, mut events) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+    let client = Client::new(cfg, client_id);
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { client.run(cancel, tx).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+
+    tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("run returns once the dial fails")
+        .unwrap();
+    while let Some(event) = events.recv().await {
+        assert!(
+            !matches!(
+                event,
+                Event::Disconnected {
+                    retry_in: Some(_),
+                    ..
+                }
+            ),
+            "announced a retry after cancel: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn binds_with_phase_two_features_are_refused() {
     let (server_id, client_id) = ids();
     let server = start_server(
