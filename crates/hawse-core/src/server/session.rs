@@ -85,6 +85,7 @@ pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: Can
         let live = Arc::new(Live {
             cancel: cancel.child_token(),
             done: CancellationToken::new(),
+            remote,
         });
         let previous = shared
             .sessions
@@ -93,7 +94,7 @@ pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: Can
             .insert(key, Arc::clone(&live));
         if let Some(previous) = previous {
             previous.cancel.cancel();
-            tracing::info!("superseding this key's previous session");
+            tracing::info!(previous = %previous.remote, "superseding this key's previous session");
             let _ = tokio::time::timeout(SUPERSEDE_WAIT, previous.done.cancelled()).await;
         }
         let welcome = ServerMessage::Welcome {
