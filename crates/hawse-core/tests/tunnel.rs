@@ -507,13 +507,40 @@ async fn server_shutdown_tells_the_client_why() {
     match next_event(&mut events).await {
         Event::Disconnected {
             cause: DisconnectCause::Shutdown(why),
-        } => assert!(why.contains("shut")),
+            retry_in: Some(wait),
+        } => {
+            assert!(why.contains("shut"));
+            assert!(wait <= Duration::from_secs(1), "first retry after {wait:?}");
+        }
         other => panic!("expected shutdown disconnect, got {other:?}"),
     }
 
     cancel.cancel();
     task.await.unwrap();
     server.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_config_that_cannot_be_retried_stops_the_client() {
+    let (server_id, client_id) = ids();
+    let mut cfg = client_config("127.0.0.1:1".parse().unwrap(), server_id.public_key(), &[]);
+    cfg.server = String::new();
+
+    let (tx, mut events) = mpsc::channel(256);
+    let client = Client::new(cfg, client_id);
+    let task = tokio::spawn(async move { client.run(CancellationToken::new(), tx).await });
+
+    match next_event(&mut events).await {
+        Event::Disconnected {
+            cause: DisconnectCause::Config(_),
+            retry_in: None,
+        } => {}
+        other => panic!("expected a final disconnect, got {other:?}"),
+    }
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("run returns without retrying")
+        .unwrap();
 }
 
 #[tokio::test]
@@ -667,6 +694,7 @@ async fn auto_reports_a_retryable_failure_and_never_dials_tcp() {
     match disconnect {
         Some(Event::Disconnected {
             cause: DisconnectCause::Transport(_),
+            retry_in: Some(_),
         }) => {}
         other => panic!("expected a retryable disconnect, got {other:?}"),
     }

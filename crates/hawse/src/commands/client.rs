@@ -48,10 +48,9 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
                 }
                 Event::BindFailed { service, reason } => tracing::warn!("{service}  {reason}"),
                 Event::Denied { key } => tracing::warn!(
-                    "not authorized. on the server, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"\nthen wait; retrying every 5 s"
+                    "not authorized. on the server, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"\nthen wait for the next retry"
                 ),
-                Event::Disconnected { cause } => {
-                    let fatal = matches!(cause, DisconnectCause::Config(_));
+                Event::Disconnected { cause, retry_in } => {
                     let reason = match cause {
                         DisconnectCause::Shutdown(why) => {
                             format!("server ended the session: {why}")
@@ -64,10 +63,15 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
                             reason
                         }
                     };
-                    if fatal {
-                        tracing::error!(%reason, "disconnected; the config cannot be retried");
-                    } else {
-                        tracing::warn!(%reason, "disconnected; retrying in 5 s");
+                    match retry_in {
+                        Some(wait) => tracing::warn!(
+                            %reason,
+                            "disconnected; retrying in {:.1} s",
+                            wait.as_secs_f64()
+                        ),
+                        None => {
+                            tracing::error!(%reason, "disconnected; the config cannot be retried");
+                        }
                     }
                 }
             }

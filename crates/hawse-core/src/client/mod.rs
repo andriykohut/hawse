@@ -1,3 +1,4 @@
+mod backoff;
 mod udp;
 mod visitor;
 
@@ -26,12 +27,12 @@ use crate::transport::{
     CloseReason, RecvHalf, SendHalf, Transport, TransportError, TransportKind, tcp,
 };
 use crate::udp::IDLE;
+use backoff::{Backoff, random_unit};
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
 const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
-const RETRY_AFTER: Duration = Duration::from_secs(5);
 const DRAIN: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,8 +54,10 @@ pub enum Event {
     Denied {
         key: PublicKey,
     },
+    /// `retry_in` is how long `run` waits before reconnecting; `None` means it has stopped.
     Disconnected {
         cause: DisconnectCause,
+        retry_in: Option<Duration>,
     },
 }
 
@@ -169,24 +172,29 @@ impl Client {
         }
     }
 
-    /// Reconnects 5 s after every failure until `cancel` fires, except a `Config` cause,
-    /// which retrying cannot fix and ends it instead.
+    /// Reconnects after every failure, backing off from 1 s to 30 s, until `cancel` fires,
+    /// except a `Config` cause, which retrying cannot fix and ends it instead.
     pub async fn run(&self, cancel: CancellationToken, events: mpsc::Sender<Event>) {
+        let mut backoff = Backoff::default();
         while !cancel.is_cancelled() {
-            match self.run_once(cancel.clone(), &events).await {
+            let mut welcomed = None;
+            let wait = match self.session(cancel.clone(), &events, &mut welcomed).await {
                 Ok(()) => return,
                 Err(err) => {
                     let cause = classify(&err);
-                    let fatal = matches!(cause, DisconnectCause::Config(_));
-                    emit(&events, Event::Disconnected { cause });
-                    if fatal {
-                        return;
+                    let lasted = welcomed.map_or(Duration::ZERO, |at| at.elapsed());
+                    let retry_in = (!matches!(cause, DisconnectCause::Config(_)))
+                        .then(|| backoff.next(lasted, random_unit()));
+                    emit(&events, Event::Disconnected { cause, retry_in });
+                    match retry_in {
+                        Some(wait) => wait,
+                        None => return,
                     }
                 }
-            }
+            };
             tokio::select! {
                 () = cancel.cancelled() => return,
-                () = tokio::time::sleep(RETRY_AFTER) => {}
+                () = tokio::time::sleep(wait) => {}
             }
         }
     }
@@ -197,6 +205,17 @@ impl Client {
         cancel: CancellationToken,
         events: &mpsc::Sender<Event>,
     ) -> Result<(), ClientError> {
+        self.session(cancel, events, &mut None).await
+    }
+
+    /// `run_once`, also recording in `welcomed` when the server accepted the session, which is
+    /// what `run`'s backoff measures a session's life from.
+    async fn session(
+        &self,
+        cancel: CancellationToken,
+        events: &mpsc::Sender<Event>,
+        welcomed: &mut Option<Instant>,
+    ) -> Result<(), ClientError> {
         let remote = self.resolve().await?;
         let Dialed {
             transport,
@@ -206,6 +225,7 @@ impl Client {
         } = self.connect(remote).await?;
 
         let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
+        *welcomed = Some(Instant::now());
         emit(
             events,
             Event::Connected {
