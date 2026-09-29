@@ -191,6 +191,10 @@ The `ssh` service binds port 2222 on the server and forwards to port 22 on the
 client. The `dev` service sets no `port`, so the server assigns one from its
 `dynamic_ports` range and the client logs which port it got.
 
+When the server is unreachable or ends the session, the client reconnects on
+its own. It waits about a second after the first failure and doubles the wait
+up to 30 s; a session that stayed up for a minute starts it over.
+
 `local` is any address the client can open a TCP connection to, not only one on
 the client itself. `local = "192.168.1.50:80"` forwards to another host on the
 client's network.
