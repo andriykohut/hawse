@@ -66,6 +66,7 @@ pub struct Shared {
 pub struct Live {
     pub cancel: CancellationToken,
     pub done: CancellationToken,
+    pub remote: SocketAddr,
 }
 
 #[derive(Debug, thiserror::Error)]
