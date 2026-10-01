@@ -225,19 +225,22 @@ are TCP or UDP, as each service asks. `hawse server --listen ADDR` overrides
 `listen` for that run.
 
 `congestion` selects the controller, on either end, for the data that end
-sends:
+sends. The server defaults to `cubic`, the client to `bbr`:
 
 ```toml
 [transport]
-congestion = "bbr"    # or "cubic", the default
+congestion = "bbr"    # or "cubic"
 ```
 
-The choice matters most on a path with a long round trip, where `cubic` keeps
-a shorter queue and `bbr` reaches a higher rate. Prefer `cubic` when the tunnel
-carries interactive traffic, `bbr` when it carries bulk transfers and
-throughput is what you are short of. `bench/` measures both on the path you
-have, which is the only way to settle it. A client forwarding a UDP service
-that sends near the link's rate is the exception; see the UDP note below.
+The choice matters most on a path with a long round trip and some random loss,
+where `cubic` shrinks its window on every packet the path loses and `bbr` does
+not. Measured from a home connection through a Hetzner server 27 ms away, with
+forty parallel transfers through the client and a small request timed alongside
+them, median of four runs each: `bbr` reached 204 Mbit/s with the request at
+157 ms (200 ms at p90), a tunnel opening one connection per visitor 199 Mbit/s
+at 158 ms (211), and `cubic` 192 Mbit/s at 165 ms (255). That path lost no
+packets; on one that does, `cubic` falls further behind, as the UDP note below
+shows. `bench/` measures both on the path you have.
 
 `bind` is the address those public ports listen on. The default answers on
 every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
@@ -313,13 +316,12 @@ Measured with `iperf3` from a home connection through a Hetzner server: payloads
 of 1100 bytes, small enough for a datagram before QUIC has probed the path,
 crossed from visitor to service with at most 0.04% loss and under 1 ms of
 jitter at 10, 50 and 100 Mbit/s, and from service to visitor with none up to
-50 Mbit/s. At 100 Mbit/s from service to visitor the client's default `cubic`
-controller lost between 0.4% and 41% of packets over ten runs, median 28%: it
-shrinks its window on every packet the path loses, and while it regrows the
-client queues only about 1 MiB of datagrams and drops the oldest. With
-`congestion = "bbr"` in the client's `[transport]` the same runs lost 0.03%,
-worst 0.3%. Set it on a client whose UDP service sends near the link's rate;
-the service end line in the client's log counts these drops as `queue_full`.
+50 Mbit/s. At 100 Mbit/s from service to visitor a client on `cubic` lost
+between 0.4% and 41% of packets over ten runs, median 28%: it shrinks its
+window on every packet the path loses, and while it regrows the client queues
+only about 1 MiB of datagrams and drops the oldest. On `bbr`, the client's
+default, the same runs lost 0.03%, worst 0.3%. The service end line in the
+client's log counts these drops as `queue_full`.
 With `prefer = "tcp"`, traffic from visitor to service shares one yamux stream
 and tops out between 40 and 65 Mbit/s, dropping the rest; from service to
 visitor it lost under 2.5% at every rate.

@@ -41,7 +41,7 @@ impl Tuning {
 
     pub const CLIENT: Self = Self {
         idle_timeout: Duration::from_secs(30),
-        congestion: Congestion::Cubic,
+        congestion: Congestion::Bbr,
         stream_window: 2 * 1024 * 1024,
         connection_window: 16 * 1024 * 1024,
         max_streams: 4096,

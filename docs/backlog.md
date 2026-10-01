@@ -355,6 +355,7 @@ phase 1. Each says what the code does today and what the fix would be.
   reached 214 Mbit/s with a 44 ms concurrent request, where hawse managed
   65-114 Mbit/s at 45 ms on `cubic`, or 187 Mbit/s at 109 ms on `bbr`. Neither
   setting gets both, because many small queues in parallel beat one large one.
+  On 2026-10-01 `bbr` got both; see the last entry.
   This is the evidence for revisiting connection-per-visitor, which was
   dismissed on loopback numbers that could not show the effect: a round trip of
   zero hides everything congestion control does.
@@ -380,7 +381,11 @@ phase 1. Each says what the code does today and what the fix would be.
   `bbr` lost 0.03% (worst 0.3%). A larger initial window (25% median) or a
   4 MiB queue (11%) did not stop the collapse. The same mechanism fits the
   2026-09-15 numbers above and their failure to reproduce the next evening,
-  since how much it costs depends on that evening's loss. Whether `bbr` should
-  be the client default waits on a real-path run of `cubic`, `bbr` and a
-  connection-per-visitor tunnel with the interactive probe, because `bbr`
-  queued the probe at 109 ms on 2026-09-15.
+  since how much it costs depends on that evening's loss. The client now
+  defaults to `bbr`, after a real-path run of all three with the interactive
+  probe on 2026-10-01: a loss-free 27 ms path, forty transfers, four
+  interleaved runs each, medians. `bbr` 204 Mbit/s with the probe at 157 ms
+  p50 and 200 ms p90; the connection-per-visitor tunnel 199 at 158 / 211;
+  `cubic` 192 at 165 / 255. The 109 ms probe `bbr` showed on 2026-09-15 did
+  not reproduce. The server stays on `cubic`: traffic from visitor to service
+  was not measured.
