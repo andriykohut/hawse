@@ -166,7 +166,7 @@ impl Default for ClientTransport {
     fn default() -> Self {
         Self {
             prefer: Prefer::Auto,
-            congestion: Congestion::Cubic,
+            congestion: Congestion::Bbr,
             idle_timeout: Duration::from_secs(30),
             stream_window: ByteSize(2 << 20),
             connection_window: ByteSize(16 << 20),
@@ -477,6 +477,7 @@ prefer = "tcp"
         assert_eq!(cfg.key, PathBuf::from("client.key"));
         assert_eq!(cfg.transport.prefer, Prefer::Tcp);
         assert_eq!(cfg.transport.stream_window, units::ByteSize(2 << 20));
+        assert_eq!(cfg.transport.congestion, Congestion::Bbr);
         assert_eq!(
             cfg.expose["web"].port,
             PortRequest::Fixed(Port {
