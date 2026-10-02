@@ -6,7 +6,7 @@ use std::time::Duration;
 use hawse_proto::key::PublicKey;
 use hawse_proto::name::{self, NameError};
 use hawse_proto::port::{PortRange, PortRequest, PortSpan};
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use serde::Deserialize;
 
 pub mod units;
@@ -55,6 +55,10 @@ pub struct ClientPolicy {
     /// Overrides the server-wide `bind` for this client's public ports.
     #[serde(default)]
     pub bind: Option<IpAddr>,
+    /// Caps every service this client binds: a service admits only what this and its own `allow`
+    /// both cover.
+    #[serde(default)]
+    pub allow: Vec<IpNet>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -185,6 +189,14 @@ pub enum ConfigError {
     ServiceName(String, NameError),
     #[error("expose `{0}`: local `{1}` must be host:port")]
     LocalAddr(String, String),
+    #[error(
+        "client `{0}`: allow entry {1} is an IPv4-mapped network, which never matches; write {2}"
+    )]
+    ClientAllow(String, IpNet, IpNet),
+    #[error(
+        "expose `{0}`: allow entry {1} is an IPv4-mapped network, which never matches; write {2}"
+    )]
+    ExposeAllow(String, IpNet, IpNet),
     #[error("server `{0}` must be host or host:port")]
     ServerAddr(String),
     #[error("name: {0}")]
@@ -211,6 +223,21 @@ pub enum ConfigError {
     StreamsPerClient,
     #[error("limits udp_sessions_per_service cannot be 0")]
     UdpSessions,
+}
+
+/// The IPv4 network an IPv4-mapped IPv6 one stands for. Visitors are compared in canonical form,
+/// so a mapped entry would never match anyone.
+fn ipv4_form(net: &IpNet) -> Option<IpNet> {
+    let IpNet::V6(v6) = net else { return None };
+    let v4 = v6.network().to_ipv4_mapped()?;
+    let prefix = v6.prefix_len().checked_sub(96)?;
+    Ipv4Net::new(v4, prefix).ok().map(IpNet::V4)
+}
+
+fn mapped_entry(allow: &[IpNet]) -> Option<(IpNet, IpNet)> {
+    allow
+        .iter()
+        .find_map(|net| ipv4_form(net).map(|ipv4| (*net, ipv4)))
 }
 
 fn validate_transport(
@@ -277,6 +304,9 @@ impl ServerConfig {
             if let Some(other) = seen.insert(policy.key, client) {
                 return Err(ConfigError::DuplicateKey(other.to_owned(), client.clone()));
             }
+            if let Some((net, ipv4)) = mapped_entry(&policy.allow) {
+                return Err(ConfigError::ClientAllow(client.clone(), net, ipv4));
+            }
         }
         Ok(())
     }
@@ -307,6 +337,9 @@ impl ClientConfig {
                         expose.local.clone(),
                     ));
                 }
+            }
+            if let Some((net, ipv4)) = mapped_entry(&expose.allow) {
+                return Err(ConfigError::ExposeAllow(service.clone(), net, ipv4));
             }
         }
         Ok(())
@@ -520,12 +553,47 @@ prefer = "tcp"
                 key: sample_key(),
                 ports: vec!["4433".parse().unwrap()],
                 bind: None,
+                allow: vec![],
             },
         );
         assert_eq!(
             cfg.validate(),
             Err(ConfigError::ListenGranted("laptop".into(), 4433))
         );
+    }
+
+    #[test]
+    fn a_client_can_be_given_an_allow_ceiling() {
+        let text = format!("{SERVER}allow = [\"203.0.113.0/24\"]\n");
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            cfg.clients["laptop"].allow,
+            vec!["203.0.113.0/24".parse::<IpNet>().unwrap()]
+        );
+        assert!(cfg.clients["homelab"].allow.is_empty());
+    }
+
+    #[test]
+    fn an_ipv4_mapped_allow_entry_is_rejected_with_its_ipv4_form() {
+        let mapped: IpNet = "::ffff:203.0.113.0/120".parse().unwrap();
+        let ipv4: IpNet = "203.0.113.0/24".parse().unwrap();
+
+        let text = format!("{SERVER}allow = [\"{mapped}\"]\n");
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ClientAllow("laptop".into(), mapped, ipv4))
+        );
+
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.expose.get_mut("ssh").unwrap().allow = vec![mapped];
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ExposeAllow("ssh".into(), mapped, ipv4))
+        );
+
+        cfg.expose.get_mut("ssh").unwrap().allow = vec!["2001:db8::/48".parse().unwrap()];
+        assert_eq!(cfg.validate(), Ok(()));
     }
 
     #[test]
