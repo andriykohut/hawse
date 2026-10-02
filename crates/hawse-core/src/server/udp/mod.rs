@@ -1,6 +1,7 @@
 pub mod table;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::table::SessionTable;
 use super::Shared;
+use crate::allow::AllowList;
 use crate::error::chain;
 use crate::frame::{read_body, write_frame};
 use crate::transport::Transport;
@@ -29,6 +31,7 @@ pub struct UdpService {
     socket: UdpSocket,
     table: Mutex<SessionTable>,
     drops: Arc<Drops>,
+    allow: AllowList,
     // After `socket`: fields drop in declaration order, and a port released while its socket is
     // still open could be claimed by the next bind and refused by the kernel.
     _claim: PortClaim,
@@ -51,15 +54,33 @@ impl Drop for PortClaim {
 
 impl UdpService {
     /// Takes over `port`'s claim on the allocator and releases it once the socket is closed.
-    pub fn new(id: u16, name: String, socket: UdpSocket, port: Port, shared: Arc<Shared>) -> Self {
+    pub fn new(
+        id: u16,
+        name: String,
+        socket: UdpSocket,
+        port: Port,
+        shared: Arc<Shared>,
+        allow: AllowList,
+    ) -> Self {
         Self {
             id,
             name,
             socket,
             table: Mutex::new(SessionTable::new(shared.udp_sessions, IDLE)),
             drops: Arc::default(),
+            allow,
             _claim: PortClaim { port, shared },
         }
+    }
+
+    /// Checked before the session table sees the packet, so a source outside the list can neither
+    /// open a session nor evict one.
+    fn admits(&self, visitor: SocketAddr) -> bool {
+        let admitted = self.allow.permits(visitor.ip());
+        if !admitted {
+            self.drops.not_allowed();
+        }
+        admitted
     }
 
     /// A packet from the client, off either path, on its way to the visitor whose session it names.
@@ -124,6 +145,9 @@ async fn inbound(service: &UdpService, sender: &Sender, cancel: &CancellationTok
                         continue;
                     }
                 };
+                if !service.admits(visitor) {
+                    continue;
+                }
                 let seen = service
                     .table
                     .lock()
@@ -224,5 +248,34 @@ pub async fn demux(
         if let Some(service) = service {
             service.deliver(&packet).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::allow::AllowList;
+    use crate::net;
+    use hawse_proto::port::Kind;
+
+    #[tokio::test]
+    async fn a_packet_from_outside_the_list_is_refused_and_counted() {
+        let socket = net::bind_udp("127.0.0.1".parse().unwrap(), 0).unwrap();
+        let number = socket.local_addr().unwrap().port();
+        let allow = AllowList::effective(&["192.0.2.0/24".parse().unwrap()], &[]).unwrap();
+        let service = UdpService::new(
+            1,
+            "dns".into(),
+            socket,
+            Port {
+                number,
+                kind: Kind::Udp,
+            },
+            Arc::new(Shared::for_tests()),
+            allow,
+        );
+        assert!(!service.admits("127.0.0.1:5000".parse().unwrap()));
+        assert!(service.admits("[::ffff:192.0.2.9]:5000".parse().unwrap()));
+        assert_eq!(service.drops.snapshot().not_allowed, 1);
     }
 }

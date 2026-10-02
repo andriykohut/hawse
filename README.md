@@ -43,6 +43,8 @@ Working today, with TCP and UDP forwarding and key-based authorization:
 - **A doorway into one network.** Since `local` can name any host the client
   reaches, a single client can publish services running on several machines
   beside it.
+- **Databases and admin interfaces.** `allow` limits a service to the networks
+  you list, and the server turns everyone else away. See Configuration.
 - **Networks that block outbound UDP.** `transport.prefer = "tcp"` carries the
   tunnel over TLS instead of QUIC. Read the caveat under Configuration first:
   the fallback cannot report a transfer cut short.
@@ -52,9 +54,6 @@ Working today, with TCP and UDP forwarding and key-based authorization:
 
 Waiting on features that are not implemented yet:
 
-- **Databases and admin interfaces** should wait for source-address
-  allowlists, or be restricted by a firewall on the server. A public port is
-  reachable by anyone today.
 - **Services that log or rate-limit by client address** need PROXY protocol v2
   to see the real visitor address rather than the client's own connection.
 - **Many HTTPS services on one port 443** need SNI routing.
@@ -256,6 +255,28 @@ ports = ["8096"]
 
 A client may override the server-wide value with its own `bind`, so one server
 can keep some services behind a proxy and publish others directly.
+
+`allow` limits a service to visitors whose address falls in one of the listed
+networks. The server turns everyone else away before the client hears of them:
+a TCP visitor sees its connection closed, a UDP packet is dropped. Set it on
+the service in `client.toml`:
+
+```toml
+[expose.postgres]
+local = "127.0.0.1:5432"
+port = 5432
+allow = ["203.0.113.0/24", "2001:db8::/48"]
+```
+
+The same key on a `[clients.NAME]` table in `server.toml` caps what that client
+may publish. A service then admits only the addresses both lists cover, or all
+of the server's list when the service names none, and a service whose list
+shares nothing with the server's fails to bind as not granted. Without either
+list a service admits everyone.
+
+A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
+above, sees every visitor arrive from the proxy, so its allow list judges the
+proxy's address rather than the visitor's.
 
 `limits.streams_per_client` caps how many streams one client's connection may
 carry, one per visitor connection, and defaults to 4096. On the TCP fallback,

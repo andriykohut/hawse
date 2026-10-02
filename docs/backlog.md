@@ -18,9 +18,6 @@ parked for later. Each entry says what it is and why it waits.
 - **`hawse status`.** Needs a local admin socket on the running process to
   report connected clients, bound ports, and unknown keys that knocked.
 - **Windows.** Nothing in the design prevents it; not a v1 target.
-- **Per-client allowlist ceiling on the server.** Server-side `allow` that
-  intersects with client-declared allowlists. Useful once clients are not the
-  server admin.
 - **Passphrase-protected private keys.** File permissions only in v1.
 - **Connection-per-visitor on the TCP fallback.** The rejected alternative to
   yamux: a fresh TLS connection per visitor plus a pre-opened pool, the shape

@@ -588,31 +588,23 @@ async fn binds_with_phase_two_features_are_refused() {
         &server_id,
     );
     let echo = echo_server().await.to_string();
-    let mut cfg = client_config(
-        server.addr,
-        server.key,
-        &[("allowed", &echo, "any"), ("proxied", &echo, "any")],
-    );
-    cfg.expose.get_mut("allowed").unwrap().allow = vec!["203.0.113.0/24".parse().unwrap()];
+    let mut cfg = client_config(server.addr, server.key, &[("proxied", &echo, "any")]);
     cfg.expose.get_mut("proxied").unwrap().proxy_protocol = true;
     let mut client = start_client(cfg, client_id);
 
-    let mut refused = Vec::new();
-    while refused.len() < 2 {
+    loop {
         match next_event(&mut client.events).await {
-            Event::BindFailed { service, reason } => refused.push((service, reason)),
+            Event::BindFailed { service, reason } => {
+                assert_eq!(
+                    (service.as_str(), reason),
+                    ("proxied", BindFailure::Unsupported)
+                );
+                break;
+            }
             Event::Bound { service, port } => panic!("{service} was bound on {port}"),
             _ => {}
         }
     }
-    refused.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(
-        refused,
-        [
-            ("allowed".to_owned(), BindFailure::Unsupported),
-            ("proxied".to_owned(), BindFailure::Unsupported),
-        ]
-    );
 
     let after = tokio::time::timeout(Duration::from_secs(1), client.events.recv()).await;
     assert!(after.is_err(), "a later event arrived: {after:?}");

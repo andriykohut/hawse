@@ -7,21 +7,33 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::{ACCEPT_BACKOFF, Shared, out_of_descriptors};
+use crate::allow::AllowList;
 use crate::error::chain;
 use crate::frame::write_frame;
 use crate::pump::pump;
 use crate::transport::Transport;
 
+/// What one TCP listener serves.
+pub struct Public {
+    pub service_id: u16,
+    pub port: Port,
+    pub allow: AllowList,
+}
+
 /// Owns `port`'s claim on the allocator for as long as the socket is open.
 pub async fn serve(
     transport: Arc<dyn Transport>,
     listener: TcpListener,
-    service_id: u16,
-    port: Port,
+    public: Public,
     shared: Arc<Shared>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 ) {
+    let Public {
+        service_id,
+        port,
+        allow,
+    } = public;
     let buffer = shared.buffer;
     loop {
         let accepted = tokio::select! {
@@ -43,6 +55,10 @@ pub async fn serve(
                 continue;
             }
         };
+        if !allow.permits(visitor.ip()) {
+            tracing::debug!(%visitor, "visitor is not on the service's allow list");
+            continue;
+        }
         let Ok(listener_addr) = socket.local_addr() else {
             continue;
         };

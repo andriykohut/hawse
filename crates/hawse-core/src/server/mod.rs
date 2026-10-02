@@ -61,6 +61,22 @@ pub struct Shared {
     pub sessions: Mutex<HashMap<PublicKey, Arc<Live>>>,
 }
 
+#[cfg(test)]
+impl Shared {
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            policy: Policy::default(),
+            ports: Mutex::new(PortAllocator::new(hawse_proto::port::PortSpan {
+                first: 40000,
+                last: 41000,
+            })),
+            buffer: 16 << 10,
+            udp_sessions: 16,
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 /// `done` is cancelled once the session has released its ports, so a session superseding this one
 /// can wait for them.
 pub struct Live {

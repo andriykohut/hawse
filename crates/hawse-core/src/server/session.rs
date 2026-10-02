@@ -17,6 +17,7 @@ use tracing::Instrument as _;
 use super::policy::Grant;
 use super::udp::{self, UdpService, UdpServices};
 use super::{AGENT, Live, Shared, listener};
+use crate::allow::AllowList;
 use crate::control::Control;
 use crate::net;
 use crate::transport::{CloseReason, Transport, TransportError};
@@ -275,11 +276,14 @@ impl Session {
         if self.services.contains_key(service) {
             return failed(BindFailure::InUse);
         }
-        // Ignoring these would open a port with weaker guarantees than the client asked for.
-        if !allow.is_empty() {
-            tracing::warn!(service, "allow lists are not supported yet");
-            return failed(BindFailure::Unsupported);
-        }
+        let Some(allow) = AllowList::effective(allow, &self.grant.allow) else {
+            tracing::warn!(
+                service,
+                "the service's allow list shares no address with this client's ceiling"
+            );
+            return failed(BindFailure::NotGranted);
+        };
+        // Ignoring this would open a port with weaker guarantees than the client asked for.
         if proxy_protocol {
             tracing::warn!(service, "proxy protocol is not supported yet");
             return failed(BindFailure::Unsupported);
@@ -299,8 +303,11 @@ impl Session {
                 self.tasks.spawn(listener::serve(
                     Arc::clone(&self.transport),
                     listener,
-                    id,
-                    port,
+                    listener::Public {
+                        service_id: id,
+                        port,
+                        allow,
+                    },
                     Arc::clone(&self.shared),
                     cancel.clone(),
                     self.tasks.clone(),
@@ -318,6 +325,7 @@ impl Session {
                     socket,
                     port,
                     Arc::clone(&self.shared),
+                    allow,
                 ));
                 self.udp
                     .write()
