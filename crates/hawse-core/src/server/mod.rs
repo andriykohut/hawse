@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod limiter;
 mod listener;
 pub mod policy;
 pub mod ports;
