@@ -115,6 +115,7 @@ pub mod reset {
     pub const UNKNOWN_SERVICE: u32 = 0x10;
     pub const LOCAL_REFUSED: u32 = 0x11;
     pub const ABORTED: u32 = 0x12;
+    pub const UNEXPECTED_STREAM: u32 = 0x13;
 }
 
 /// Error codes for `Transport::close`. Only the QUIC transport carries them to the peer; yamux's

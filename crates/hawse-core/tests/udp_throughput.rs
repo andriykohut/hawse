@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use common::{client_config_over, expect_bound, server_config, start_client, start_server};
 use hawse_core::config::Prefer;
 use hawse_core::identity::Identity;
+use ipnet::IpNet;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 
@@ -85,7 +86,17 @@ async fn direct(len: usize) {
     }
 }
 
-async fn tunnelled(label: &str, prefer: Prefer, len: usize) {
+/// `n` networks, of which only the last admits the loopback visitor, so every packet is checked
+/// against all of them.
+fn allow_list(n: usize) -> Vec<IpNet> {
+    let mut nets: Vec<IpNet> = (1..n)
+        .map(|i| format!("198.51.100.{i}/32").parse().unwrap())
+        .collect();
+    nets.push("127.0.0.0/8".parse().unwrap());
+    nets
+}
+
+async fn tunnelled(label: &str, prefer: Prefer, len: usize, allow: &[IpNet]) {
     for &pps in &LADDER {
         // Fresh server, client and sink each rung, torn down after: a lingering tunnel could
         // still deliver this rung's queued packets into the next rung's count.
@@ -96,15 +107,14 @@ async fn tunnelled(label: &str, prefer: Prefer, len: usize) {
             &server_id,
         );
         let (addr, seen) = sink().await;
-        let mut client = start_client(
-            client_config_over(
-                server.addr,
-                server.key,
-                &[("sink", &addr.to_string(), "any/udp")],
-                prefer,
-            ),
-            client_id,
+        let mut cfg = client_config_over(
+            server.addr,
+            server.key,
+            &[("sink", &addr.to_string(), "any/udp")],
+            prefer,
         );
+        cfg.expose.get_mut("sink").unwrap().allow = allow.to_vec();
+        let mut client = start_client(cfg, client_id);
         let port = expect_bound(&mut client.events, "sink").await;
         let lost = rung(label, ([127, 0, 0, 1], port.number).into(), len, pps, &seen).await;
         client.cancel.cancel();
@@ -122,8 +132,22 @@ async fn tunnelled(label: &str, prefer: Prefer, len: usize) {
 #[ignore = "benchmark, run explicitly with --release --ignored --nocapture"]
 async fn udp_packet_rate_over_quic_and_the_tcp_fallback() {
     direct(1100).await;
-    tunnelled("quic_datagram_1100", Prefer::Quic, 1100).await;
-    tunnelled("quic_bulk_1472", Prefer::Quic, 1472).await;
-    tunnelled("tcp_bulk_1200", Prefer::Tcp, 1200).await;
+    tunnelled("quic_datagram_1100", Prefer::Quic, 1100, &[]).await;
+    tunnelled(
+        "quic_datagram_1100_allow1",
+        Prefer::Quic,
+        1100,
+        &allow_list(1),
+    )
+    .await;
+    tunnelled(
+        "quic_datagram_1100_allow64",
+        Prefer::Quic,
+        1100,
+        &allow_list(64),
+    )
+    .await;
+    tunnelled("quic_bulk_1472", Prefer::Quic, 1472, &[]).await;
+    tunnelled("tcp_bulk_1200", Prefer::Tcp, 1200, &[]).await;
     eprintln!("loopback: no loss, no round trip. Compare each line only against its own history.");
 }

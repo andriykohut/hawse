@@ -43,6 +43,8 @@ Working today, with TCP and UDP forwarding and key-based authorization:
 - **A doorway into one network.** Since `local` can name any host the client
   reaches, a single client can publish services running on several machines
   beside it.
+- **Databases and admin interfaces.** `allow` limits a service to the networks
+  you list, and the server turns everyone else away. See Configuration.
 - **Networks that block outbound UDP.** `transport.prefer = "tcp"` carries the
   tunnel over TLS instead of QUIC. Read the caveat under Configuration first:
   the fallback cannot report a transfer cut short.
@@ -52,11 +54,8 @@ Working today, with TCP and UDP forwarding and key-based authorization:
 
 Waiting on features that are not implemented yet:
 
-- **Databases and admin interfaces** should wait for source-address
-  allowlists, or be restricted by a firewall on the server. A public port is
-  reachable by anyone today.
-- **Services that log or rate-limit by client address** need PROXY protocol v2
-  to see the real visitor address rather than the client's own connection.
+- **UDP services that log or rate-limit by client address** need PROXY
+  protocol v2, which so far reaches TCP services only.
 - **Many HTTPS services on one port 443** need SNI routing.
 
 ## Status
@@ -220,9 +219,11 @@ dynamic_ports = "40000-41000"
 The server answers on the listen port twice: UDP for QUIC, and TCP for the
 fallback transport. Both have to be free at startup and reachable through the
 firewall — the server refuses to start if it cannot bind the TCP side, rather
-than come up with the fallback silently missing. Public ports bound for clients
-are TCP or UDP, as each service asks. `hawse server --listen ADDR` overrides
-`listen` for that run.
+than come up with the fallback silently missing. Set
+`transport.tcp_fallback = false` on a server whose clients all use QUIC: it
+then binds the port on UDP only, and a client set to `prefer = "tcp"` cannot
+connect. Public ports bound for clients are TCP or UDP, as each service asks.
+`hawse server --listen ADDR` overrides `listen` for that run.
 
 `congestion` selects the controller, on either end, for the data that end
 sends. The server defaults to `cubic`, the client to `bbr`:
@@ -257,6 +258,37 @@ ports = ["8096"]
 A client may override the server-wide value with its own `bind`, so one server
 can keep some services behind a proxy and publish others directly.
 
+`allow` limits a service to visitors whose address falls in one of the listed
+networks. The server turns everyone else away before the client hears of them:
+a TCP visitor sees its connection closed, a UDP packet is dropped. For UDP the
+source address is whatever the packet claims, so a forged packet naming an
+allowed network still reaches the service. Set it on the service in
+`client.toml`:
+
+```toml
+[expose.postgres]
+local = "127.0.0.1:5432"
+port = 5432
+allow = ["203.0.113.0/24", "2001:db8::/48"]
+```
+
+The same key on a `[clients.NAME]` table in `server.toml` caps what that client
+may publish. A service then admits only the addresses both lists cover, or all
+of the server's list when the service names none, and a service whose list
+shares nothing with the server's fails to bind as not granted. Without either
+list a service admits everyone.
+
+`proxy_protocol = true` on a TCP service sends a PROXY protocol v2 header ahead
+of each visitor's bytes, naming the visitor's address and the public address it
+reached, so a service that logs or limits by address sees the visitor instead of
+the client. The service has to expect the header, or it reads it as the start
+of the request. UDP services cannot use it yet. Both ends need this release or
+later: an older client accepts the setting but sends no header.
+
+A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
+above, sees every visitor arrive from the proxy, so its allow list and its PROXY
+header describe the proxy, not the visitor.
+
 `limits.streams_per_client` caps how many streams one client's connection may
 carry, one per visitor connection, and defaults to 4096. On the TCP fallback,
 yamux promises every stream 256 KiB of receive window and drops the whole
@@ -267,8 +299,22 @@ number of visitor connections a client carries at once.
 track of at once, and defaults to 4096. Past it the visitor that has been quiet
 longest is forgotten, and any visitor is forgotten after 60 s of silence; its
 next packet starts a new session, which the local service sees arrive from a
-new port. `limits.auth_failures_per_minute` and `quic_retry` are parsed but not
-enforced yet.
+new port.
+
+`limits.auth_failures_per_minute`, 30 by default, limits how often one address
+may fail to authenticate: a key the server does not know, even one whose
+connection never sends its greeting, or a TCP handshake that fails. An IPv6
+address counts together with the rest of its /64. Past the limit the server
+refuses that address's connections before the TLS or QUIC handshake, and lets
+one more try through every two seconds at the default. Clients sharing an
+address, behind carrier-grade NAT for instance, share its limit. The server
+tracks at most 16384 addresses; while that many are failing at once, new ones go
+unlimited, and the log says so. `0` turns the limit off.
+
+`quic_retry = true` makes a QUIC client prove its address with one extra round
+trip before the server spends anything on a handshake. It also lets a failed
+QUIC handshake count against the limit above; without it only failures after
+the handshake do, since an unproven source address can be forged.
 
 Client settings: `server` and `server_key` are required, `key` defaults to
 `client.key`, and each `[expose.NAME]` table needs a `local` address.
@@ -344,10 +390,11 @@ idle_timeout = "30s"
 stream_window = "8MiB"
 connection_window = "64MiB"
 buffer = "16KiB"
+tcp_fallback = true
 ```
 
 The client uses the same values except `stream_window = "2MiB"` and
-`connection_window = "16MiB"`.
+`connection_window = "16MiB"`, and has no `tcp_fallback`.
 
 The rest of `[transport]` is not honoured equally by the two. Both use
 `idle_timeout` (on TCP it is the quiet time before the kernel starts probing),

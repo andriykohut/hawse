@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use hawse_proto::msg::{StreamHeader, reset};
+use hawse_proto::proxy;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use super::Target;
@@ -40,7 +42,7 @@ pub async fn serve(
         refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
         return;
     };
-    let socket = match TcpStream::connect(&target.local).await {
+    let mut socket = match TcpStream::connect(&target.local).await {
         Ok(socket) => socket,
         Err(err) => {
             tracing::warn!(
@@ -54,6 +56,19 @@ pub async fn serve(
         }
     };
     let _ = socket.set_nodelay(true);
+    if target.proxy_protocol {
+        let preamble = proxy::v2_tcp(header.visitor, header.listener);
+        if let Err(err) = socket.write_all(&preamble).await {
+            tracing::warn!(
+                service = target.service,
+                local = target.local,
+                err = %chain(&err),
+                "local service closed before the PROXY header"
+            );
+            refuse(&mut send, &mut recv, reset::LOCAL_REFUSED);
+            return;
+        }
+    }
     tracing::debug!(service = target.service, visitor = %header.visitor, "visitor connected");
     match pump(socket, send, recv, buffer).await {
         Ok(stats) => tracing::debug!(

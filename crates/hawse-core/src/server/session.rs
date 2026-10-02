@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
+use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, reset};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
@@ -17,6 +17,7 @@ use tracing::Instrument as _;
 use super::policy::Grant;
 use super::udp::{self, UdpService, UdpServices};
 use super::{AGENT, Live, Shared, listener};
+use crate::allow::AllowList;
 use crate::control::Control;
 use crate::net;
 use crate::transport::{CloseReason, Transport, TransportError};
@@ -30,12 +31,23 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 
-pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: CancellationToken) {
-    let remote = transport.remote_address();
+/// `remote` is the address the handshake proved, not the connection's current one: a QUIC path
+/// can migrate to a new, unproven source before it is validated, and a failure charged there would
+/// limit whoever that source names.
+pub async fn run(
+    transport: Arc<dyn Transport>,
+    remote: SocketAddr,
+    shared: Arc<Shared>,
+    cancel: CancellationToken,
+) {
     let Some(key) = transport.peer_key() else {
+        shared.auth_failed(remote.ip());
         transport.close(CloseReason::NoKey);
         return;
     };
+    // TLS has proved the key by here, so a known one whose link drops before its Hello is a client
+    // on a bad network rather than a stranger, and counting it could lock the client out.
+    let stranger = shared.policy.lookup(&key).is_none();
     // Nothing here is authorized yet, so a peer that never speaks must not hold a task open or stall shutdown.
     let greeting = async {
         let (control_send, control_recv) = transport.accept_bi().await?;
@@ -51,18 +63,28 @@ pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: Can
         greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
     };
     let Ok(opened) = greeted else {
+        if stranger {
+            shared.auth_failed(remote.ip());
+        }
         transport.close(CloseReason::NoHello);
         return;
     };
     let Ok((mut control, hello)) = opened else {
+        if stranger {
+            shared.auth_failed(remote.ip());
+        }
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
+        if stranger {
+            shared.auth_failed(remote.ip());
+        }
         transport.close(CloseReason::BadHello);
         return;
     };
 
     let Some(grant) = shared.policy.lookup(&key).cloned() else {
+        shared.auth_failed(remote.ip());
         tracing::info!(%key, %remote, "denied unknown key. authorize it with: hawse authorize {key} --name NAME");
         let _ = control
             .send(&ServerMessage::Denied {
@@ -136,6 +158,27 @@ fn retire(shared: &Shared, key: PublicKey, live: &Arc<Live>) {
     }
 }
 
+/// Our client opens no stream after the control stream. One that arrives anyway is refused at once,
+/// so it neither waits unread nor holds a slot in the stream budget.
+async fn refuse_streams(transport: Arc<dyn Transport>, cancel: CancellationToken) {
+    let mut logged = false;
+    loop {
+        let (mut send, mut recv) = tokio::select! {
+            () = cancel.cancelled() => return,
+            accepted = transport.accept_bi() => match accepted {
+                Ok(halves) => halves,
+                Err(_) => return,
+            },
+        };
+        if !logged {
+            tracing::debug!("refusing a stream the client opened");
+            logged = true;
+        }
+        send.reset(reset::UNEXPECTED_STREAM);
+        recv.stop(reset::UNEXPECTED_STREAM);
+    }
+}
+
 struct Session {
     transport: Arc<dyn Transport>,
     shared: Arc<Shared>,
@@ -180,11 +223,15 @@ impl ServiceIds {
 
 impl Session {
     async fn serve(mut self, mut control: Control, server_cancel: CancellationToken) {
-        let demux = CancellationToken::new();
+        let background = CancellationToken::new();
         self.tasks.spawn(udp::demux(
             Arc::clone(&self.transport),
             Arc::clone(&self.udp),
-            demux.clone(),
+            background.clone(),
+        ));
+        self.tasks.spawn(refuse_streams(
+            Arc::clone(&self.transport),
+            background.clone(),
         ));
 
         let mut ping = tokio::time::interval(PING_EVERY);
@@ -244,7 +291,7 @@ impl Session {
         for name in names {
             self.unbind(&name);
         }
-        demux.cancel();
+        background.cancel();
         control.finish().await;
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
@@ -275,13 +322,16 @@ impl Session {
         if self.services.contains_key(service) {
             return failed(BindFailure::InUse);
         }
-        // Ignoring these would open a port with weaker guarantees than the client asked for.
-        if !allow.is_empty() {
-            tracing::warn!(service, "allow lists are not supported yet");
-            return failed(BindFailure::Unsupported);
-        }
-        if proxy_protocol {
-            tracing::warn!(service, "proxy protocol is not supported yet");
+        let Some(allow) = AllowList::effective(allow, &self.grant.allow) else {
+            tracing::warn!(
+                service,
+                "the service's allow list shares no address with this client's ceiling"
+            );
+            return failed(BindFailure::NotGranted);
+        };
+        // The client never learns a UDP visitor's address, so it could not write the header.
+        if proxy_protocol && kind == Kind::Udp {
+            tracing::warn!(service, "proxy protocol is not supported on udp yet");
             return failed(BindFailure::Unsupported);
         }
         let live = self.services.values().map(|bound| bound.id).collect();
@@ -299,8 +349,11 @@ impl Session {
                 self.tasks.spawn(listener::serve(
                     Arc::clone(&self.transport),
                     listener,
-                    id,
-                    port,
+                    listener::Public {
+                        service_id: id,
+                        port,
+                        allow,
+                    },
                     Arc::clone(&self.shared),
                     cancel.clone(),
                     self.tasks.clone(),
@@ -318,6 +371,7 @@ impl Session {
                     socket,
                     port,
                     Arc::clone(&self.shared),
+                    allow,
                 ));
                 self.udp
                     .write()

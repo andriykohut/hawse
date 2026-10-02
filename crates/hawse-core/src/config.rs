@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::name::{self, NameError};
-use hawse_proto::port::{PortRange, PortRequest, PortSpan};
-use ipnet::IpNet;
+use hawse_proto::port::{Kind, PortRange, PortRequest, PortSpan};
+use ipnet::{IpNet, Ipv4Net};
 use serde::Deserialize;
 
 pub mod units;
@@ -55,6 +55,10 @@ pub struct ClientPolicy {
     /// Overrides the server-wide `bind` for this client's public ports.
     #[serde(default)]
     pub bind: Option<IpAddr>,
+    /// Caps every service this client binds: a service admits only what this and its own `allow`
+    /// both cover.
+    #[serde(default)]
+    pub allow: Vec<IpNet>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -94,6 +98,8 @@ pub struct ServerTransport {
     pub connection_window: ByteSize,
     pub congestion: Congestion,
     pub buffer: ByteSize,
+    /// Off for a server whose clients all use QUIC: the listen port is then bound on UDP only.
+    pub tcp_fallback: bool,
 }
 
 impl Default for ServerTransport {
@@ -104,6 +110,7 @@ impl Default for ServerTransport {
             connection_window: ByteSize(64 << 20),
             congestion: Congestion::Cubic,
             buffer: ByteSize(16 << 10),
+            tcp_fallback: true,
         }
     }
 }
@@ -185,6 +192,16 @@ pub enum ConfigError {
     ServiceName(String, NameError),
     #[error("expose `{0}`: local `{1}` must be host:port")]
     LocalAddr(String, String),
+    #[error(
+        "client `{0}`: allow entry {1} is an IPv4-mapped network, which never matches; write {2}"
+    )]
+    ClientAllow(String, IpNet, IpNet),
+    #[error(
+        "expose `{0}`: allow entry {1} is an IPv4-mapped network, which never matches; write {2}"
+    )]
+    ExposeAllow(String, IpNet, IpNet),
+    #[error("expose `{0}`: proxy_protocol is not supported on UDP services yet")]
+    UdpProxy(String),
     #[error("server `{0}` must be host or host:port")]
     ServerAddr(String),
     #[error("name: {0}")]
@@ -211,6 +228,21 @@ pub enum ConfigError {
     StreamsPerClient,
     #[error("limits udp_sessions_per_service cannot be 0")]
     UdpSessions,
+}
+
+/// The IPv4 network an IPv4-mapped IPv6 one stands for. Visitors are compared in canonical form,
+/// so a mapped entry would never match anyone.
+fn ipv4_form(net: &IpNet) -> Option<IpNet> {
+    let IpNet::V6(v6) = net else { return None };
+    let v4 = v6.network().to_ipv4_mapped()?;
+    let prefix = v6.prefix_len().checked_sub(96)?;
+    Ipv4Net::new(v4, prefix).ok().map(IpNet::V4)
+}
+
+fn mapped_entry(allow: &[IpNet]) -> Option<(IpNet, IpNet)> {
+    allow
+        .iter()
+        .find_map(|net| ipv4_form(net).map(|ipv4| (*net, ipv4)))
 }
 
 fn validate_transport(
@@ -277,6 +309,9 @@ impl ServerConfig {
             if let Some(other) = seen.insert(policy.key, client) {
                 return Err(ConfigError::DuplicateKey(other.to_owned(), client.clone()));
             }
+            if let Some((net, ipv4)) = mapped_entry(&policy.allow) {
+                return Err(ConfigError::ClientAllow(client.clone(), net, ipv4));
+            }
         }
         Ok(())
     }
@@ -307,6 +342,12 @@ impl ClientConfig {
                         expose.local.clone(),
                     ));
                 }
+            }
+            if let Some((net, ipv4)) = mapped_entry(&expose.allow) {
+                return Err(ConfigError::ExposeAllow(service.clone(), net, ipv4));
+            }
+            if expose.proxy_protocol && expose.port.kind() == Kind::Udp {
+                return Err(ConfigError::UdpProxy(service.clone()));
             }
         }
         Ok(())
@@ -442,7 +483,7 @@ prefer = "tcp"
         assert_eq!(cfg.transport.congestion, Congestion::Bbr);
         assert_eq!(cfg.clients.len(), 2);
         assert_eq!(cfg.clients["homelab"].ports.len(), 4);
-        assert!(cfg.clients["laptop"].ports.is_empty());
+        assert_eq!(cfg.clients["laptop"].ports, Vec::<PortRange>::new());
         cfg.validate().unwrap();
     }
 
@@ -462,6 +503,13 @@ prefer = "tcp"
         assert_eq!(cfg.transport.buffer, units::ByteSize(16 * 1024));
         assert!(cfg.clients.is_empty());
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn the_tcp_fallback_is_on_unless_turned_off() {
+        assert!(ServerConfig::default().transport.tcp_fallback);
+        let cfg: ServerConfig = toml::from_str("[transport]\ntcp_fallback = false").unwrap();
+        assert!(!cfg.transport.tcp_fallback);
     }
 
     #[test]
@@ -520,11 +568,56 @@ prefer = "tcp"
                 key: sample_key(),
                 ports: vec!["4433".parse().unwrap()],
                 bind: None,
+                allow: vec![],
             },
         );
         assert_eq!(
             cfg.validate(),
             Err(ConfigError::ListenGranted("laptop".into(), 4433))
+        );
+    }
+
+    #[test]
+    fn a_client_can_be_given_an_allow_ceiling() {
+        let text = format!("{SERVER}allow = [\"203.0.113.0/24\"]\n");
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            cfg.clients["laptop"].allow,
+            vec!["203.0.113.0/24".parse::<IpNet>().unwrap()]
+        );
+        assert_eq!(cfg.clients["homelab"].allow, Vec::<IpNet>::new());
+    }
+
+    #[test]
+    fn an_ipv4_mapped_allow_entry_is_rejected_with_its_ipv4_form() {
+        let mapped: IpNet = "::ffff:203.0.113.0/120".parse().unwrap();
+        let ipv4: IpNet = "203.0.113.0/24".parse().unwrap();
+
+        let text = format!("{SERVER}allow = [\"{mapped}\"]\n");
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ClientAllow("laptop".into(), mapped, ipv4))
+        );
+
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.expose.get_mut("ssh").unwrap().allow = vec![mapped];
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ExposeAllow("ssh".into(), mapped, ipv4))
+        );
+
+        cfg.expose.get_mut("ssh").unwrap().allow = vec!["2001:db8::/48".parse().unwrap()];
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn proxy_protocol_on_a_udp_service_is_rejected() {
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        cfg.expose.get_mut("wireguard").unwrap().proxy_protocol = true;
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::UdpProxy("wireguard".into()))
         );
     }
 

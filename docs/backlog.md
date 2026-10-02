@@ -18,9 +18,6 @@ parked for later. Each entry says what it is and why it waits.
 - **`hawse status`.** Needs a local admin socket on the running process to
   report connected clients, bound ports, and unknown keys that knocked.
 - **Windows.** Nothing in the design prevents it; not a v1 target.
-- **Per-client allowlist ceiling on the server.** Server-side `allow` that
-  intersects with client-declared allowlists. Useful once clients are not the
-  server admin.
 - **Passphrase-protected private keys.** File permissions only in v1.
 - **Connection-per-visitor on the TCP fallback.** The rejected alternative to
   yamux: a fresh TLS connection per visitor plus a pre-opened pool, the shape
@@ -36,25 +33,6 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **The TCP accept path is unauthenticated.** A semaphore now caps concurrent
-  in-flight TLS handshakes at 256, so exhaustion queues in the kernel backlog
-  instead of reaching EMFILE, but nothing yet rate-limits a peer that keeps
-  completing handshakes: `limits.auth_failures_per_minute` does not take effect,
-  and QUIC's listen side has `quic_retry` available for the same job and does
-  not use it either.
-- **No way to decline the TCP listener entirely.** The bind is mandatory and
-  fatal, so a deployment that will only ever use QUIC still publishes an
-  unauthenticated TCP accept path. A `transport.tcp_fallback = false` switch is
-  the right shape for it; it was left out as new config surface belonging to a
-  later phase.
-- **Streams past the control stream are never accepted on a session.** The
-  server calls `accept_bi` once, for the control stream, and never again. On
-  QUIC the extras sit in quinn's accept queue against the client's stream
-  credit; on TCP they accumulate in `TcpTransport`'s unbounded inbound channel
-  and hold slots in yamux's stream budget, which counts both directions in one
-  number and kills the connection rather than backpressuring when it is full.
-  Harmless against our own client, which never opens one, but it is an
-  authenticated client's way to end its own session.
 - **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
   resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
   a QUIC visitor's read fails with that code. On yamux neither half carries one,
@@ -204,9 +182,7 @@ phase 1. Each says what the code does today and what the fix would be.
   each.
 - Nothing checks that `listen` falls outside `dynamic_ports`, or that a fixed
   grant does not name the listen port; both would fail later at bind time.
-- `quic_retry` and `auth_failures_per_minute` parse but do not take effect yet,
-  and nothing warns that they are ignored.
-  `transport.stream_window` and `transport.congestion` join them under
+- `transport.stream_window` and `transport.congestion` do nothing under
   `prefer = "tcp"`, where yamux guarantees every stream 256 KiB and grows it
   only into the connection window's slack, leaving no per-stream knob, and the
   kernel owns congestion control: both are validated and then silently inert.
@@ -228,8 +204,10 @@ phase 1. Each says what the code does today and what the fix would be.
   existing visitors outlive the service.
 - The 100 ms backoff after an accept error is not cancel-aware and delays
   shutdown by up to that long.
-- The unknown-key log line is unbounded until the phase 2 rate limiter lands,
-  so a stranger can fill the log.
+- The unknown-key log line is bounded per address (per /64 for IPv6) by
+  `auth_failures_per_minute`, but stays unbounded across many addresses, once
+  the limiter is full, and with the limit set to `0`, so a stranger can still
+  fill the log.
 - The 45 s liveness deadline is only checked on the 15 s tick, so detection
   lands between 45 and 60 s.
 - Two early exits close the connection without an explicit code, so the client

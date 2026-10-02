@@ -24,6 +24,7 @@ pub struct Drops {
     unknown: AtomicU64,
     socket: AtomicU64,
     queue_full: AtomicU64,
+    not_allowed: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub struct DropCounts {
     pub unknown: u64,
     pub socket: u64,
     pub queue_full: u64,
+    pub not_allowed: u64,
 }
 
 impl Drops {
@@ -56,6 +58,10 @@ impl Drops {
         self.queue_full.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn not_allowed(&self) {
+        self.not_allowed.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> DropCounts {
         DropCounts {
             bulk_full: self.bulk_full.load(Ordering::Relaxed),
@@ -63,6 +69,7 @@ impl Drops {
             unknown: self.unknown.load(Ordering::Relaxed),
             socket: self.socket.load(Ordering::Relaxed),
             queue_full: self.queue_full.load(Ordering::Relaxed),
+            not_allowed: self.not_allowed.load(Ordering::Relaxed),
         }
     }
 }

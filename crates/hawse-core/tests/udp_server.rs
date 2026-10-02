@@ -174,7 +174,7 @@ async fn a_fixed_udp_port_is_free_again_once_its_session_ends() {
 }
 
 #[tokio::test]
-async fn a_udp_bind_with_an_allow_list_is_still_refused() {
+async fn a_udp_bind_with_proxy_protocol_is_still_refused() {
     let (server_id, client_id) = ids();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[])]),
@@ -187,8 +187,8 @@ async fn a_udp_bind_with_an_allow_list_is_still_refused() {
             service: "dns".to_owned(),
             kind: Kind::Udp,
             port: None,
-            allow: vec!["203.0.113.0/24".parse().unwrap()],
-            proxy_protocol: false,
+            allow: vec![],
+            proxy_protocol: true,
         })
         .await
         .unwrap();

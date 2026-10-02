@@ -136,6 +136,7 @@ pub fn server_config(clients: &[(&str, PublicKey, &[&str])]) -> ServerConfig {
                 key: *key,
                 ports,
                 bind: None,
+                allow: vec![],
             },
         );
     }
