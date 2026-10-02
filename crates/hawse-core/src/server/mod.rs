@@ -216,7 +216,9 @@ impl Server {
                     }
                     let validated = incoming.remote_address_validated();
                     if self.quic_retry && !validated {
-                        // Refused only when this Initial already carried a retry token.
+                        // Defensive: quinn refuses a retry only for an Initial that already
+                        // carried a retry token, and such an address counts as validated, so this
+                        // branch cannot normally run.
                         if let Err(err) = incoming.retry() {
                             err.into_incoming().ignore();
                         }
@@ -226,7 +228,12 @@ impl Server {
                     let cancel = cancel.child_token();
                     sessions.spawn(async move {
                         match incoming.await {
-                            Ok(conn) => session::run(Arc::new(QuicTransport(conn)), shared, cancel).await,
+                            // A completed handshake proves `remote`: the peer received the
+                            // server's handshake packets there.
+                            Ok(conn) => {
+                                session::run(Arc::new(QuicTransport(conn)), remote, shared, cancel)
+                                    .await;
+                            }
                             Err(err) => {
                                 // An unvalidated source can be forged, and counting it would let a
                                 // stranger limit the address it names.
@@ -288,7 +295,9 @@ impl Server {
                         // unauthenticated part, and a session that got this far is authenticated.
                         drop(permit);
                         match accepted {
-                            Ok(transport) => session::run(Arc::new(transport), shared, cancel).await,
+                            Ok(transport) => {
+                                session::run(Arc::new(transport), remote, shared, cancel).await;
+                            }
                             Err(err) => {
                                 // The TCP handshake has already proved this address.
                                 shared.auth_failed(remote.ip());

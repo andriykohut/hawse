@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,13 +31,23 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 
-pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: CancellationToken) {
-    let remote = transport.remote_address();
+/// `remote` is the address the handshake proved, not the connection's current one: a QUIC path
+/// can migrate to a new, unproven source before it is validated, and a failure charged there would
+/// limit whoever that source names.
+pub async fn run(
+    transport: Arc<dyn Transport>,
+    remote: SocketAddr,
+    shared: Arc<Shared>,
+    cancel: CancellationToken,
+) {
     let Some(key) = transport.peer_key() else {
         shared.auth_failed(remote.ip());
         transport.close(CloseReason::NoKey);
         return;
     };
+    // TLS has proved the key by here, so a known one whose link drops before its Hello is a client
+    // on a bad network rather than a stranger, and counting it could lock the client out.
+    let stranger = shared.policy.lookup(&key).is_none();
     // Nothing here is authorized yet, so a peer that never speaks must not hold a task open or stall shutdown.
     let greeting = async {
         let (control_send, control_recv) = transport.accept_bi().await?;
@@ -53,16 +63,22 @@ pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: Can
         greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
     };
     let Ok(opened) = greeted else {
-        shared.auth_failed(remote.ip());
+        if stranger {
+            shared.auth_failed(remote.ip());
+        }
         transport.close(CloseReason::NoHello);
         return;
     };
     let Ok((mut control, hello)) = opened else {
-        shared.auth_failed(remote.ip());
+        if stranger {
+            shared.auth_failed(remote.ip());
+        }
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
-        shared.auth_failed(remote.ip());
+        if stranger {
+            shared.auth_failed(remote.ip());
+        }
         transport.close(CloseReason::BadHello);
         return;
     };
