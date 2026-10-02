@@ -204,6 +204,10 @@ phase 1. Each says what the code does today and what the fix would be.
   existing visitors outlive the service.
 - The 100 ms backoff after an accept error is not cancel-aware and delays
   shutdown by up to that long.
+- The unknown-key log line is bounded per address (per /64 for IPv6) by
+  `auth_failures_per_minute`, but stays unbounded across many addresses, once
+  the limiter is full, and with the limit set to `0`, so a stranger can still
+  fill the log.
 - The 45 s liveness deadline is only checked on the 15 s tick, so detection
   lands between 45 and 60 s.
 - Two early exits close the connection without an explicit code, so the client

@@ -260,8 +260,10 @@ can keep some services behind a proxy and publish others directly.
 
 `allow` limits a service to visitors whose address falls in one of the listed
 networks. The server turns everyone else away before the client hears of them:
-a TCP visitor sees its connection closed, a UDP packet is dropped. Set it on
-the service in `client.toml`:
+a TCP visitor sees its connection closed, a UDP packet is dropped. For UDP the
+source address is whatever the packet claims, so a forged packet naming an
+allowed network still reaches the service. Set it on the service in
+`client.toml`:
 
 ```toml
 [expose.postgres]
@@ -276,15 +278,16 @@ of the server's list when the service names none, and a service whose list
 shares nothing with the server's fails to bind as not granted. Without either
 list a service admits everyone.
 
-A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
-above, sees every visitor arrive from the proxy, so its allow list and its PROXY
-header describe the proxy, not the visitor.
-
 `proxy_protocol = true` on a TCP service sends a PROXY protocol v2 header ahead
 of each visitor's bytes, naming the visitor's address and the public address it
 reached, so a service that logs or limits by address sees the visitor instead of
 the client. The service has to expect the header, or it reads it as the start
-of the request. UDP services cannot use it yet.
+of the request. UDP services cannot use it yet. Both ends need this release or
+later: an older client accepts the setting but sends no header.
+
+A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
+above, sees every visitor arrive from the proxy, so its allow list and its PROXY
+header describe the proxy, not the visitor.
 
 `limits.streams_per_client` caps how many streams one client's connection may
 carry, one per visitor connection, and defaults to 4096. On the TCP fallback,
@@ -302,9 +305,9 @@ new port.
 may fail to authenticate: a key the server does not know, a connection that
 never sends its greeting, or a TCP handshake that fails. An IPv6 address counts
 together with the rest of its /64. Past the limit the server refuses that
-address's connections before any handshake, and lets one more try through every
-two seconds at the default. Clients sharing an address, behind carrier-grade NAT
-for instance, share its limit. `0` turns the limit off.
+address's connections before the TLS or QUIC handshake, and lets one more try
+through every two seconds at the default. Clients sharing an address, behind
+carrier-grade NAT for instance, share its limit. `0` turns the limit off.
 
 `quic_retry = true` makes a QUIC client prove its address with one extra round
 trip before the server spends anything on a handshake. It also lets a failed
@@ -385,10 +388,11 @@ idle_timeout = "30s"
 stream_window = "8MiB"
 connection_window = "64MiB"
 buffer = "16KiB"
+tcp_fallback = true
 ```
 
 The client uses the same values except `stream_window = "2MiB"` and
-`connection_window = "16MiB"`.
+`connection_window = "16MiB"`, and has no `tcp_fallback`.
 
 The rest of `[transport]` is not honoured equally by the two. Both use
 `idle_timeout` (on TCP it is the quiet time before the kernel starts probing),
