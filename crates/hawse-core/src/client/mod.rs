@@ -16,7 +16,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::config::{ClientConfig, DEFAULT_PORT, Prefer, split_host_port};
+use crate::config::{ClientConfig, DEFAULT_PORT, Expose, Prefer, split_host_port};
 use crate::control::Control;
 use crate::error::chain;
 use crate::frame::{StreamFrameError, read_frame};
@@ -107,6 +107,7 @@ pub enum ClientError {
 pub struct Target {
     pub service: String,
     pub local: String,
+    pub proxy_protocol: bool,
 }
 
 type Targets = Arc<RwLock<HashMap<u16, Target>>>;
@@ -120,8 +121,8 @@ struct Dialed {
     control: Control,
 }
 
-/// Bundled to keep `register_bound` under clippy's argument-count limit, and threaded through
-/// to `UdpLocal::new` for the same reason.
+/// Bundled to keep `UdpLocal::new` under clippy's argument-count limit, and threaded through
+/// `register_bound` to reach it.
 struct BindCtx<'a> {
     transport: &'a Arc<dyn Transport>,
     tasks: &'a TaskTracker,
@@ -278,7 +279,7 @@ impl Client {
                                 continue;
                             };
                             let kind = expose.port.kind();
-                            self.register_bound(service.clone(), service_id, expose.local.clone(), kind, &bind_ctx);
+                            self.register_bound(service.clone(), service_id, expose, &bind_ctx);
                             let port = Port { number: port, kind };
                             emit(events, Event::Bound { service, port });
                         }
@@ -328,15 +329,9 @@ impl Client {
         outcome
     }
 
-    fn register_bound(
-        &self,
-        service: String,
-        service_id: u16,
-        local: String,
-        kind: Kind,
-        ctx: &BindCtx<'_>,
-    ) {
-        if kind == Kind::Udp {
+    fn register_bound(&self, service: String, service_id: u16, expose: &Expose, ctx: &BindCtx<'_>) {
+        let local = expose.local.clone();
+        if expose.port.kind() == Kind::Udp {
             self.udp.insert(udp::UdpLocal::new(
                 service,
                 service_id,
@@ -346,10 +341,14 @@ impl Client {
                 ctx,
             ));
         } else {
-            self.targets
-                .write()
-                .expect("targets lock")
-                .insert(service_id, Target { service, local });
+            self.targets.write().expect("targets lock").insert(
+                service_id,
+                Target {
+                    service,
+                    local,
+                    proxy_protocol: expose.proxy_protocol,
+                },
+            );
         }
     }
 

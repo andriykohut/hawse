@@ -283,9 +283,9 @@ impl Session {
             );
             return failed(BindFailure::NotGranted);
         };
-        // Ignoring this would open a port with weaker guarantees than the client asked for.
-        if proxy_protocol {
-            tracing::warn!(service, "proxy protocol is not supported yet");
+        // The client never learns a UDP visitor's address, so it could not write the header.
+        if proxy_protocol && kind == Kind::Udp {
+            tracing::warn!(service, "proxy protocol is not supported on udp yet");
             return failed(BindFailure::Unsupported);
         }
         let live = self.services.values().map(|bound| bound.id).collect();

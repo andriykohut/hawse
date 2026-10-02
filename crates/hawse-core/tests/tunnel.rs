@@ -581,14 +581,14 @@ async fn a_client_cancelled_mid_dial_announces_no_retry() {
 }
 
 #[tokio::test]
-async fn binds_with_phase_two_features_are_refused() {
+async fn a_udp_bind_with_proxy_protocol_is_refused() {
     let (server_id, client_id) = ids();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[])]),
         &server_id,
     );
     let echo = echo_server().await.to_string();
-    let mut cfg = client_config(server.addr, server.key, &[("proxied", &echo, "any")]);
+    let mut cfg = client_config(server.addr, server.key, &[("proxied", &echo, "any/udp")]);
     cfg.expose.get_mut("proxied").unwrap().proxy_protocol = true;
     let mut client = start_client(cfg, client_id);
 

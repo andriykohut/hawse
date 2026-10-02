@@ -54,8 +54,8 @@ Working today, with TCP and UDP forwarding and key-based authorization:
 
 Waiting on features that are not implemented yet:
 
-- **Services that log or rate-limit by client address** need PROXY protocol v2
-  to see the real visitor address rather than the client's own connection.
+- **UDP services that log or rate-limit by client address** need PROXY
+  protocol v2, which so far reaches TCP services only.
 - **Many HTTPS services on one port 443** need SNI routing.
 
 ## Status
@@ -275,8 +275,14 @@ shares nothing with the server's fails to bind as not granted. Without either
 list a service admits everyone.
 
 A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
-above, sees every visitor arrive from the proxy, so its allow list judges the
-proxy's address rather than the visitor's.
+above, sees every visitor arrive from the proxy, so its allow list and its PROXY
+header describe the proxy, not the visitor.
+
+`proxy_protocol = true` on a TCP service sends a PROXY protocol v2 header ahead
+of each visitor's bytes, naming the visitor's address and the public address it
+reached, so a service that logs or limits by address sees the visitor instead of
+the client. The service has to expect the header, or it reads it as the start
+of the request. UDP services cannot use it yet.
 
 `limits.streams_per_client` caps how many streams one client's connection may
 carry, one per visitor connection, and defaults to 4096. On the TCP fallback,
