@@ -33,14 +33,6 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **Streams past the control stream are never accepted on a session.** The
-  server calls `accept_bi` once, for the control stream, and never again. On
-  QUIC the extras sit in quinn's accept queue against the client's stream
-  credit; on TCP they accumulate in `TcpTransport`'s unbounded inbound channel
-  and hold slots in yamux's stream budget, which counts both directions in one
-  number and kills the connection rather than backpressuring when it is full.
-  Harmless against our own client, which never opens one, but it is an
-  authenticated client's way to end its own session.
 - **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
   resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
   a QUIC visitor's read fails with that code. On yamux neither half carries one,

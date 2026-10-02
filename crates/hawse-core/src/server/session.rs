@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage};
+use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, reset};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
@@ -142,6 +142,27 @@ fn retire(shared: &Shared, key: PublicKey, live: &Arc<Live>) {
     }
 }
 
+/// Our client opens no stream after the control stream. One that arrives anyway is refused at once,
+/// so it neither waits unread nor holds a slot in the stream budget.
+async fn refuse_streams(transport: Arc<dyn Transport>, cancel: CancellationToken) {
+    let mut logged = false;
+    loop {
+        let (mut send, mut recv) = tokio::select! {
+            () = cancel.cancelled() => return,
+            accepted = transport.accept_bi() => match accepted {
+                Ok(halves) => halves,
+                Err(_) => return,
+            },
+        };
+        if !logged {
+            tracing::debug!("refusing a stream the client opened");
+            logged = true;
+        }
+        send.reset(reset::UNEXPECTED_STREAM);
+        recv.stop(reset::UNEXPECTED_STREAM);
+    }
+}
+
 struct Session {
     transport: Arc<dyn Transport>,
     shared: Arc<Shared>,
@@ -186,11 +207,15 @@ impl ServiceIds {
 
 impl Session {
     async fn serve(mut self, mut control: Control, server_cancel: CancellationToken) {
-        let demux = CancellationToken::new();
+        let background = CancellationToken::new();
         self.tasks.spawn(udp::demux(
             Arc::clone(&self.transport),
             Arc::clone(&self.udp),
-            demux.clone(),
+            background.clone(),
+        ));
+        self.tasks.spawn(refuse_streams(
+            Arc::clone(&self.transport),
+            background.clone(),
         ));
 
         let mut ping = tokio::time::interval(PING_EVERY);
@@ -250,7 +275,7 @@ impl Session {
         for name in names {
             self.unbind(&name);
         }
-        demux.cancel();
+        background.cancel();
         control.finish().await;
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
