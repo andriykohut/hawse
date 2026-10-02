@@ -33,12 +33,6 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **The TCP accept path is unauthenticated.** A semaphore now caps concurrent
-  in-flight TLS handshakes at 256, so exhaustion queues in the kernel backlog
-  instead of reaching EMFILE, but nothing yet rate-limits a peer that keeps
-  completing handshakes: `limits.auth_failures_per_minute` does not take effect,
-  and QUIC's listen side has `quic_retry` available for the same job and does
-  not use it either.
 - **No way to decline the TCP listener entirely.** The bind is mandatory and
   fatal, so a deployment that will only ever use QUIC still publishes an
   unauthenticated TCP accept path. A `transport.tcp_fallback = false` switch is
@@ -201,9 +195,7 @@ phase 1. Each says what the code does today and what the fix would be.
   each.
 - Nothing checks that `listen` falls outside `dynamic_ports`, or that a fixed
   grant does not name the listen port; both would fail later at bind time.
-- `quic_retry` and `auth_failures_per_minute` parse but do not take effect yet,
-  and nothing warns that they are ignored.
-  `transport.stream_window` and `transport.congestion` join them under
+- `transport.stream_window` and `transport.congestion` do nothing under
   `prefer = "tcp"`, where yamux guarantees every stream 256 KiB and grows it
   only into the connection window's slack, leaving no per-stream knob, and the
   kernel owns congestion control: both are validated and then silently inert.
@@ -225,8 +217,6 @@ phase 1. Each says what the code does today and what the fix would be.
   existing visitors outlive the service.
 - The 100 ms backoff after an accept error is not cancel-aware and delays
   shutdown by up to that long.
-- The unknown-key log line is unbounded until the phase 2 rate limiter lands,
-  so a stranger can fill the log.
 - The 45 s liveness deadline is only checked on the 15 s tick, so detection
   lands between 45 and 60 s.
 - Two early exits close the connection without an explicit code, so the client

@@ -34,6 +34,7 @@ const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: CancellationToken) {
     let remote = transport.remote_address();
     let Some(key) = transport.peer_key() else {
+        shared.auth_failed(remote.ip());
         transport.close(CloseReason::NoKey);
         return;
     };
@@ -52,18 +53,22 @@ pub async fn run(transport: Arc<dyn Transport>, shared: Arc<Shared>, cancel: Can
         greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
     };
     let Ok(opened) = greeted else {
+        shared.auth_failed(remote.ip());
         transport.close(CloseReason::NoHello);
         return;
     };
     let Ok((mut control, hello)) = opened else {
+        shared.auth_failed(remote.ip());
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
+        shared.auth_failed(remote.ip());
         transport.close(CloseReason::BadHello);
         return;
     };
 
     let Some(grant) = shared.policy.lookup(&key).cloned() else {
+        shared.auth_failed(remote.ip());
         tracing::info!(%key, %remote, "denied unknown key. authorize it with: hawse authorize {key} --name NAME");
         let _ = control
             .send(&ServerMessage::Denied {

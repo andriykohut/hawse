@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod limiter;
 mod listener;
 pub mod policy;
@@ -7,9 +6,9 @@ mod session;
 mod udp;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
 use quinn::{Endpoint, VarInt};
@@ -24,6 +23,7 @@ use crate::identity::{Identity, IdentityError};
 use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
 use crate::transport::{CloseReason, tcp};
 use crate::{net, tls};
+use limiter::Limiter;
 use policy::Policy;
 use ports::PortAllocator;
 
@@ -61,6 +61,25 @@ pub struct Shared {
     /// One live session per client key, so a reconnecting client is not locked out of its own
     /// ports by the session its previous connection left behind.
     pub sessions: Mutex<HashMap<PublicKey, Arc<Live>>>,
+    /// Failed authentications per address, checked before any handshake work.
+    pub(crate) limiter: Mutex<Limiter>,
+}
+
+impl Shared {
+    fn permits(&self, ip: IpAddr) -> bool {
+        self.limiter
+            .lock()
+            .expect("limiter lock")
+            .permits(ip, Instant::now())
+    }
+
+    /// Only for a failure whose source address is proven: a forged one would limit its victim.
+    fn auth_failed(&self, ip: IpAddr) {
+        self.limiter
+            .lock()
+            .expect("limiter lock")
+            .failed(ip, Instant::now());
+    }
 }
 
 #[cfg(test)]
@@ -75,6 +94,7 @@ impl Shared {
             buffer: 16 << 10,
             udp_sessions: 16,
             sessions: Mutex::new(HashMap::new()),
+            limiter: Mutex::new(Limiter::new(0)),
         }
     }
 }
@@ -108,6 +128,7 @@ pub struct Server {
     tcp: TcpListener,
     tls: Arc<rustls::ServerConfig>,
     tuning: Tuning,
+    quic_retry: bool,
     shared: Arc<Shared>,
 }
 
@@ -147,12 +168,14 @@ impl Server {
             udp_sessions: usize::try_from(cfg.limits.udp_sessions_per_service)
                 .expect("a u32 fits usize on every target hawse builds for"),
             sessions: Mutex::new(HashMap::new()),
+            limiter: Mutex::new(Limiter::new(cfg.limits.auth_failures_per_minute)),
         });
         Ok(Self {
             endpoint,
             tcp,
             tls,
             tuning,
+            quic_retry: cfg.quic_retry,
             shared,
         })
     }
@@ -180,12 +203,32 @@ impl Server {
                 () = cancel.cancelled() => break,
                 incoming = self.endpoint.accept() => {
                     let Some(incoming) = incoming else { break };
+                    let remote = incoming.remote_address();
+                    if !self.shared.permits(remote.ip()) {
+                        incoming.refuse();
+                        continue;
+                    }
+                    let validated = incoming.remote_address_validated();
+                    if self.quic_retry && !validated {
+                        // Refused only when this Initial already carried a retry token.
+                        if let Err(err) = incoming.retry() {
+                            err.into_incoming().ignore();
+                        }
+                        continue;
+                    }
                     let shared = Arc::clone(&self.shared);
                     let cancel = cancel.child_token();
                     sessions.spawn(async move {
                         match incoming.await {
                             Ok(conn) => session::run(Arc::new(QuicTransport(conn)), shared, cancel).await,
-                            Err(err) => tracing::debug!(err = %chain(&err), "handshake failed"),
+                            Err(err) => {
+                                // An unvalidated source can be forged, and counting it would let a
+                                // stranger limit the address it names.
+                                if validated {
+                                    shared.auth_failed(remote.ip());
+                                }
+                                tracing::debug!(err = %chain(&err), "handshake failed");
+                            }
                         }
                     });
                 }
@@ -203,10 +246,10 @@ impl Server {
                     let permit = handshakes.acquire_owned().await.expect("never closed");
                     (permit, tcp.accept().await)
                 } => {
-                    let socket = match accepted {
-                        Ok((socket, _)) => {
+                    let (socket, remote) = match accepted {
+                        Ok((socket, remote)) => {
                             resume_tcp = None;
-                            socket
+                            (socket, remote)
                         }
                         Err(err) if out_of_descriptors(&err) => {
                             tracing::warn!(err = %chain(&err), "tcp accept failed");
@@ -220,6 +263,11 @@ impl Server {
                             continue;
                         }
                     };
+                    // Dropped here, with its permit and before TLS: a limited address costs one
+                    // accept.
+                    if !self.shared.permits(remote.ip()) {
+                        continue;
+                    }
                     let shared = Arc::clone(&self.shared);
                     let cancel = cancel.child_token();
                     let tls = Arc::clone(&self.tls);
@@ -231,7 +279,11 @@ impl Server {
                         drop(permit);
                         match accepted {
                             Ok(transport) => session::run(Arc::new(transport), shared, cancel).await,
-                            Err(err) => tracing::debug!(err = %chain(&err), "tcp handshake failed"),
+                            Err(err) => {
+                                // The TCP handshake has already proved this address.
+                                shared.auth_failed(remote.ip());
+                                tracing::debug!(err = %chain(&err), "tcp handshake failed");
+                            }
                         }
                     });
                 }
