@@ -302,12 +302,14 @@ next packet starts a new session, which the local service sees arrive from a
 new port.
 
 `limits.auth_failures_per_minute`, 30 by default, limits how often one address
-may fail to authenticate: a key the server does not know, a connection that
-never sends its greeting, or a TCP handshake that fails. An IPv6 address counts
-together with the rest of its /64. Past the limit the server refuses that
-address's connections before the TLS or QUIC handshake, and lets one more try
-through every two seconds at the default. Clients sharing an address, behind
-carrier-grade NAT for instance, share its limit. `0` turns the limit off.
+may fail to authenticate: a key the server does not know, even one whose
+connection never sends its greeting, or a TCP handshake that fails. An IPv6
+address counts together with the rest of its /64. Past the limit the server
+refuses that address's connections before the TLS or QUIC handshake, and lets
+one more try through every two seconds at the default. Clients sharing an
+address, behind carrier-grade NAT for instance, share its limit. The server
+tracks at most 16384 addresses; while that many are failing at once, new ones go
+unlimited, and the log says so. `0` turns the limit off.
 
 `quic_retry = true` makes a QUIC client prove its address with one extra round
 trip before the server spends anything on a handshake. It also lets a failed
