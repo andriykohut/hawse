@@ -109,10 +109,10 @@ type OpenRequest = oneshot::Sender<Result<yamux::Stream, TransportError>>;
 /// under it, and is far slower: `Tuning::idle_timeout` of quiet plus a probe schedule that on
 /// stock Linux and macOS runs another nine or ten minutes.
 ///
-/// Nothing drains `accept_bi` after the server has taken the control stream, so every further
-/// stream an authenticated client opens sits unread in an unbounded channel while still counting
-/// against yamux's stream budget — which, unlike QUIC's, counts both directions in one number and
-/// tears the connection down rather than backpressuring when it is reached.
+/// The server session refuses any stream past the control stream, but a caller that does not drain
+/// `accept_bi` leaves every further stream the peer opens unread in an unbounded channel while
+/// still counting against yamux's stream budget — which, unlike QUIC's, counts both directions in
+/// one number and tears the connection down rather than backpressuring when it is reached.
 #[derive(Debug)]
 pub struct TcpTransport {
     open: mpsc::Sender<OpenRequest>,
