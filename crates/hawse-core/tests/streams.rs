@@ -108,6 +108,8 @@ async fn a_server_shutting_down_is_not_held_by_the_stream_refuser() {
 
     server.cancel.cancel();
     // The session's own drain is 4 s; a refuser that ignored the shutdown would hold it that long.
+    // The bound tells the two apart because a stalled refuser costs that whole drain plus the 2 s
+    // shutdown linger, while a cancelled one costs only the linger.
     tokio::time::timeout(Duration::from_secs(4), server.task)
         .await
         .expect("the server stops within 4 s")

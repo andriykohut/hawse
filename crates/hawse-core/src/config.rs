@@ -506,6 +506,13 @@ prefer = "tcp"
     }
 
     #[test]
+    fn the_tcp_fallback_is_on_unless_turned_off() {
+        assert!(ServerConfig::default().transport.tcp_fallback);
+        let cfg: ServerConfig = toml::from_str("[transport]\ntcp_fallback = false").unwrap();
+        assert!(!cfg.transport.tcp_fallback);
+    }
+
+    #[test]
     fn unknown_fields_are_rejected() {
         assert!(toml::from_str::<ServerConfig>("listne = \"[::]:1\"").is_err());
         assert!(toml::from_str::<ClientConfig>("server = \"x\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nbogus = 1").is_err());

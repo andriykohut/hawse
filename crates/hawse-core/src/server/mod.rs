@@ -116,7 +116,7 @@ pub enum ServerError {
     #[error(transparent)]
     Quic(#[from] QuicError),
     #[error(
-        "cannot bind TCP {0}: the listen port now carries the TCP fallback transport as well as QUIC, so it must be free on TCP too"
+        "cannot bind TCP {0}: the listen port now carries the TCP fallback transport as well as QUIC, so it must be free on TCP too, or the fallback turned off with transport.tcp_fallback = false"
     )]
     Listen(SocketAddr, #[source] std::io::Error),
     #[error("stream window {0} bytes does not fit a QUIC window")]
