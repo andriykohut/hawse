@@ -483,7 +483,7 @@ prefer = "tcp"
         assert_eq!(cfg.transport.congestion, Congestion::Bbr);
         assert_eq!(cfg.clients.len(), 2);
         assert_eq!(cfg.clients["homelab"].ports.len(), 4);
-        assert!(cfg.clients["laptop"].ports.is_empty());
+        assert_eq!(cfg.clients["laptop"].ports, Vec::<PortRange>::new());
         cfg.validate().unwrap();
     }
 
@@ -585,7 +585,7 @@ prefer = "tcp"
             cfg.clients["laptop"].allow,
             vec!["203.0.113.0/24".parse::<IpNet>().unwrap()]
         );
-        assert!(cfg.clients["homelab"].allow.is_empty());
+        assert_eq!(cfg.clients["homelab"].allow, Vec::<IpNet>::new());
     }
 
     #[test]
