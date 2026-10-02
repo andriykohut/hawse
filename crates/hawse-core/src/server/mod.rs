@@ -125,7 +125,7 @@ pub enum ServerError {
 
 pub struct Server {
     endpoint: Endpoint,
-    tcp: TcpListener,
+    tcp: Option<TcpListener>,
     tls: Arc<rustls::ServerConfig>,
     tuning: Tuning,
     quic_retry: bool,
@@ -156,8 +156,14 @@ impl Server {
         let bound = endpoint
             .local_addr()
             .expect("a bound endpoint has an address");
-        let tcp = net::bind_tcp(bound.ip(), bound.port())
-            .map_err(|err| ServerError::Listen(bound, err))?;
+        let tcp = if cfg.transport.tcp_fallback {
+            Some(
+                net::bind_tcp(bound.ip(), bound.port())
+                    .map_err(|err| ServerError::Listen(bound, err))?,
+            )
+        } else {
+            None
+        };
         let tls = Arc::new(tls::server_config(cert, key, tls::provider())?);
         let mut ports = PortAllocator::new(cfg.dynamic_ports);
         ports.reserve(bound.port());
@@ -192,7 +198,7 @@ impl Server {
     /// waiting up to 5 s for sessions to drain first.
     pub async fn serve(self, cancel: CancellationToken) {
         let sessions = TaskTracker::new();
-        let tcp = &self.tcp;
+        let tcp = self.tcp.as_ref();
         let handshakes = Arc::new(Semaphore::new(TCP_HANDSHAKES));
         // An instant, not a duration: the arm holding it is rebuilt every time another arm wins,
         // and a relative sleep would restart from zero each time and never elapse.
@@ -240,6 +246,10 @@ impl Server {
                 // after it: a socket this process has not accepted waits in the kernel's backlog,
                 // where it holds no descriptor of ours.
                 (permit, accepted) = async move {
+                    let Some(tcp) = tcp else {
+                        // Without the fallback this arm never fires.
+                        return std::future::pending().await;
+                    };
                     if let Some(at) = resume_tcp {
                         tokio::time::sleep_until(at).await;
                     }

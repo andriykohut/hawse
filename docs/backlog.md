@@ -33,11 +33,6 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **No way to decline the TCP listener entirely.** The bind is mandatory and
-  fatal, so a deployment that will only ever use QUIC still publishes an
-  unauthenticated TCP accept path. A `transport.tcp_fallback = false` switch is
-  the right shape for it; it was left out as new config surface belonging to a
-  later phase.
 - **Streams past the control stream are never accepted on a session.** The
   server calls `accept_bi` once, for the control stream, and never again. On
   QUIC the extras sit in quinn's accept queue against the client's stream

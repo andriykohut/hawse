@@ -98,6 +98,8 @@ pub struct ServerTransport {
     pub connection_window: ByteSize,
     pub congestion: Congestion,
     pub buffer: ByteSize,
+    /// Off for a server whose clients all use QUIC: the listen port is then bound on UDP only.
+    pub tcp_fallback: bool,
 }
 
 impl Default for ServerTransport {
@@ -108,6 +110,7 @@ impl Default for ServerTransport {
             connection_window: ByteSize(64 << 20),
             congestion: Congestion::Cubic,
             buffer: ByteSize(16 << 10),
+            tcp_fallback: true,
         }
     }
 }

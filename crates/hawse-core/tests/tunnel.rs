@@ -115,6 +115,35 @@ async fn echoes_through_the_tunnel_over_tcp() {
     echo_through_the_tunnel(Prefer::Tcp, TransportKind::Tcp).await;
 }
 
+#[tokio::test]
+async fn a_server_without_the_fallback_accepts_no_tcp_client() {
+    let (server_id, client_id) = ids();
+    let mut cfg = server_config(&[("test", client_id.public_key(), &[])]);
+    cfg.transport.tcp_fallback = false;
+    let server = start_server(&cfg, &server_id);
+
+    let over_tcp = start_client(
+        client_config_over(server.addr, server.key, &[], Prefer::Tcp),
+        Identity::from_pem(&client_id.to_pem()).unwrap(),
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), over_tcp.task)
+        .await
+        .expect("the TCP dial ends within 5 s")
+        .unwrap();
+    assert!(
+        matches!(result, Err(ClientError::Transport(_))),
+        "{result:?}"
+    );
+
+    let mut over_quic = start_client(client_config(server.addr, server.key, &[]), client_id);
+    assert!(matches!(
+        next_event(&mut over_quic.events).await,
+        Event::Connected { .. }
+    ));
+    over_quic.cancel.cancel();
+    server.cancel.cancel();
+}
+
 async fn half_close_propagates_to_the_local_service(prefer: Prefer) {
     let exchange = async {
         let (server_id, client_id) = ids();

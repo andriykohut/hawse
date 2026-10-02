@@ -219,9 +219,11 @@ dynamic_ports = "40000-41000"
 The server answers on the listen port twice: UDP for QUIC, and TCP for the
 fallback transport. Both have to be free at startup and reachable through the
 firewall — the server refuses to start if it cannot bind the TCP side, rather
-than come up with the fallback silently missing. Public ports bound for clients
-are TCP or UDP, as each service asks. `hawse server --listen ADDR` overrides
-`listen` for that run.
+than come up with the fallback silently missing. Set
+`transport.tcp_fallback = false` on a server whose clients all use QUIC: it
+then binds the port on UDP only, and a client set to `prefer = "tcp"` cannot
+connect. Public ports bound for clients are TCP or UDP, as each service asks.
+`hawse server --listen ADDR` overrides `listen` for that run.
 
 `congestion` selects the controller, on either end, for the data that end
 sends. The server defaults to `cubic`, the client to `bbr`:
