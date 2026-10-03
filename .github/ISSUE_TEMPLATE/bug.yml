@@ -5,13 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        A tunnel has two ends, and most problems need both to explain, so this
-        form asks for the version, the config and the log of the server and of
-        the client.
+        A tunnel has two ends, and most problems need both to explain, so this form asks for the version, the config and the log of the server and of the client.
 
-        Do not report a vulnerability here. Use
-        [Report a vulnerability](https://github.com/andriykohut/hawse/security/advisories/new),
-        which only the maintainer can read.
+        Do not report a vulnerability here. Use [Report a vulnerability](https://github.com/andriykohut/hawse/security/advisories/new), which only the maintainer can read.
 
   - type: input
     id: server-version
@@ -148,15 +144,9 @@ body:
       value: |
         ### Config and logs
 
-        Public keys (`ed25519:...`) are safe to post. The contents of a `.key`
-        file never are, and nothing here asks for them.
+        Public keys (`ed25519:...`) are safe to post. The contents of a `.key` file never are, and nothing here asks for them.
 
-        The configs name the server, the `local` address of every service and
-        the networks on its `allow` list. Logs name the server's address and,
-        at `-v`, the address of every visitor. Replace what you would rather
-        not publish, using the same placeholder for the same address every
-        time, so the configs and the two logs can still be read against each
-        other.
+        The configs name the server, the `local` address of every service and the networks on its `allow` list. Logs name the server's address and, at `-v`, the address of every visitor. Replace what you would rather not publish, using the same placeholder for the same address every time, so the configs and the two logs can still be read against each other.
 
   - type: textarea
     id: server-config
