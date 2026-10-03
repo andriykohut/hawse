@@ -42,8 +42,7 @@ impl Drop for ResetOnDrop {
 }
 
 /// Ends when both directions have delivered EOF. An abort on either side resets the send stream:
-/// a QUIC peer's read then fails, while a yamux peer reads end-of-stream and cannot tell the
-/// truncated payload from a complete one.
+/// the peer's read then fails, on either transport.
 pub async fn pump<S>(
     socket: S,
     send: SendHalf,

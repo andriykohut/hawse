@@ -109,8 +109,8 @@ pub struct DatagramHeader {
     pub session: u32,
 }
 
-/// Error codes for `SendHalf::reset`. Only the QUIC transport carries them to the peer; a yamux
-/// peer reads end-of-stream with no code.
+/// Error codes for `SendHalf::reset`. QUIC carries them in its own reset; the TCP transport writes
+/// them into a reset record, see `record`.
 pub mod reset {
     pub const UNKNOWN_SERVICE: u32 = 0x10;
     pub const LOCAL_REFUSED: u32 = 0x11;

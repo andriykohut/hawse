@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tls;
 use crate::transport::quic::Tuning;
+use crate::transport::records::{RecordReader, RecordWriter};
 use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError};
 
 #[derive(Debug, thiserror::Error)]
@@ -215,7 +216,10 @@ impl Transport for TcpTransport {
 
 fn halves(stream: yamux::Stream) -> (SendHalf, RecvHalf) {
     let (recv, send) = tokio::io::split(stream.compat());
-    (SendHalf::Tcp(send), RecvHalf::Tcp(recv))
+    (
+        SendHalf::Tcp(RecordWriter::new(send)),
+        RecvHalf::Tcp(RecordReader::new(recv)),
+    )
 }
 
 enum Step {

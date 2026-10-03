@@ -6,7 +6,7 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -15,6 +15,8 @@ use hawse_proto::msg::close;
 use quinn::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
 use tokio_util::compat::Compat;
+
+use records::{RecordReader, RecordWriter};
 
 /// Why a connection is being closed. The code and the text both travel to a QUIC peer, so they are
 /// part of the protocol; on the TCP transport neither does, and only the local log keeps them.
@@ -94,12 +96,11 @@ pub enum TransportError {
 /// `finish` ends the stream cleanly and the peer sees EOF; `reset` aborts it, so the peer sees a
 /// reset rather than a truncated payload delivered as complete.
 ///
-/// `Tcp` cannot keep that second promise: yamux has no per-stream error code and hands a reset
-/// stream to its reader as end-of-stream, so a peer cannot tell an abort from a clean finish.
+/// yamux cannot say which happened, so `Tcp` writes it into the stream: see `records`.
 #[derive(Debug)]
 pub enum SendHalf {
     Quic(quinn::SendStream),
-    Tcp(WriteHalf<Compat<yamux::Stream>>),
+    Tcp(RecordWriter<WriteHalf<Compat<yamux::Stream>>>),
 }
 
 impl SendHalf {
@@ -107,20 +108,32 @@ impl SendHalf {
     pub async fn write_bytes(&mut self, data: Bytes) -> io::Result<()> {
         match self {
             Self::Quic(send) => send.write_chunk(data).await.map_err(io::Error::from),
-            Self::Tcp(send) => tokio::io::AsyncWriteExt::write_all(send, &data).await,
+            // Flushed: the writer accepts a record before yamux has taken it, and nothing says
+            // when this stream's next write will come.
+            Self::Tcp(send) => {
+                tokio::io::AsyncWriteExt::write_all(send, &data).await?;
+                tokio::io::AsyncWriteExt::flush(send).await
+            }
         }
     }
 
+    /// On `Tcp` the code is best effort, since this runs in `Drop`s and gets one poll. The abort
+    /// is not: a stream that ends without a finish record reads as reset.
     pub fn reset(&mut self, code: u32) {
         match self {
             Self::Quic(send) => {
                 let _: Result<(), quinn::ClosedStream> = send.reset(VarInt::from_u32(code));
             }
-            // Best effort: the one poll is Pending only if yamux's command channel is full, and
-            // the close then still reaches the peer when the stream drops, as a RST not this FIN.
+            Self::Tcp(send) => send.reset(code),
+        }
+    }
+
+    /// `reset`, waiting on `Tcp` until the code has left. A stalled link holds it, so bound it.
+    pub async fn reset_flushed(&mut self, code: u32) {
+        match self {
+            Self::Quic(_) => self.reset(code),
             Self::Tcp(send) => {
-                let mut cx = Context::from_waker(Waker::noop());
-                let _: Poll<io::Result<()>> = AsyncWrite::poll_shutdown(Pin::new(send), &mut cx);
+                let _: io::Result<()> = send.reset_flushed(code).await;
             }
         }
     }
@@ -133,7 +146,7 @@ impl SendHalf {
 #[derive(Debug)]
 pub enum RecvHalf {
     Quic(quinn::RecvStream),
-    Tcp(ReadHalf<Compat<yamux::Stream>>),
+    Tcp(RecordReader<ReadHalf<Compat<yamux::Stream>>>),
 }
 
 impl RecvHalf {

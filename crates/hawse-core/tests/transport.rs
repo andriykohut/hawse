@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt;
-use hawse_core::transport::{CloseReason, RecvHalf, SendHalf, TransportError};
+use hawse_core::transport::records::{RecordReader, RecordWriter};
+use hawse_core::transport::{CloseReason, RecvHalf, SendHalf, TransportError, reset_code};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -75,6 +76,7 @@ async fn resetting_a_send_half_fails_the_peers_read_and_carries_the_code() {
         Some(&quinn::ReadError::Reset(quinn::VarInt::from_u32(CODE))),
         "{err:?}"
     );
+    assert_eq!(reset_code(&err), Some(CODE));
 }
 
 #[tokio::test]
@@ -139,6 +141,46 @@ async fn tcp_transport_opens_a_bidirectional_stream() {
         .expect("the peer never saw end-of-stream")
         .unwrap();
     assert_eq!(got, b"hi");
+}
+
+#[tokio::test]
+async fn a_flushed_reset_carries_its_code_over_tcp() {
+    const CODE: u32 = 0x42;
+
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
+
+    let (mut cs, _cr) = client.open_bi().await.unwrap();
+    cs.write_bytes(Bytes::from_static(b"hi")).await.unwrap();
+    let (_ss, mut sr) = server.accept_bi().await.unwrap();
+    cs.reset_flushed(CODE).await;
+
+    let mut got = Vec::new();
+    let err = timeout(Duration::from_secs(5), sr.read_to_end(&mut got))
+        .await
+        .expect("the peer never saw the reset")
+        .expect_err("a reset stream must fail the read, not end it cleanly");
+    assert_eq!(reset_code(&err), Some(CODE), "{err:?}");
+    assert_eq!(got, b"hi");
+}
+
+#[tokio::test]
+async fn dropping_a_tcp_stream_unfinished_fails_the_peers_read() {
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
+
+    let (mut cs, cr) = client.open_bi().await.unwrap();
+    cs.write_bytes(Bytes::from_static(b"hi")).await.unwrap();
+    let (_ss, mut sr) = server.accept_bi().await.unwrap();
+    drop((cs, cr));
+
+    let mut got = Vec::new();
+    let err = timeout(Duration::from_secs(5), sr.read_to_end(&mut got))
+        .await
+        .expect("the peer never saw the stream end")
+        .expect_err("a stream dropped unfinished must not read as a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    assert_eq!(reset_code(&err), None);
 }
 
 #[tokio::test]
@@ -352,7 +394,10 @@ async fn yamux_pair() -> (yamux::Stream, mpsc::Receiver<yamux::Stream>) {
 
 fn halves(stream: yamux::Stream) -> (SendHalf, RecvHalf) {
     let (recv, send) = tokio::io::split(stream.compat());
-    (SendHalf::Tcp(send), RecvHalf::Tcp(recv))
+    (
+        SendHalf::Tcp(RecordWriter::new(send)),
+        RecvHalf::Tcp(RecordReader::new(recv)),
+    )
 }
 
 #[tokio::test]
@@ -389,7 +434,7 @@ async fn a_yamux_pair_round_trips_through_the_halves() {
 }
 
 #[tokio::test]
-async fn resetting_a_yamux_send_half_leaves_the_peer_reading_a_clean_eof() {
+async fn resetting_a_yamux_send_half_fails_the_peers_read() {
     let (client, mut inbound) = yamux_pair().await;
     let (mut cs, _cr) = halves(client);
 
@@ -402,9 +447,10 @@ async fn resetting_a_yamux_send_half_leaves_the_peer_reading_a_clean_eof() {
     cs.reset(0x42);
 
     let mut got = Vec::new();
-    timeout(Duration::from_secs(5), sr.read_to_end(&mut got))
+    let err = timeout(Duration::from_secs(5), sr.read_to_end(&mut got))
         .await
         .expect("the peer never saw the stream end")
-        .expect("yamux surfaces a reset as end-of-stream, so the read cannot fail");
+        .expect_err("a reset stream must fail the read, not end it cleanly");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
     assert_eq!(got, b"hi");
 }
