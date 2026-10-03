@@ -397,6 +397,7 @@ impl Session {
             service: service.to_owned(),
             service_id: id,
             port: port.number,
+            address: self.grant.bind,
         }
     }
 

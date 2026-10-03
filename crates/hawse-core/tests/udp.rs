@@ -1,5 +1,6 @@
 mod common;
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{
@@ -344,6 +345,7 @@ mod rogue {
             service: "svc".into(),
             service_id: 7,
             port: 40000,
+            address: Ipv4Addr::LOCALHOST.into(),
         };
         session.control.send(encode(&bound).unwrap()).await.unwrap();
 

@@ -1,5 +1,6 @@
 mod common;
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use common::{
@@ -199,5 +200,19 @@ async fn a_udp_bind_with_proxy_protocol_is_still_refused() {
             reason: BindFailure::Unsupported,
         }
     );
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_bind_reports_the_address_it_listens_on() {
+    let (server_id, client_id) = ids();
+    let mut cfg = server_config(&[("test", client_id.public_key(), &[])]);
+    cfg.bind = Ipv4Addr::LOCALHOST.into();
+    let server = start_server(&cfg, &server_id);
+    let mut client = raw_client(&server, &client_id).await;
+    let ServerMessage::Bound { address, .. } = client.bind_udp("dns", None).await else {
+        panic!("expected Bound");
+    };
+    assert_eq!(address, IpAddr::from(Ipv4Addr::LOCALHOST));
     server.cancel.cancel();
 }

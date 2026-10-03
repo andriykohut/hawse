@@ -278,7 +278,7 @@ impl Client {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = Instant::now();
                     match msg {
-                        ServerMessage::Bound { service, service_id, port } => {
+                        ServerMessage::Bound { service, service_id, port, .. } => {
                             let Some(expose) = self.cfg.expose.get(&service) else {
                                 tracing::warn!(service, "server bound a service we never asked for");
                                 continue;

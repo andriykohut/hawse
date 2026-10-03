@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,8 @@ pub enum ServerMessage {
         service: String,
         service_id: u16,
         port: u16,
+        /// The address the public socket is bound to; unspecified for a wildcard bind.
+        address: IpAddr,
     },
     BindFailed {
         service: String,
@@ -196,13 +198,23 @@ mod tests {
                 reason: DenyReason::UnknownKey,
                 key: PublicKey::from_bytes(k)
             }),
-            ("[a-z0-9-]{1,32}", any::<u16>(), 1u16..).prop_map(|(service, service_id, port)| {
-                ServerMessage::Bound {
-                    service,
-                    service_id,
-                    port,
-                }
-            }),
+            (
+                "[a-z0-9-]{1,32}",
+                any::<u16>(),
+                1u16..,
+                prop_oneof![
+                    any::<[u8; 4]>().prop_map(IpAddr::from),
+                    any::<[u8; 16]>().prop_map(IpAddr::from),
+                ]
+            )
+                .prop_map(|(service, service_id, port, address)| {
+                    ServerMessage::Bound {
+                        service,
+                        service_id,
+                        port,
+                        address,
+                    }
+                }),
             (
                 "[a-z0-9-]{1,32}",
                 prop_oneof![

@@ -6,22 +6,34 @@ const SIGNATURE: [u8; 12] = [
 const VERSION_2_PROXY: u8 = 0x21;
 const TCP_OVER_IPV4: u8 = 0x11;
 const TCP_OVER_IPV6: u8 = 0x21;
+const UDP_OVER_IPV4: u8 = 0x12;
+const UDP_OVER_IPV6: u8 = 0x22;
 
 /// A PROXY protocol v2 header for a TCP connection from `src` to `dst`, with no TLVs.
 pub fn v2_tcp(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+    v2(src, dst, TCP_OVER_IPV4, TCP_OVER_IPV6)
+}
+
+/// The same for a UDP datagram. It goes in front of every datagram: the receivers that take the
+/// header over UDP read it on each.
+pub fn v2_udp(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {
+    v2(src, dst, UDP_OVER_IPV4, UDP_OVER_IPV6)
+}
+
+fn v2(src: SocketAddr, dst: SocketAddr, over_ipv4: u8, over_ipv6: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(SIGNATURE.len() + 4 + 36);
     out.extend_from_slice(&SIGNATURE);
     out.push(VERSION_2_PROXY);
     match (src.ip().to_canonical(), dst.ip().to_canonical()) {
         (IpAddr::V4(from), IpAddr::V4(to)) => {
-            out.push(TCP_OVER_IPV4);
+            out.push(over_ipv4);
             out.extend_from_slice(&12u16.to_be_bytes());
             out.extend_from_slice(&from.octets());
             out.extend_from_slice(&to.octets());
         }
-        // One socket cannot produce a mixed pair, but the header stays valid if one appears.
+        // A mixed pair takes the IPv6 form, the IPv4 address mapped.
         (from, to) => {
-            out.push(TCP_OVER_IPV6);
+            out.push(over_ipv6);
             out.extend_from_slice(&36u16.to_be_bytes());
             out.extend_from_slice(&ipv6(from).octets());
             out.extend_from_slice(&ipv6(to).octets());
@@ -105,5 +117,26 @@ mod tests {
         ]);
         rest.extend_from_slice(&[0xDC, 0x04, 0x01, 0xBB]);
         assert_eq!(bytes, header(&rest));
+    }
+
+    #[test]
+    fn a_udp_header_differs_from_tcps_only_in_its_transport_byte() {
+        let (src, dst) = (
+            "192.0.2.1:56324".parse().unwrap(),
+            "198.51.100.7:443".parse().unwrap(),
+        );
+        let mut expected = header(&IPV4_PAIR);
+        expected[13] = 0x12;
+        assert_eq!(v2_udp(src, dst), expected);
+        assert_eq!(v2_udp(src, dst).len(), 28);
+
+        let (src, dst) = (
+            "[2001:db8::1]:40000".parse().unwrap(),
+            "[2001:db8::2]:8443".parse().unwrap(),
+        );
+        let mut expected = v2_tcp(src, dst);
+        expected[13] = 0x22;
+        assert_eq!(v2_udp(src, dst), expected);
+        assert_eq!(v2_udp(src, dst).len(), 52);
     }
 }

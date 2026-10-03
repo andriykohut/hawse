@@ -469,6 +469,7 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
             service: "svc".into(),
             service_id: 7,
             port: 40000,
+            address: Ipv4Addr::LOCALHOST.into(),
         })
         .unwrap(),
     )
@@ -900,6 +901,7 @@ async fn a_refusal_carries_its_code_over_tcp() {
             service: "svc".into(),
             service_id: 7,
             port: 40000,
+            address: Ipv4Addr::LOCALHOST.into(),
         })
         .await
         .unwrap();
