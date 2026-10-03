@@ -51,6 +51,9 @@ fn bound(flavor: Flavor, bind: IpAddr, port: u16) -> io::Result<Socket> {
 fn every_interface(flavor: Flavor, port: u16) -> io::Result<Socket> {
     match dual_stack(flavor, port) {
         Ok(socket) => Ok(socket),
+        // A port something already holds must fail the bind: IPv4 alone would answer only part of
+        // the visitors while the port is reported as bound.
+        Err(v6) if v6.kind() == io::ErrorKind::AddrInUse => Err(v6),
         // A host can hand out an IPv6 socket and still refuse `::`, so the
         // fallback keys off the whole attempt rather than the constructor.
         Err(v6) => ipv4_only(flavor, port).map_err(|_| v6),
@@ -121,6 +124,15 @@ mod tests {
         let held = bind_udp(Ipv4Addr::LOCALHOST.into(), 0).unwrap();
         let port = held.local_addr().unwrap().port();
         let second = bind_udp(Ipv4Addr::LOCALHOST.into(), port);
+        assert_eq!(second.unwrap_err().kind(), io::ErrorKind::AddrInUse);
+    }
+
+    /// Falling back to IPv4 here would report the port bound while IPv6 visitors go elsewhere.
+    #[tokio::test]
+    async fn a_wildcard_udp_bind_is_refused_when_an_ipv6_address_holds_the_port() {
+        let held = bind_udp(Ipv6Addr::LOCALHOST.into(), 0).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let second = bind_udp(Ipv6Addr::UNSPECIFIED.into(), port);
         assert_eq!(second.unwrap_err().kind(), io::ErrorKind::AddrInUse);
     }
 }
