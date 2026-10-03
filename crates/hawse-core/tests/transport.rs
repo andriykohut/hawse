@@ -164,6 +164,44 @@ async fn a_flushed_reset_carries_its_code_over_tcp() {
     assert_eq!(got, b"hi");
 }
 
+/// What a refusal leans on: a code handed over while the stream cannot take a byte still
+/// arrives once it can. The one-poll `reset` would lose it here.
+#[tokio::test]
+async fn a_flushed_reset_carries_its_code_past_a_full_window() {
+    const CODE: u32 = 0x42;
+
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
+
+    let (mut cs, _cr) = client.open_bi().await.unwrap();
+    cs.write_bytes(Bytes::from_static(b"x")).await.unwrap();
+    let (_ss, mut sr) = server.accept_bi().await.unwrap();
+
+    // Nobody reads yet, so the stream's window fills and a write stops making progress.
+    let chunk = Bytes::from(vec![7u8; 64 * 1024]);
+    while timeout(Duration::from_millis(200), cs.write_bytes(chunk.clone()))
+        .await
+        .is_ok()
+    {}
+
+    let resetting = tokio::spawn(async move {
+        cs.reset_flushed(CODE).await;
+        cs
+    });
+    let mut got = Vec::new();
+    let err = timeout(Duration::from_secs(10), sr.read_to_end(&mut got))
+        .await
+        .expect("the peer never saw the reset")
+        .expect_err("a reset stream must fail the read, not end it cleanly");
+    assert_eq!(reset_code(&err), Some(CODE), "{err:?}");
+    assert!(
+        got.len() > 64 * 1024,
+        "only {} bytes arrived before the reset",
+        got.len()
+    );
+    let _cs = resetting.await.unwrap();
+}
+
 #[tokio::test]
 async fn dropping_a_tcp_stream_unfinished_fails_the_peers_read() {
     let pair = common::tcp_pair().await;
