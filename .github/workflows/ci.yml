@@ -9,7 +9,9 @@ env:
   RUSTFLAGS: -D warnings
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: the 24.04 image runs kernel 6.17, where loopback TCP stalls the tunnel
+    # transfer tests in about one run in a hundred. 6.8 and 7.0 do not.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -22,7 +24,7 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --workspace --no-default-features --features ring
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
