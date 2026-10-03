@@ -27,8 +27,8 @@ body:
     attributes:
       label: Client version
       description: >-
-        The same on the client. A server and a client on different versions do
-        not work together, so check this first.
+        The same on the client. A server and a client on different versions can
+        fail every transfer while both logs look healthy, so check this first.
       placeholder: hawse 0.4.0
     validations:
       required: true
@@ -151,15 +151,18 @@ body:
         Public keys (`ed25519:...`) are safe to post. The contents of a `.key`
         file never are, and nothing here asks for them.
 
-        Logs name the server's address and, at `-v`, the address of every
-        visitor. Replace what you would rather not publish, using the same
-        placeholder for the same address every time, so the two logs can still
-        be read against each other.
+        The configs name the server, the `local` address of every service and
+        the networks on its `allow` list. Logs name the server's address and,
+        at `-v`, the address of every visitor. Replace what you would rather
+        not publish, using the same placeholder for the same address every
+        time, so the configs and the two logs can still be read against each
+        other.
 
   - type: textarea
     id: server-config
     attributes:
       label: server.toml
+      description: Write `none` if the server runs on its defaults, without one.
       render: toml
     validations:
       required: true
@@ -180,8 +183,16 @@ body:
         Run with `-v` and include everything from startup to the problem. Drag a file in if it is long.
 
         - by hand: `hawse -v server 2> server.log`
-        - systemd: add `-v` to `ExecStart` with `systemctl edit hawse-server`, restart, then `journalctl -u hawse-server --since "10 minutes ago"`
         - Docker: add `-v` after `server`, then `docker logs hawse-server`
+        - systemd: `systemctl edit hawse-server`, add the lines below, restart, then `journalctl -u hawse-server --since "10 minutes ago"`
+
+        ```ini
+        [Service]
+        ExecStart=
+        ExecStart=/usr/local/bin/hawse server --config /etc/hawse/server.toml --log pretty -v
+        ```
+
+        The empty `ExecStart=` clears the unit's own command. Without it systemd refuses a unit with two.
     validations:
       required: true
 
