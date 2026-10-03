@@ -8,6 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hawse_proto::msg::{DatagramHeader, reset};
 use hawse_proto::packet;
+use hawse_proto::proxy;
 use tokio::net::UdpSocket;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
@@ -74,6 +75,9 @@ pub struct UdpLocal {
     service: String,
     id: u16,
     local: String,
+    /// The public address visitors reached, when this service asked for PROXY headers: every
+    /// packet then carries its visitor, and every datagram to `local` gets a header in front.
+    proxy: Option<SocketAddr>,
     idle: Duration,
     cap: usize,
     sender: Sender,
@@ -118,6 +122,7 @@ impl UdpLocal {
         local: String,
         idle: Duration,
         cap: usize,
+        proxy: Option<SocketAddr>,
         ctx: &BindCtx<'_>,
     ) -> Arc<Self> {
         let drops = Arc::new(Drops::default());
@@ -126,6 +131,7 @@ impl UdpLocal {
             service,
             id,
             local,
+            proxy,
             idle,
             cap,
             sender,
@@ -142,7 +148,12 @@ impl UdpLocal {
 
     /// A packet from the server, off either path, on its way to `local`.
     pub async fn deliver(self: &Arc<Self>, packet: &[u8]) {
-        let Ok((header, payload)) = packet::decode(packet) else {
+        let decoded = match self.proxy {
+            Some(listener) => packet::decode_from(packet)
+                .map(|(header, visitor, payload)| (header, Some((visitor, listener)), payload)),
+            None => packet::decode(packet).map(|(header, payload)| (header, None, payload)),
+        };
+        let Ok((header, proxied, payload)) = decoded else {
             self.drops.unknown();
             return;
         };
@@ -154,7 +165,16 @@ impl UdpLocal {
             return;
         };
         session.touch();
-        if let Err(err) = session.socket.send(payload).await {
+        let sent = match proxied {
+            // One datagram, header first: the receivers that take PROXY over UDP read it on each.
+            Some((visitor, listener)) => {
+                let mut datagram = proxy::v2_udp(visitor, listener);
+                datagram.extend_from_slice(payload);
+                session.socket.send(&datagram).await
+            }
+            None => session.socket.send(payload).await,
+        };
+        if let Err(err) = sent {
             self.note(&err);
             self.drops.socket();
         }
@@ -452,7 +472,7 @@ mod tests {
             tasks: &tasks,
             udp_cancel: &udp_cancel,
         };
-        let service = UdpLocal::new("svc".to_owned(), ID, local, idle, cap, &ctx);
+        let service = UdpLocal::new("svc".to_owned(), ID, local, idle, cap, None, &ctx);
         let replies = service.queue.lock().unwrap().take().unwrap();
         (service, replies)
     }

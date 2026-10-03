@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::name::{self, NameError};
-use hawse_proto::port::{Kind, PortRange, PortRequest, PortSpan};
+use hawse_proto::port::{PortRange, PortRequest, PortSpan};
 use ipnet::{IpNet, Ipv4Net};
 use serde::Deserialize;
 
@@ -200,8 +200,6 @@ pub enum ConfigError {
         "expose `{0}`: allow entry {1} is an IPv4-mapped network, which never matches; write {2}"
     )]
     ExposeAllow(String, IpNet, IpNet),
-    #[error("expose `{0}`: proxy_protocol is not supported on UDP services yet")]
-    UdpProxy(String),
     #[error("server `{0}` must be host or host:port")]
     ServerAddr(String),
     #[error("name: {0}")]
@@ -345,9 +343,6 @@ impl ClientConfig {
             }
             if let Some((net, ipv4)) = mapped_entry(&expose.allow) {
                 return Err(ConfigError::ExposeAllow(service.clone(), net, ipv4));
-            }
-            if expose.proxy_protocol && expose.port.kind() == Kind::Udp {
-                return Err(ConfigError::UdpProxy(service.clone()));
             }
         }
         Ok(())
@@ -612,13 +607,10 @@ prefer = "tcp"
     }
 
     #[test]
-    fn proxy_protocol_on_a_udp_service_is_rejected() {
+    fn proxy_protocol_on_a_udp_service_is_accepted() {
         let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         cfg.expose.get_mut("wireguard").unwrap().proxy_protocol = true;
-        assert_eq!(
-            cfg.validate(),
-            Err(ConfigError::UdpProxy("wireguard".into()))
-        );
+        assert_eq!(cfg.validate(), Ok(()));
     }
 
     #[test]

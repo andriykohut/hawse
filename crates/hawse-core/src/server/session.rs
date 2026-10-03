@@ -334,11 +334,6 @@ impl Session {
             );
             return failed(BindFailure::NotGranted);
         };
-        // The client never learns a UDP visitor's address, so it could not write the header.
-        if proxy_protocol && kind == Kind::Udp {
-            tracing::warn!(service, "proxy protocol is not supported on udp yet");
-            return failed(BindFailure::Unsupported);
-        }
         let live = self.services.values().map(|bound| bound.id).collect();
         let Some(id) = self.ids.claim(&live) else {
             tracing::warn!(service, "every service id is taken");
@@ -377,6 +372,7 @@ impl Session {
                     port,
                     Arc::clone(&self.shared),
                     allow,
+                    proxy_protocol,
                 ));
                 self.udp
                     .write()

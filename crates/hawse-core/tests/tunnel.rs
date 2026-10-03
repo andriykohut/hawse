@@ -619,38 +619,6 @@ async fn a_client_cancelled_mid_dial_announces_no_retry() {
 }
 
 #[tokio::test]
-async fn a_udp_bind_with_proxy_protocol_is_refused() {
-    let (server_id, client_id) = ids();
-    let server = start_server(
-        &server_config(&[("test", client_id.public_key(), &[])]),
-        &server_id,
-    );
-    let echo = echo_server().await.to_string();
-    let mut cfg = client_config(server.addr, server.key, &[("proxied", &echo, "any/udp")]);
-    cfg.expose.get_mut("proxied").unwrap().proxy_protocol = true;
-    let mut client = start_client(cfg, client_id);
-
-    loop {
-        match next_event(&mut client.events).await {
-            Event::BindFailed { service, reason } => {
-                assert_eq!(
-                    (service.as_str(), reason),
-                    ("proxied", BindFailure::Unsupported)
-                );
-                break;
-            }
-            Event::Bound { service, port } => panic!("{service} was bound on {port}"),
-            _ => {}
-        }
-    }
-
-    let after = tokio::time::timeout(Duration::from_secs(1), client.events.recv()).await;
-    assert!(after.is_err(), "a later event arrived: {after:?}");
-    client.cancel.cancel();
-    server.cancel.cancel();
-}
-
-#[tokio::test]
 async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let (server_id, client_id) = ids();
     let granted = free_port_outside_pool(&[]).await;

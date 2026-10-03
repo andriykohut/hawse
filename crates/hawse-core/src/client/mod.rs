@@ -3,7 +3,7 @@ mod udp;
 mod visitor;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -278,13 +278,13 @@ impl Client {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = Instant::now();
                     match msg {
-                        ServerMessage::Bound { service, service_id, port, .. } => {
+                        ServerMessage::Bound { service, service_id, port, address } => {
                             let Some(expose) = self.cfg.expose.get(&service) else {
                                 tracing::warn!(service, "server bound a service we never asked for");
                                 continue;
                             };
                             let kind = expose.port.kind();
-                            self.register_bound(service.clone(), service_id, expose, &bind_ctx);
+                            self.register_bound(service.clone(), service_id, expose, listener_addr(address, remote, port), &bind_ctx);
                             let port = Port { number: port, kind };
                             emit(events, Event::Bound { service, port });
                         }
@@ -334,7 +334,14 @@ impl Client {
         outcome
     }
 
-    fn register_bound(&self, service: String, service_id: u16, expose: &Expose, ctx: &BindCtx<'_>) {
+    fn register_bound(
+        &self,
+        service: String,
+        service_id: u16,
+        expose: &Expose,
+        listener: SocketAddr,
+        ctx: &BindCtx<'_>,
+    ) {
         let local = expose.local.clone();
         if expose.port.kind() == Kind::Udp {
             self.udp.insert(udp::UdpLocal::new(
@@ -343,6 +350,7 @@ impl Client {
                 local,
                 IDLE,
                 udp::SESSION_CAP,
+                expose.proxy_protocol.then_some(listener),
                 ctx,
             ));
         } else {
@@ -478,6 +486,17 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
     if let Err(mpsc::error::TrySendError::Full(event)) = events.try_send(event) {
         tracing::debug!(?event, "dropped an event: the receiver is behind");
     }
+}
+
+/// The address a PROXY header names as the destination. A wildcard bind names no address, so it is
+/// the one this client dialed.
+fn listener_addr(bound: IpAddr, dialed: SocketAddr, port: u16) -> SocketAddr {
+    let ip = if bound.is_unspecified() {
+        dialed.ip()
+    } else {
+        bound
+    };
+    SocketAddr::new(ip.to_canonical(), port)
 }
 
 /// Whether a dial failed because the peer offers no protocol this build speaks. TLS says so with
