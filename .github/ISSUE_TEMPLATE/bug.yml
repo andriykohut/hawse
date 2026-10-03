@@ -1,0 +1,227 @@
+name: Bug report
+description: Something hawse does wrong, or fails to do.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A tunnel has two ends, and most problems need both to explain, so this
+        form asks for the version, the config and the log of the server and of
+        the client.
+
+        Do not report a vulnerability here. Use
+        [Report a vulnerability](https://github.com/andriykohut/hawse/security/advisories/new),
+        which only the maintainer can read.
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: Output of `hawse --version` on the server, or the image tag.
+      placeholder: hawse 0.4.0
+    validations:
+      required: true
+
+  - type: input
+    id: client-version
+    attributes:
+      label: Client version
+      description: >-
+        The same on the client. A server and a client on different versions can
+        fail every transfer while both logs look healthy, so check this first.
+      placeholder: hawse 0.4.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of problem
+      options:
+        - Client cannot connect, or the server refuses it
+        - A service does not bind its public port
+        - A transfer stalls or arrives short
+        - Slow
+        - UDP packets lost
+        - Crash
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what hawse did, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        The commands, in order, from starting both ends to seeing the problem.
+        Say which end each one runs on.
+      placeholder: |
+        1. server: hawse server
+        2. client: hawse client
+        3. elsewhere: curl -o /dev/null http://tunnel.example.com:8096/big.bin
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true
+
+  - type: input
+    id: last-good
+    attributes:
+      label: Last version that worked
+      description: Leave empty if it never did, or you do not know.
+      placeholder: 0.3.0
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      description: >-
+        `transport.prefer` in `client.toml`. `auto` is the default and dials
+        QUIC.
+      options:
+        - QUIC (`auto` or `quic`)
+        - TCP fallback (`tcp`)
+        - Both
+    validations:
+      required: true
+
+  - type: dropdown
+    id: service-kind
+    attributes:
+      label: Service
+      description: The kind of service the problem shows on.
+      multiple: true
+      options:
+        - TCP
+        - UDP
+        - None, it fails before any service is bound
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed from
+      description: Pick more than one if the two ends differ.
+      multiple: true
+      options:
+        - Release archive
+        - Docker image
+        - cargo install or cargo binstall
+        - Built from a checkout
+    validations:
+      required: true
+
+  - type: textarea
+    id: hosts
+    attributes:
+      label: Hosts
+      description: >-
+        Output of `uname -srm` on each end. For Docker add the `docker run`
+        line or the Compose service, and for a checkout the commit.
+      placeholder: |
+        server: Linux 6.8.0-45-generic x86_64
+        client: Linux 5.15.0 armv7l
+      render: text
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Config and logs
+
+        Public keys (`ed25519:...`) are safe to post. The contents of a `.key`
+        file never are, and nothing here asks for them.
+
+        The configs name the server, the `local` address of every service and
+        the networks on its `allow` list. Logs name the server's address and,
+        at `-v`, the address of every visitor. Replace what you would rather
+        not publish, using the same placeholder for the same address every
+        time, so the configs and the two logs can still be read against each
+        other.
+
+  - type: textarea
+    id: server-config
+    attributes:
+      label: server.toml
+      description: Write `none` if the server runs on its defaults, without one.
+      render: toml
+    validations:
+      required: true
+
+  - type: textarea
+    id: client-config
+    attributes:
+      label: client.toml
+      render: toml
+    validations:
+      required: true
+
+  - type: textarea
+    id: server-log
+    attributes:
+      label: Server log
+      description: |
+        Run with `-v` and include everything from startup to the problem. Drag a file in if it is long.
+
+        - by hand: `hawse -v server 2> server.log`
+        - Docker: add `-v` after `server`, then `docker logs hawse-server`
+        - systemd: `systemctl edit hawse-server`, add the lines below, restart, then `journalctl -u hawse-server --since "10 minutes ago"`
+
+        ```ini
+        [Service]
+        ExecStart=
+        ExecStart=/usr/local/bin/hawse server --config /etc/hawse/server.toml --log pretty -v
+        ```
+
+        The empty `ExecStart=` clears the unit's own command. Without it systemd refuses a unit with two. The line after it is that command with `-v` added: if `systemctl cat hawse-server` shows other paths or arguments, keep yours.
+    validations:
+      required: true
+
+  - type: textarea
+    id: client-log
+    attributes:
+      label: Client log
+      description: >-
+        The same on the client, covering the same stretch of time. A crash
+        prints its message here, on stderr.
+    validations:
+      required: true
+
+  - type: textarea
+    id: network
+    attributes:
+      label: Network between the two ends
+      description: >-
+        Whatever sits in the path: NAT or carrier-grade NAT on the client side,
+        a firewall that blocks outbound UDP, a reverse proxy in front of the
+        public port, Docker without host networking, a VPN, an MTU below 1500.
+
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurements
+      description: >-
+        For a slow or lossy tunnel: the numbers, what produced them, and the
+        same measurement between the two hosts without hawse (`iperf3`, and
+        `mtr` in both directions). A path that loses packets on its own looks
+        like a slow tunnel.
+      render: text

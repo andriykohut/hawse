@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/andriykohut/hawse/security/advisories/new
+    about: Privately, to the maintainer. Do not open a public issue for one.
