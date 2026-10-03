@@ -125,6 +125,12 @@ parked for later. Each entry says what it is and why it waits.
   write theirs. Defaulting keys to a state directory (`$STATE_DIRECTORY` under
   systemd, `$XDG_STATE_HOME/hawse`, `/var/lib/hawse` for root) would remove
   both. Waits because it moves where existing installs look for their keys.
+- **`keygen` ignores `HAWSE_CONFIG`.** `server` and `client` read it through
+  `--config`, but `keygen` takes only `--out` and otherwise calls
+  `paths::locate` with no explicit config, so it writes to the default
+  directory (`~/.config/hawse/`) whatever `HAWSE_CONFIG` names, and never
+  follows a `key =` path in that config. Found during the reconnect-backoff
+  check; `keygen --out <path>` is the workaround.
 
 ## Deferred from the phase 1 reviews
 
@@ -295,14 +301,19 @@ phase 1. Each says what the code does today and what the fix would be.
   connection at 2.6x. Shrinking the client's `stream_window` does not move it,
   so the queue is in congestion control and packet scheduling, not stream flow
   control.
-- **Favour streams that have transferred least.** Written and parked on the
-  local `stream-priority-ladder` branch, unmeasured; `main` does not carry it.
+- **Favour streams that have transferred least.** Written on the local
+  `stream-priority-ladder` branch on 2026-09-16 and dropped on 2026-10-02
+  without landing.
   A visitor stream keeps quinn's default priority of 0 until it has sent
   64 KiB, then drops one step per doubling to a floor of -8 at 8 MiB, so a
   request-shaped stream outranks one pushing a hundred megabytes. No wire
   change and no config.
 
-  It waits on evidence because two objections look fatal on paper. Priority
+  The real path gave it nothing to fix. Under forty transfers the probe cost
+  142 ms idle and 145 ms loaded in the pool spike, and on 2026-10-01 `bbr` put
+  it at 157 ms p50 against 158 for the connection-per-visitor tunnel (both
+  below), so no request was waiting behind bulk traffic for priority to move
+  ahead. Two objections also looked fatal on paper. Priority
   only reorders what is sent inside one congestion window, so it cannot touch
   the throughput gap recorded below, which is what motivated it. And every
   fresh stream starts at 0, so a port taking a trickle of short connections can
@@ -311,7 +322,8 @@ phase 1. Each says what the code does today and what the fix would be.
   a long-lived SSH or database connection as bulk, where a recent-window rate
   would not.
 
-  To measure it, build the branch and `main`, run the service and `hawse
+  Revisit only if a real path shows a request queued behind bulk traffic. To
+  measure it, build the change and `main`, run the service and `hawse
   client` beside each other, `hawse server` on the public box, and the load
   generator from the machine that consumes the traffic, which is the same
   vantage as the numbers below and not the server. Alternate the two binaries
