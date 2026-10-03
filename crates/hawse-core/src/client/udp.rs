@@ -327,7 +327,7 @@ pub async fn serve_bulk(
 ) {
     let Some(local) = registry.wait_for(service_id, BOUND_WAIT).await else {
         tracing::warn!(service_id, "bulk stream for a service we never bound");
-        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
+        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE).await;
         return;
     };
     let queue = local.queue.lock().expect("bulk queue lock").take();
@@ -336,7 +336,7 @@ pub async fn serve_bulk(
             service = local.service,
             "a second bulk stream for one service"
         );
-        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
+        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE).await;
         return;
     };
     // One `select!`, never re-entered: `read_body` is two `read_exact`s, and dropping it between

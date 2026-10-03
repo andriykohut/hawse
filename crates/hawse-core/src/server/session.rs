@@ -21,6 +21,7 @@ use crate::allow::AllowList;
 use crate::control::Control;
 use crate::net;
 use crate::transport::{CloseReason, Transport, TransportError};
+use crate::udp::FINISH_WAIT;
 
 const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
@@ -174,7 +175,11 @@ async fn refuse_streams(transport: Arc<dyn Transport>, cancel: CancellationToken
             tracing::debug!("refusing a stream the client opened");
             logged = true;
         }
-        send.reset(reset::UNEXPECTED_STREAM);
+        // Raced against the shutdown: a stream on a stalled link must not hold the session's drain.
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = tokio::time::timeout(FINISH_WAIT, send.reset_flushed(reset::UNEXPECTED_STREAM)) => {}
+        }
         recv.stop(reset::UNEXPECTED_STREAM);
     }
 }

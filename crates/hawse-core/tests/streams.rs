@@ -8,7 +8,7 @@ use hawse_core::control::Control;
 use hawse_core::identity::Identity;
 use hawse_core::tls;
 use hawse_core::transport::quic::Tuning;
-use hawse_core::transport::{Transport, tcp};
+use hawse_core::transport::{Transport, reset_code, tcp};
 use hawse_proto::msg::{ClientMessage, ServerMessage, reset};
 use quinn::VarInt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,7 +42,7 @@ async fn a_stream_the_client_opens_is_reset_and_the_session_lives_on() {
 }
 
 #[tokio::test]
-async fn a_stream_the_client_opens_over_tcp_is_closed_and_the_session_lives_on() {
+async fn a_stream_the_client_opens_over_tcp_is_reset_and_the_session_lives_on() {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
     let server = start_server(
@@ -73,11 +73,11 @@ async fn a_stream_the_client_opens_over_tcp_is_closed_and_the_session_lives_on()
     let (mut send, mut recv) = transport.open_bi().await.unwrap();
     send.write_all(b"extra").await.unwrap();
     let mut buf = [0u8; 8];
-    // yamux carries no reset code, so the refusal reads as an end of stream.
     let read = tokio::time::timeout(Duration::from_secs(5), recv.read(&mut buf))
         .await
         .expect("an answer within 5 s");
-    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    let err = read.expect_err("a refused stream must not read as a clean end");
+    assert_eq!(reset_code(&err), Some(reset::UNEXPECTED_STREAM), "{err:?}");
 
     control
         .send(&ClientMessage::Ping { nonce: 7 })

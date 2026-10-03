@@ -831,3 +831,89 @@ async fn an_old_server_is_reported_as_a_version_mismatch_over_tcp() {
         .unwrap();
     assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
 }
+
+/// The TCP twin of `a_stream_for_an_unbound_service_never_dials_local`: a server driven by hand,
+/// so the code can be read where it arrives.
+#[tokio::test]
+async fn a_refusal_carries_its_code_over_tcp() {
+    use hawse_core::control::Control;
+    use hawse_core::frame::write_frame;
+    use hawse_core::tls;
+    use hawse_core::transport::quic::Tuning;
+    use hawse_core::transport::{Transport, reset_code, tcp};
+    use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader, StreamOpen, reset};
+
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    let server_tls = Arc::new(tls::server_config(cert, key, tls::provider()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rogue_addr = listener.local_addr().unwrap();
+
+    // Bound and let go, so nothing listens where the client will dial.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut client = start_client(
+        client_config_over(
+            rogue_addr,
+            server_id.public_key(),
+            &[("svc", &dead.to_string(), "any")],
+            Prefer::Tcp,
+        ),
+        client_id,
+    );
+
+    let (socket, _) = listener.accept().await.unwrap();
+    let rogue: Arc<dyn Transport> = Arc::new(
+        tcp::accept(socket, server_tls, Tuning::SERVER)
+            .await
+            .unwrap(),
+    );
+    let (send, recv) = rogue.accept_bi().await.unwrap();
+    let mut control = Control::new(send, recv);
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Hello { .. })
+    ));
+    control
+        .send(&ServerMessage::Welcome {
+            agent: "rogue".into(),
+            client_name: "test".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Bind { .. })
+    ));
+    control
+        .send(&ServerMessage::Bound {
+            service: "svc".into(),
+            service_id: 7,
+            port: 40000,
+        })
+        .await
+        .unwrap();
+    expect_bound(&mut client.events, "svc").await;
+
+    let header = |service_id| StreamHeader {
+        service_id,
+        visitor: "203.0.113.9:1".parse().unwrap(),
+        listener: "203.0.113.1:40000".parse().unwrap(),
+    };
+    for (service_id, code) in [(99, reset::UNKNOWN_SERVICE), (7, reset::LOCAL_REFUSED)] {
+        let (mut send, mut recv) = rogue.open_bi().await.unwrap();
+        write_frame(&mut send, &StreamOpen::Visitor(header(service_id)))
+            .await
+            .unwrap();
+        let mut rest = Vec::new();
+        let err = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(&mut rest))
+            .await
+            .expect("a refusal within 5 s")
+            .expect_err("a refusal must fail the read, not end it");
+        assert_eq!(reset_code(&err), Some(code), "{err:?}");
+    }
+    client.cancel.cancel();
+}
