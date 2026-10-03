@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hawse_proto::msg::{StreamHeader, StreamOpen};
+use hawse_proto::msg::{StreamHeader, StreamOpen, reset};
 use hawse_proto::port::Port;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -10,7 +10,7 @@ use super::{ACCEPT_BACKOFF, Shared, out_of_descriptors};
 use crate::allow::AllowList;
 use crate::error::chain;
 use crate::frame::write_frame;
-use crate::pump::pump;
+use crate::pump::{Edge, pump};
 use crate::transport::Transport;
 
 /// What one TCP listener serves.
@@ -71,6 +71,7 @@ pub async fn serve(
                 Ok(streams) => streams,
                 Err(err) => {
                     tracing::debug!(%visitor, err = %chain(&err), "cannot open stream");
+                    socket.abort();
                     return;
                 }
             };
@@ -81,6 +82,7 @@ pub async fn serve(
             };
             if let Err(err) = write_frame(&mut send, &StreamOpen::Visitor(header)).await {
                 tracing::debug!(%visitor, err = %chain(&err), "header write failed");
+                socket.abort();
                 return;
             }
             tracing::debug!(service_id, %visitor, "visitor connected");
@@ -88,7 +90,12 @@ pub async fn serve(
                 Ok(stats) => {
                     tracing::debug!(%visitor, up = stats.to_stream, down = stats.to_socket, "visitor done");
                 }
-                Err(err) => tracing::debug!(%visitor, err = %chain(&err), "visitor ended"),
+                Err(err) => tracing::debug!(
+                    %visitor,
+                    reset = err.reset_code().map(reset::name),
+                    err = %chain(&err),
+                    "visitor ended"
+                ),
             }
         });
     }

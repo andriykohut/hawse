@@ -116,6 +116,17 @@ pub mod reset {
     pub const LOCAL_REFUSED: u32 = 0x11;
     pub const ABORTED: u32 = 0x12;
     pub const UNEXPECTED_STREAM: u32 = 0x13;
+
+    /// What a code means, for a log line.
+    pub fn name(code: u32) -> &'static str {
+        match code {
+            UNKNOWN_SERVICE => "unknown service",
+            LOCAL_REFUSED => "local refused",
+            ABORTED => "aborted",
+            UNEXPECTED_STREAM => "unexpected stream",
+            _ => "unknown code",
+        }
+    }
 }
 
 /// Error codes for `Transport::close`. Only the QUIC transport carries them to the peer; yamux's
@@ -283,5 +294,14 @@ mod tests {
     #[test]
     fn alpn_is_versioned() {
         assert_eq!(ALPN, b"hawse/2");
+    }
+
+    #[test]
+    fn every_reset_code_has_a_name() {
+        assert_eq!(reset::name(reset::UNKNOWN_SERVICE), "unknown service");
+        assert_eq!(reset::name(reset::LOCAL_REFUSED), "local refused");
+        assert_eq!(reset::name(reset::ABORTED), "aborted");
+        assert_eq!(reset::name(reset::UNEXPECTED_STREAM), "unexpected stream");
+        assert_eq!(reset::name(0x7fff), "unknown code");
     }
 }

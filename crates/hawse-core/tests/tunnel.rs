@@ -1,12 +1,12 @@
 mod common;
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    DYNAMIC_PORTS, client_config, client_config_over, echo_server, expect_bound,
-    free_port_outside_pool, next_event, server_config, start_client, start_server,
+    DYNAMIC_PORTS, RunningClient, RunningServer, client_config, client_config_over, echo_server,
+    expect_bound, free_port_outside_pool, next_event, server_config, start_client, start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
@@ -16,7 +16,7 @@ use hawse_core::transport::quic::QuicError;
 use hawse_proto::msg::BindFailure;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 fn ids() -> (Identity, Identity) {
@@ -247,6 +247,13 @@ async fn transfers_intact(prefer: Prefer, total: usize) {
             }
             got += n;
         }
+        // The echo ended the stream once it had it all, so the visitor must read that end and not
+        // a reset: the pump aborts its socket unless both directions finished.
+        let end = rd.read(&mut buf).await;
+        assert!(
+            matches!(end, Ok(0)),
+            "the transfer did not end cleanly: {end:?}"
+        );
         writer.await.unwrap();
         server.cancel.cancel();
     };
@@ -916,4 +923,130 @@ async fn a_refusal_carries_its_code_over_tcp() {
         assert_eq!(reset_code(&err), Some(code), "{err:?}");
     }
     client.cancel.cancel();
+}
+
+/// A server, and a client exposing `local` as `svc` on a dynamic port over `prefer`.
+async fn tunnel_to(local: SocketAddr, prefer: Prefer) -> (RunningServer, RunningClient, u16) {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let mut client = start_client(
+        client_config_over(
+            server.addr,
+            server.key,
+            &[("svc", &local.to_string(), "any")],
+            prefer,
+        ),
+        client_id,
+    );
+    let port = expect_bound(&mut client.events, "svc").await.number;
+    (server, client, port)
+}
+
+async fn a_local_service_that_resets_gives_the_visitor_a_reset(prefer: Prefer) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 5];
+        socket.read_exact(&mut buf).await.unwrap();
+        socket.set_zero_linger().unwrap();
+    });
+    let (server, client, port) = tunnel_to(local, prefer).await;
+
+    let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    visitor.write_all(b"hello").await.unwrap();
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), visitor.read_to_end(&mut rest))
+        .await
+        .expect("the visitor's connection ends within 5 s");
+    let err = read.expect_err("a service that reset must not read as a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_local_service_that_resets_gives_the_visitor_a_reset_over_quic() {
+    a_local_service_that_resets_gives_the_visitor_a_reset(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn a_local_service_that_resets_gives_the_visitor_a_reset_over_tcp() {
+    a_local_service_that_resets_gives_the_visitor_a_reset(Prefer::Tcp).await;
+}
+
+async fn nothing_listening_on_local_gives_the_visitor_a_reset(prefer: Prefer) {
+    // Bound and let go, so nothing listens where the client will dial.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let (server, client, port) = tunnel_to(dead, prefer).await;
+
+    // Only reads from here on. A socket reports a reset once, to whichever call meets it first,
+    // so a visitor that kept writing could see it there and read end-of-stream after.
+    let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), visitor.read_to_end(&mut rest))
+        .await
+        .expect("the visitor's connection ends within 5 s");
+    let err = read.expect_err("a refused visitor must not read a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn nothing_listening_on_local_gives_the_visitor_a_reset_over_quic() {
+    nothing_listening_on_local_gives_the_visitor_a_reset(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn nothing_listening_on_local_gives_the_visitor_a_reset_over_tcp() {
+    nothing_listening_on_local_gives_the_visitor_a_reset(Prefer::Tcp).await;
+}
+
+async fn a_visitor_that_resets_gives_the_local_service_a_reset(prefer: Prefer) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap();
+    let (seen, hello_arrived) = oneshot::channel();
+    let ending = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 5];
+        socket.read_exact(&mut buf).await.unwrap();
+        seen.send(()).unwrap();
+        let mut rest = Vec::new();
+        socket.read_to_end(&mut rest).await
+    });
+    let (server, client, port) = tunnel_to(local, prefer).await;
+
+    let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    visitor.write_all(b"hello").await.unwrap();
+    // Only once the service has its bytes: a reset can overtake data still on its way.
+    hello_arrived.await.unwrap();
+    visitor.set_zero_linger().unwrap();
+    drop(visitor);
+
+    let read = tokio::time::timeout(Duration::from_secs(5), ending)
+        .await
+        .expect("the service's connection ends within 5 s")
+        .unwrap();
+    let err = read.expect_err("a visitor that reset must not read as a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_visitor_that_resets_gives_the_local_service_a_reset_over_quic() {
+    a_visitor_that_resets_gives_the_local_service_a_reset(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn a_visitor_that_resets_gives_the_local_service_a_reset_over_tcp() {
+    a_visitor_that_resets_gives_the_local_service_a_reset(Prefer::Tcp).await;
 }

@@ -1,8 +1,11 @@
 use bytes::BytesMut;
 use hawse_proto::msg::reset::ABORTED;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf,
+};
+use tokio::net::TcpStream;
 
-use crate::transport::{RecvHalf, SendHalf};
+use crate::transport::{RecvHalf, SendHalf, reset_code};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -16,6 +19,53 @@ pub enum PumpError {
     Socket(#[source] std::io::Error),
     #[error("stream failed")]
     Stream(#[source] std::io::Error),
+}
+
+impl PumpError {
+    /// The code the far end reset the stream with, when that is what ended the pump.
+    pub fn reset_code(&self) -> Option<u32> {
+        match self {
+            Self::Stream(err) => reset_code(err),
+            Self::Socket(_) => None,
+        }
+    }
+}
+
+/// What `pump` needs from the socket at the tunnel's edge, beyond reading and writing it.
+pub trait Edge: AsyncRead + AsyncWrite + Unpin + Send + 'static {
+    /// Makes the close that follows a reset, not a clean end.
+    fn abort(&self);
+}
+
+impl Edge for TcpStream {
+    /// `SO_LINGER` of zero: the kernel answers the close with an RST and drops what it had queued.
+    fn abort(&self) {
+        let _ = self.set_zero_linger();
+    }
+}
+
+/// An in-memory pipe has no reset to send; closing is all its peer can see.
+impl Edge for DuplexStream {
+    fn abort(&self) {}
+}
+
+/// The socket's half of what `ResetOnDrop` does for the stream. A dropped `TcpStream` closes with
+/// a FIN, which hands the application a clean end on a transfer that was cut short, so unless
+/// both directions finished the socket is aborted first.
+struct AbortOnDrop<S: Edge> {
+    halves: Option<(ReadHalf<S>, WriteHalf<S>)>,
+    finished: bool,
+}
+
+impl<S: Edge> Drop for AbortOnDrop<S> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some((reader, writer)) = self.halves.take() {
+            reader.unsplit(writer).abort();
+        }
+    }
 }
 
 // quinn's own `Drop for SendStream` finishes (not resets) a stream that's dropped mid-transfer,
@@ -41,18 +91,21 @@ impl Drop for ResetOnDrop {
     }
 }
 
-/// Ends when both directions have delivered EOF. An abort on either side resets the send stream:
-/// the peer's read then fails, on either transport.
-pub async fn pump<S>(
+/// Ends when both directions have delivered EOF. Any other ending aborts both sides: the stream is
+/// reset, so the peer's read fails on either transport, and the socket is closed with a reset, so
+/// the application behind it does not read a truncated transfer as a whole one. A pump dropped
+/// before it ends counts as any other ending.
+pub async fn pump<S: Edge>(
     socket: S,
     send: SendHalf,
     mut recv: RecvHalf,
     buffer: usize,
-) -> Result<Stats, PumpError>
-where
-    S: AsyncRead + AsyncWrite + Send + 'static,
-{
-    let (mut reader, mut writer) = tokio::io::split(socket);
+) -> Result<Stats, PumpError> {
+    let mut edge = AbortOnDrop {
+        halves: Some(tokio::io::split(socket)),
+        finished: false,
+    };
+    let (reader, writer) = edge.halves.as_mut().expect("set just above");
 
     let to_stream = async move {
         let mut total = 0u64;
@@ -94,6 +147,7 @@ where
     };
 
     let (to_stream, to_socket) = tokio::try_join!(to_stream, to_socket)?;
+    edge.finished = true;
     Ok(Stats {
         to_stream,
         to_socket,

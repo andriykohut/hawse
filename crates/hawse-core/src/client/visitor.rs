@@ -78,6 +78,11 @@ pub async fn serve(
             down = stats.to_stream,
             "visitor done"
         ),
-        Err(err) => tracing::debug!(service = target.service, err = %chain(&err), "visitor ended"),
+        Err(err) => tracing::debug!(
+            service = target.service,
+            reset = err.reset_code().map(reset::name),
+            err = %chain(&err),
+            "visitor ended"
+        ),
     }
 }
