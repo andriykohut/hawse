@@ -45,6 +45,9 @@ fn config(tuning: Tuning) -> yamux::Config {
     cfg.set_max_connection_receive_window(None);
     cfg.set_max_num_streams(streams);
     cfg.set_max_connection_receive_window(Some(window));
+    // A whole record in one frame: a chunk and its header would otherwise straddle the default
+    // 16 KiB split and go out as two.
+    cfg.set_split_send_size(hawse_proto::record::MAX_DATA + 3);
     cfg
 }
 
