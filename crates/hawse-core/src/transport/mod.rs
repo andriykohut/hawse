@@ -1,4 +1,5 @@
 pub mod quic;
+pub mod records;
 pub mod tcp;
 
 use std::fmt;
@@ -148,6 +149,23 @@ impl RecvHalf {
     }
 }
 
+/// The code a peer reset or stopped a stream with, when the error carries one. On QUIC a failed
+/// read and a failed write both can; on TCP only a read that met a reset record does.
+pub fn reset_code(err: &io::Error) -> Option<u32> {
+    let source = err.get_ref()?;
+    if let Some(reset) = source.downcast_ref::<records::StreamReset>() {
+        return reset.code;
+    }
+    let code = match source.downcast_ref::<quinn::ReadError>() {
+        Some(quinn::ReadError::Reset(code)) => *code,
+        _ => match source.downcast_ref::<quinn::WriteError>() {
+            Some(quinn::WriteError::Stopped(code)) => *code,
+            _ => return None,
+        },
+    };
+    u32::try_from(code.into_inner()).ok()
+}
+
 // quinn's `SendStream` carries an inherent `poll_write` that shadows this one and returns quinn's
 // own error type.
 impl AsyncWrite for SendHalf {
@@ -266,5 +284,33 @@ mod tests {
     fn transport_kinds_print_in_lowercase() {
         assert_eq!(TransportKind::Quic.to_string(), "quic");
         assert_eq!(TransportKind::Tcp.to_string(), "tcp");
+    }
+
+    #[test]
+    fn a_reset_code_is_read_out_of_either_transports_error() {
+        let code = VarInt::from_u32(0x11);
+        let quic_read = io::Error::from(quinn::ReadError::Reset(code));
+        let quic_write = io::Error::from(quinn::WriteError::Stopped(code));
+        let tcp = io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            records::StreamReset { code: Some(0x11) },
+        );
+        assert_eq!(reset_code(&quic_read), Some(0x11));
+        assert_eq!(reset_code(&quic_write), Some(0x11));
+        assert_eq!(reset_code(&tcp), Some(0x11));
+    }
+
+    #[test]
+    fn an_error_without_a_code_has_none() {
+        let bare = io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            records::StreamReset { code: None },
+        );
+        assert_eq!(reset_code(&bare), None);
+        assert_eq!(reset_code(&io::Error::other("boom")), None);
+        assert_eq!(
+            reset_code(&io::Error::from(quinn::ReadError::ClosedStream)),
+            None
+        );
     }
 }
