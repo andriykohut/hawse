@@ -192,7 +192,7 @@ body:
         ExecStart=/usr/local/bin/hawse server --config /etc/hawse/server.toml --log pretty -v
         ```
 
-        The empty `ExecStart=` clears the unit's own command. Without it systemd refuses a unit with two.
+        The empty `ExecStart=` clears the unit's own command. Without it systemd refuses a unit with two. The line after it is that command with `-v` added: if `systemctl cat hawse-server` shows other paths or arguments, keep yours.
     validations:
       required: true
 
