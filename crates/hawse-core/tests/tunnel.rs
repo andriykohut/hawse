@@ -1,6 +1,7 @@
 mod common;
 
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
@@ -765,4 +766,68 @@ async fn auto_reports_a_retryable_failure_and_never_dials_tcp() {
 
     cancel.cancel();
     task.await.unwrap();
+}
+
+/// A server from before the wire changed: ours in every way but the protocol it offers.
+fn old_server_tls(identity: &Identity) -> rustls::ServerConfig {
+    let (cert, key) = identity.certificate().unwrap();
+    let mut cfg = hawse_core::tls::server_config(cert, key, hawse_core::tls::provider()).unwrap();
+    cfg.alpn_protocols = vec![b"hawse/1".to_vec()];
+    cfg
+}
+
+#[tokio::test]
+async fn an_old_server_is_reported_as_a_version_mismatch_over_quic() {
+    use hawse_core::transport::quic::{self, Tuning};
+
+    let (server_id, client_id) = ids();
+    let old = quic::listen(
+        "127.0.0.1:0".parse().unwrap(),
+        old_server_tls(&server_id),
+        Tuning::SERVER,
+    )
+    .unwrap();
+    let addr = old.local_addr().unwrap();
+    // The endpoint only answers while something drives its handshakes.
+    tokio::spawn(async move {
+        while let Some(incoming) = old.accept().await {
+            let _ = incoming.await;
+        }
+    });
+
+    let client = start_client(
+        client_config_over(addr, server_id.public_key(), &[], Prefer::Quic),
+        client_id,
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), client.task)
+        .await
+        .expect("the dial ends within 5 s")
+        .unwrap();
+    assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
+}
+
+#[tokio::test]
+async fn an_old_server_is_reported_as_a_version_mismatch_over_tcp() {
+    use hawse_core::transport::quic::Tuning;
+    use hawse_core::transport::tcp;
+
+    let (server_id, client_id) = ids();
+    let tls = Arc::new(old_server_tls(&server_id));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let _ = tcp::accept(socket, Arc::clone(&tls), Tuning::SERVER).await;
+        }
+    });
+
+    let client = start_client(
+        client_config_over(addr, server_id.public_key(), &[], Prefer::Tcp),
+        client_id,
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), client.task)
+        .await
+        .expect("the dial ends within 5 s")
+        .unwrap();
+    assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
 }

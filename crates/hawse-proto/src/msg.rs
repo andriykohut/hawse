@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::key::PublicKey;
 use crate::port::Kind;
 
-pub const ALPN: &[u8] = b"hawse/1";
+pub const ALPN: &[u8] = b"hawse/2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -282,6 +282,6 @@ mod tests {
 
     #[test]
     fn alpn_is_versioned() {
-        assert_eq!(ALPN, b"hawse/1");
+        assert_eq!(ALPN, b"hawse/2");
     }
 }

@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage, StreamOpen};
+use hawse_proto::msg::{ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen};
 use hawse_proto::port::{Kind, Port, PortRequest};
 use quinn::Endpoint;
 use tokio::sync::mpsc;
@@ -99,6 +99,11 @@ pub enum ClientError {
     Shutdown(String),
     #[error("server stopped answering")]
     Unresponsive,
+    #[error(
+        "the server speaks a different hawse protocol than this client's {}; both ends need the same release",
+        String::from_utf8_lossy(ALPN)
+    )]
+    Version,
     #[error("stream window does not fit a QUIC window")]
     Window,
 }
@@ -386,14 +391,15 @@ impl Client {
     }
 
     async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
-        match self.cfg.transport.prefer {
+        let dialed = match self.cfg.transport.prefer {
             // `Auto` dials QUIC and nothing else while yamux delivers a reset stream as a clean
             // end-of-stream: a fallback would answer blocked UDP with a transport on which a
             // truncated transfer arrives looking complete. Deadline-free for the same reason —
             // with nothing to fall back to, a probe could only fail a handshake that would land.
             Prefer::Auto | Prefer::Quic => self.connect_quic(remote).await,
             Prefer::Tcp => self.connect_tcp(remote).await,
-        }
+        };
+        dialed.map_err(versioned)
     }
 
     async fn connect_quic(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
@@ -474,6 +480,52 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
     }
 }
 
+/// Whether a dial failed because the peer offers no protocol this build speaks. TLS says so with
+/// alert 120, which QUIC carries as a crypto error and TLS over TCP as the alert itself.
+fn wrong_version(err: &ClientError) -> bool {
+    const NO_APPLICATION_PROTOCOL: u8 = 120;
+    let refused = quinn::TransportErrorCode::crypto(NO_APPLICATION_PROTOCOL);
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(err) = source {
+        match err.downcast_ref::<quinn::ConnectionError>() {
+            Some(quinn::ConnectionError::ConnectionClosed(close))
+                if close.error_code == refused =>
+            {
+                return true;
+            }
+            Some(quinn::ConnectionError::TransportError(failed)) if failed.code == refused => {
+                return true;
+            }
+            _ => {}
+        }
+        // An `io::Error` reports its inner error's source as its own, skipping the inner error:
+        // tokio-rustls wraps the alert that way, so it has to be reached through `get_ref`.
+        let inner = err
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>());
+        if matches!(
+            inner,
+            Some(rustls::Error::AlertReceived(
+                rustls::AlertDescription::NoApplicationProtocol
+            ))
+        ) {
+            return true;
+        }
+        source = err.source();
+    }
+    false
+}
+
+/// A dial that failed on the protocol version says so, whichever transport met it.
+fn versioned(err: ClientError) -> ClientError {
+    if wrong_version(&err) {
+        ClientError::Version
+    } else {
+        err
+    }
+}
+
 /// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
 /// sizing, or a message this config cannot encode. DNS failing (`Resolve`, `NoAddress`) is
 /// transient, not a config problem, so it maps to `Transport` and keeps retrying. So does a dial
@@ -506,6 +558,32 @@ mod tests {
     use hawse_proto::frame::FrameError;
 
     use super::*;
+
+    fn no_protocol_alert() -> ClientError {
+        let alert = rustls::Error::AlertReceived(rustls::AlertDescription::NoApplicationProtocol);
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, alert);
+        ClientError::Transport(TransportError::Connection(Box::new(io)))
+    }
+
+    #[test]
+    fn the_no_protocol_alert_reads_as_a_version_mismatch() {
+        assert!(wrong_version(&no_protocol_alert()));
+        let timed_out = ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
+        assert!(!wrong_version(&timed_out));
+        assert!(matches!(
+            versioned(no_protocol_alert()),
+            ClientError::Version
+        ));
+        assert!(matches!(versioned(timed_out), ClientError::Quic(_)));
+    }
+
+    #[test]
+    fn a_version_mismatch_is_worth_retrying() {
+        assert!(matches!(
+            classify(&ClientError::Version),
+            DisconnectCause::Transport(_)
+        ));
+    }
 
     #[test]
     fn a_resolver_failure_is_worth_retrying() {
