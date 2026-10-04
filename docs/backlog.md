@@ -40,15 +40,26 @@ parked for later. Each entry says what it is and why it waits.
   exits, but a shutdown that looks drained may not be.
 - **A session that lands on the TCP fallback stays there.** `auto` tries QUIC
   first on every connect, but a session that fell back keeps the fallback until
-  it ends, so one bad handshake leaves UDP services on a single yamux stream
-  for as long as the link holds. Returning needs a prober and a moment to move:
-  reconnecting drops every visitor stream and UDP session. Waits for a
+  it ends, so one bad handshake leaves each UDP service on a single yamux
+  stream for as long as the link holds. Returning needs a prober and a moment
+  to move: reconnecting drops every visitor stream and UDP session. Waits for a
   deployment this hurts.
 - **A TCP peer learns no close reason.** yamux's go-away has no room for a
   code, so `Transport::close` tells a QUIC peer why and a TCP peer nothing.
   `Denied` and `Shutdown` travel as control messages and cover what a client
   acts on, a superseded session among them; `Unresponsive` and the rest reach
   only the local log. The stream records could carry one on the control stream.
+- **A pump counts a direction as finished even when its finish failed.**
+  `SendHalf::finish` and the socket's `shutdown` discard their results, so a
+  pump whose last finish never left still closes its socket cleanly. The other
+  direction has delivered its end by then, and the far end reads a reset on TCP
+  or a connection error on QUIC, so no application is misled today. Waits for a
+  case where one is.
+- **A larger `transport.buffer` coarsens the fallback's interleaving.** A record
+  goes out as one yamux frame, up to 64 KiB. With the default 16 KiB buffer the
+  frames are the size they were; a larger one lets a single stream hold the
+  connection longer between other streams' frames and window updates. Not
+  measured.
 
 ## Deferred from the phase 2b UDP work
 

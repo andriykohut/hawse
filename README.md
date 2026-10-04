@@ -355,10 +355,10 @@ WireGuard peers keeps their packets inside a datagram on a path with the usual
 room for hawse's own header to grow as a service sees more visitors. A service
 with `proxy_protocol` sends the visitor's address in every packet, 7 bytes for
 an IPv4 visitor and 19 for IPv6, so its payloads leave a datagram that much
-sooner. With `prefer = "tcp"` every payload takes that stream. hawse never holds
-a UDP sender back: when the tunnel cannot keep up, packets are dropped, as on
-any congested path. On the fallback every UDP service's traffic from visitor to
-service shares one stream, which caps it well below what QUIC carries;
+sooner. On the fallback every payload takes that stream. hawse never holds a
+UDP sender back: when the tunnel cannot keep up, packets are dropped, as on any
+congested path. On the fallback each UDP service's traffic from visitor to
+service takes one stream, which caps it well below what QUIC carries;
 [docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
 has the loss and jitter measured on both. The service end line in the client's
 log counts packets dropped from a full datagram queue as `queue_full`.
@@ -392,8 +392,8 @@ The rest of `[transport]` is not honoured equally by the two. Both use
 `connection_window` and `buffer`. `stream_window` and `congestion` are QUIC's
 alone: yamux guarantees every stream 256 KiB and grows it only into the
 connection window's slack, so there is no per-stream knob to set, and TCP's
-congestion control belongs to the kernel — so under `prefer = "tcp"` both
-settings are accepted, validated and then ignored.
+congestion control belongs to the kernel — so on the fallback both settings
+are accepted, validated and then ignored.
 
 `--threads` sets the number of worker threads and defaults to the number of
 CPUs.
