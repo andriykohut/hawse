@@ -297,8 +297,15 @@ impl Session {
                         break CloseReason::ControlClosed;
                     }
                 }
-                msg = control.next::<ClientMessage>() => {
-                    let Some(msg) = msg else { break CloseReason::PeerLeft };
+                msg = control.try_next::<ClientMessage>() => {
+                    let msg = match msg {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => break CloseReason::PeerLeft,
+                        Err(err) => {
+                            tracing::warn!(err = %chain(&err), "malformed control frame");
+                            break CloseReason::ControlClosed;
+                        }
+                    };
                     last_heard = Instant::now();
                     let reply = match msg {
                         ClientMessage::Bind { service, kind, port, allow, proxy_protocol } => {
@@ -631,6 +638,21 @@ mod tests {
             .is_ok()
     }
 
+    /// Waits for the session to close `peer`'s connection, which has to be for `reason`.
+    async fn expect_closed(peer: &Peer, reason: CloseReason) {
+        let closed = tokio::time::timeout(Duration::from_secs(5), peer.conn.closed())
+            .await
+            .expect("the session closes within 5 s");
+        assert!(
+            matches!(
+                &closed,
+                quinn::ConnectionError::ApplicationClosed(end)
+                    if end.error_code == quinn::VarInt::from_u32(reason.code())
+            ),
+            "{closed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_session_that_panics_frees_the_ports_it_bound() {
         let shared = Arc::new(Shared::for_tests());
@@ -764,15 +786,26 @@ mod tests {
             (Duration::from_secs(44)..Duration::from_secs(46)).contains(&took),
             "{took:?}"
         );
-        let closed = peer.conn.closed().await;
-        assert!(
-            matches!(
-                &closed,
-                quinn::ConnectionError::ApplicationClosed(end)
-                    if end.error_code == quinn::VarInt::from_u32(CloseReason::Unresponsive.code())
-            ),
-            "{closed:?}"
-        );
+        expect_closed(&peer, CloseReason::Unresponsive).await;
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_is_no_message_ends_the_session_as_a_closed_control_stream() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut peer) = unserved(&shared).await;
+        tokio::spawn(session.serve(control, CancellationToken::new()));
+        // A variant number that says more bytes follow, in a frame that has none.
+        peer.control.send(&u8::MAX).await.unwrap();
+        expect_closed(&peer, CloseReason::ControlClosed).await;
+    }
+
+    #[tokio::test]
+    async fn a_client_that_finishes_its_control_stream_has_left() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut peer) = unserved(&shared).await;
+        tokio::spawn(session.serve(control, CancellationToken::new()));
+        peer.control.finish().await;
+        expect_closed(&peer, CloseReason::PeerLeft).await;
     }
 
     /// A connection that is lost before its peer opens a stream. Keeps the reason it was closed

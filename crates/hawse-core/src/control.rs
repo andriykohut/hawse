@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use hawse_proto::frame::{codec, decode, encode};
+use hawse_proto::frame::{FrameError, codec, decode, encode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -34,8 +34,16 @@ impl Control {
     }
 
     pub async fn next<T: DeserializeOwned>(&mut self) -> Option<T> {
-        let frame = self.rx.next().await?.ok()?;
-        decode(&frame).ok()
+        self.try_next().await.ok().flatten()
+    }
+
+    /// `next` for a caller that tells a frame it cannot decode from the stream ending. `Ok(None)`
+    /// is the end, whether the peer finished the stream or it broke.
+    pub async fn try_next<T: DeserializeOwned>(&mut self) -> Result<Option<T>, FrameError> {
+        let Some(Ok(frame)) = self.rx.next().await else {
+            return Ok(None);
+        };
+        decode(&frame).map(Some)
     }
 
     /// Takes `&mut self`, not `self`, so the receive half survives the call. Consuming it here
