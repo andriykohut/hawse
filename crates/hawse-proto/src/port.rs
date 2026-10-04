@@ -195,7 +195,11 @@ impl FromStr for PortSpan {
 
 impl fmt::Display for PortSpan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.first, self.last)
+        if self.first == self.last {
+            write!(f, "{}", self.first)
+        } else {
+            write!(f, "{}-{}", self.first, self.last)
+        }
     }
 }
 
@@ -379,6 +383,15 @@ mod tests {
             last: 40002,
         };
         assert_eq!(s.to_string(), "40000-40002");
+    }
+
+    #[test]
+    fn single_port_span_displays_as_one_number() {
+        let s = PortSpan {
+            first: 40000,
+            last: 40000,
+        };
+        assert_eq!(s.to_string(), "40000");
     }
 
     #[test]
