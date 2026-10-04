@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use common::{
     DYNAMIC_PORTS, RunningClient, RunningServer, bind_outcome, client_config, client_config_over,
-    echo_server, expect_bound, free_port_outside_pool, next_event, server_config, start_client,
-    start_server,
+    echo_server, expect_bound, fixed_port, next_event, server_config, start_client, start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
@@ -15,6 +14,7 @@ use hawse_core::identity::Identity;
 use hawse_core::transport::TransportKind;
 use hawse_core::transport::quic::QuicError;
 use hawse_proto::msg::BindFailure;
+use hawse_proto::port::Kind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -30,7 +30,7 @@ async fn a_loopback_bind_serves_visitors_on_loopback() {
     // A fixed port outside the shared dynamic pool: with SO_REUSEADDR a loopback
     // bind and another test's wildcard bind can hold the same port at once, and
     // loopback traffic then reaches whichever is more specific.
-    let granted = free_port_outside_pool(&[]).await;
+    let granted = fixed_port(Kind::Tcp);
     let grant = granted.to_string();
     let mut cfg = server_config(&[("test", client_id.public_key(), &[&grant])]);
     cfg.bind = Ipv4Addr::LOCALHOST.into();
@@ -359,8 +359,8 @@ async fn holds_512_visitor_streams_open_at_once_over_tcp() {
 #[tokio::test]
 async fn fixed_ports_need_a_grant() {
     let (server_id, client_id) = ids();
-    let granted = free_port_outside_pool(&[]).await;
-    let denied = free_port_outside_pool(&[granted]).await;
+    let granted = fixed_port(Kind::Tcp);
+    let denied = fixed_port(Kind::Tcp);
     let grant = granted.to_string();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&grant])]),
@@ -839,7 +839,7 @@ async fn a_server_that_goes_quiet_is_reported_at_the_deadline_and_not_a_tick_lat
 #[tokio::test]
 async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let (server_id, client_id) = ids();
-    let granted = free_port_outside_pool(&[]).await;
+    let granted = fixed_port(Kind::Tcp);
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&granted.to_string()])]),
         &server_id,
@@ -883,7 +883,7 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
 /// open until the client had it.
 async fn a_second_session_for_the_same_key_supersedes_the_first(prefer: Prefer) {
     let (server_id, client_id) = ids();
-    let granted = free_port_outside_pool(&[]).await;
+    let granted = fixed_port(Kind::Tcp);
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&granted.to_string()])]),
         &server_id,

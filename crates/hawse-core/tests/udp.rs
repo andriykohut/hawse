@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use common::{
     RunningClient, RunningServer, bind_outcome, client_config, client_config_over, expect_bound,
-    free_udp_port_outside_pool, server_config, start_client, start_server, udp_ask,
-    udp_echo_server, udp_recv, udp_replier, udp_visitor,
+    fixed_port, server_config, start_client, start_server, udp_ask, udp_echo_server, udp_recv,
+    udp_replier, udp_visitor,
 };
 use hawse_core::config::Prefer;
 use hawse_core::identity::Identity;
+use hawse_proto::port::Kind;
 use tokio::net::UdpSocket;
 
 struct Tunnel {
@@ -188,7 +189,7 @@ async fn a_silent_local_service_costs_only_silence_over_tcp() {
 async fn a_fixed_udp_port_is_free_for_the_next_session(prefer: Prefer) {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
-    let granted = free_udp_port_outside_pool().await;
+    let granted = fixed_port(Kind::Udp);
     let grant = format!("{granted}/udp");
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&grant])]),

@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use hawse_core::client::{Client, ClientError, Event};
@@ -14,6 +16,7 @@ use hawse_core::config::{
 use hawse_core::control::Control;
 use hawse_core::frame::read_frame;
 use hawse_core::identity::Identity;
+use hawse_core::net;
 use hawse_core::server::{Server, ServerError};
 use hawse_core::tls;
 use hawse_core::transport::quic::{self, QuicTransport, Tuning};
@@ -284,25 +287,35 @@ pub async fn echo_server() -> SocketAddr {
     addr
 }
 
-/// A port that was free a moment ago; good enough for tests that need a fixed public port.
-pub async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+/// Where tests take their fixed public ports: below the range the kernel draws from, on Linux and
+/// on macOS, for a bind to port 0 and for an outgoing connection, and clear of `DYNAMIC_PORTS`. A
+/// port from that range is free only until the next socket on the machine draws the same number,
+/// and a test leaves its port unbound twice: before the server binds it, and between two sessions.
+const FIXED_PORTS: RangeInclusive<u16> = 20000..=29999;
+const FIXED_PORTS_LEN: u16 = *FIXED_PORTS.end() - *FIXED_PORTS.start() + 1;
 
-/// A `free_port` clear of `DYNAMIC_PORTS` and of `taken`, so a fixed bind cannot collide with a
-/// dynamic one. It loops because the ephemeral range overlaps the pool on Linux.
-pub async fn free_port_outside_pool(taken: &[u16]) -> u16 {
-    loop {
-        let port = free_port().await;
-        if !DYNAMIC_PORTS.contains(&port) && !taken.contains(&port) {
+/// A port in `FIXED_PORTS` that nothing holds, and that no other caller in this process is given.
+/// Probed with the server's own bind on every interface: a port free on loopback can be held on
+/// another of the machine's addresses, and the server is then refused it.
+pub fn fixed_port(kind: Kind) -> u16 {
+    // Each process starts somewhere else in the range, so two test binaries running side by side
+    // do not walk the same ports in the same order.
+    static NEXT: LazyLock<AtomicU16> = LazyLock::new(|| {
+        let start = RandomState::new().hash_one(()) % u64::from(FIXED_PORTS_LEN);
+        AtomicU16::new(u16::try_from(start).expect("below the range's length"))
+    });
+    for _ in 0..FIXED_PORTS_LEN {
+        let port = FIXED_PORTS.start() + NEXT.fetch_add(1, Ordering::Relaxed) % FIXED_PORTS_LEN;
+        let every_interface = Ipv6Addr::UNSPECIFIED.into();
+        let free = match kind {
+            Kind::Tcp => net::bind_tcp(every_interface, port).is_ok(),
+            Kind::Udp => net::bind_udp(every_interface, port).is_ok(),
+        };
+        if free {
             return port;
         }
     }
+    panic!("no free port in {FIXED_PORTS:?}");
 }
 
 /// A client that speaks the protocol by hand, for testing the server without ours.
@@ -395,20 +408,6 @@ impl RawClient {
         match read_frame::<StreamOpen>(&mut recv).await.unwrap() {
             StreamOpen::Bulk { service_id } => (service_id, SendHalf::Quic(send), recv),
             other @ StreamOpen::Visitor(_) => panic!("expected Bulk, got {other:?}"),
-        }
-    }
-}
-
-pub async fn free_udp_port_outside_pool() -> u16 {
-    loop {
-        let port = UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        if !DYNAMIC_PORTS.contains(&port) {
-            return port;
         }
     }
 }
