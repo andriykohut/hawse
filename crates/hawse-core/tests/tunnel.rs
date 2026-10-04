@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    DYNAMIC_PORTS, RunningClient, RunningServer, client_config, client_config_over, echo_server,
-    expect_bound, free_port_outside_pool, next_event, server_config, start_client, start_server,
+    DYNAMIC_PORTS, RunningClient, RunningServer, bind_outcome, client_config, client_config_over,
+    echo_server, expect_bound, free_port_outside_pool, next_event, server_config, start_client,
+    start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
@@ -851,7 +852,12 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
     );
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
-    assert_eq!(expect_bound(&mut first.events, "svc").await.number, granted);
+    let bound = bind_outcome(&mut first.events, "svc").await;
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the first session's bind"
+    );
 
     // Aborting sends no close frame, so the server still holds the port for the dead session.
     first.task.abort();
@@ -859,11 +865,15 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let mut second = start_client(cfg, client_id);
     let bound = tokio::time::timeout(
         Duration::from_secs(10),
-        expect_bound(&mut second.events, "svc"),
+        bind_outcome(&mut second.events, "svc"),
     )
     .await
     .expect("the reconnecting client binds within 10 s");
-    assert_eq!(bound.number, granted);
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the second session's bind"
+    );
     second.cancel.cancel();
     server.cancel.cancel();
 }
@@ -887,16 +897,25 @@ async fn a_second_session_for_the_same_key_supersedes_the_first(prefer: Prefer) 
     );
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
-    assert_eq!(expect_bound(&mut first.events, "svc").await.number, granted);
+    let bound = bind_outcome(&mut first.events, "svc").await;
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the first session's bind"
+    );
 
     let mut second = start_client(cfg, client_id);
     let bound = tokio::time::timeout(
         Duration::from_secs(10),
-        expect_bound(&mut second.events, "svc"),
+        bind_outcome(&mut second.events, "svc"),
     )
     .await
     .expect("the second session binds within 10 s");
-    assert_eq!(bound.number, granted);
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the second session's bind"
+    );
 
     let outcome = tokio::time::timeout(Duration::from_secs(10), first.task)
         .await

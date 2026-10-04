@@ -20,7 +20,7 @@ use hawse_core::transport::quic::{self, QuicTransport, Tuning};
 use hawse_core::transport::tcp;
 use hawse_core::transport::{RecvHalf, SendHalf, Transport};
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{ClientMessage, ServerMessage, StreamOpen};
+use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage, StreamOpen};
 use hawse_proto::port::{Kind, Port, PortSpan};
 use quinn::{Connection, Endpoint};
 use tokio::io::AsyncWriteExt;
@@ -246,12 +246,20 @@ pub async fn next_event(events: &mut mpsc::Receiver<Event>) -> Event {
 }
 
 pub async fn expect_bound(events: &mut mpsc::Receiver<Event>, service: &str) -> Port {
+    bind_outcome(events, service)
+        .await
+        .unwrap_or_else(|reason| panic!("{service} failed to bind: {reason}"))
+}
+
+/// For a test with more than one session, whose failure has to say which of them was refused.
+pub async fn bind_outcome(
+    events: &mut mpsc::Receiver<Event>,
+    service: &str,
+) -> Result<Port, BindFailure> {
     loop {
         match next_event(events).await {
-            Event::Bound { service: s, port } if s == service => return port,
-            Event::BindFailed { service: s, reason } if s == service => {
-                panic!("{s} failed to bind: {reason}")
-            }
+            Event::Bound { service: s, port } if s == service => return Ok(port),
+            Event::BindFailed { service: s, reason } if s == service => return Err(reason),
             _ => {}
         }
     }

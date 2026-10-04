@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{
-    RunningClient, RunningServer, client_config, client_config_over, expect_bound,
+    RunningClient, RunningServer, bind_outcome, client_config, client_config_over, expect_bound,
     free_udp_port_outside_pool, server_config, start_client, start_server, udp_ask,
     udp_echo_server, udp_recv, udp_replier, udp_visitor,
 };
@@ -200,18 +200,22 @@ async fn a_fixed_udp_port_is_free_for_the_next_session(prefer: Prefer) {
 
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
+    let bound = bind_outcome(&mut first.events, "echo").await;
     assert_eq!(
-        expect_bound(&mut first.events, "echo").await.number,
-        granted
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the first session's bind"
     );
     assert_eq!(udp_ask(&visitor, granted, b"first").await, b"first");
     first.cancel.cancel();
     assert!(first.task.await.unwrap().is_ok());
 
     let mut second = start_client(cfg, client_id);
+    let bound = bind_outcome(&mut second.events, "echo").await;
     assert_eq!(
-        expect_bound(&mut second.events, "echo").await.number,
-        granted
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the second session's bind"
     );
     assert_eq!(udp_ask(&visitor, granted, b"second").await, b"second");
 
