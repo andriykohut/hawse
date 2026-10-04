@@ -19,7 +19,9 @@ export PATH
 
 tm kill-server 2>/dev/null || true
 root=$(mktemp -d "${TMPDIR:-/tmp}/hawse-demo.XXXXXX")
-trap 'rm -rf "$root"' EXIT
+# Leaving the session, by detaching as much as by killing it, ends the demo: the panes cannot
+# outlive the files they read.
+trap 'rm -rf "$root"; tm kill-server 2>/dev/null' EXIT
 mkdir -p "$root/server/hawse" "$root/client/hawse" "$root/www"
 echo "hello from the laptop" > "$root/www/index.html"
 
