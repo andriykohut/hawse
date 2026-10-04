@@ -118,7 +118,8 @@ impl SendHalf {
     }
 
     /// On `Tcp` the code is best effort, since this runs in `Drop`s and gets one poll. The abort
-    /// is not: a stream that ends without a finish record reads as reset.
+    /// is not: a stream that ends without a finish record reads as reset. The peer reads it once
+    /// the stream is dropped, which needs the read half gone too.
     pub fn reset(&mut self, code: u32) {
         match self {
             Self::Quic(send) => {

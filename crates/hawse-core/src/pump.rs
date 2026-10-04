@@ -5,6 +5,7 @@ use tokio::io::{
 };
 use tokio::net::TcpStream;
 
+use crate::error::chain;
 use crate::transport::{RecvHalf, SendHalf, reset_code};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,7 +41,10 @@ pub trait Edge: AsyncRead + AsyncWrite + Unpin + Send + 'static {
 impl Edge for TcpStream {
     /// `SO_LINGER` of zero: the kernel answers the close with an RST and drops what it had queued.
     fn abort(&self) {
-        let _ = self.set_zero_linger();
+        if let Err(err) = self.set_zero_linger() {
+            // Without it the close is a FIN, and the visitor reads a clean end.
+            tracing::debug!(err = %chain(&err), "cannot make the close an RST");
+        }
     }
 }
 

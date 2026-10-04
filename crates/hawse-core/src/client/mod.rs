@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen};
+use hawse_proto::msg::{ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen, reset};
 use hawse_proto::port::{Kind, Port, PortRequest};
 use quinn::Endpoint;
 use tokio::sync::mpsc;
@@ -162,7 +162,7 @@ fn ping_interval() -> tokio::time::Interval {
 }
 
 async fn serve_stream(
-    send: SendHalf,
+    mut send: SendHalf,
     mut recv: RecvHalf,
     targets: Targets,
     udp: Arc<udp::Registry>,
@@ -173,7 +173,10 @@ async fn serve_stream(
             visitor::serve(header, send, recv, targets, buffer).await;
         }
         Ok(StreamOpen::Bulk { service_id }) => udp::serve_bulk(service_id, send, recv, udp).await,
-        Err(err) => tracing::debug!(err = %chain(&err), "bad stream header"),
+        Err(err) => {
+            tracing::debug!(err = %chain(&err), "bad stream header");
+            visitor::refuse(&mut send, &mut recv, reset::UNEXPECTED_STREAM).await;
+        }
     }
 }
 
@@ -447,12 +450,12 @@ impl Client {
                 if let Some(err) = quic {
                     tracing::warn!(
                         err = %chain(&err),
-                        "QUIC failed, so this session is on the TCP fallback until it ends; UDP services share one stream there"
+                        "QUIC failed, so this session is on the TCP fallback until it ends; each UDP service's traffic shares one stream there"
                     );
                 } else {
                     tracing::warn!(
                         after = ?self.fallback_after,
-                        "QUIC had not connected, so this session is on the TCP fallback until it ends; UDP services share one stream there"
+                        "QUIC had not connected, so this session is on the TCP fallback until it ends; each UDP service's traffic shares one stream there"
                     );
                 }
                 Ok(dialed)

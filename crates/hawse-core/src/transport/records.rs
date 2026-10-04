@@ -140,7 +140,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for RecordReader<R> {
     }
 }
 
-#[derive(Debug)]
 pub struct RecordWriter<W> {
     inner: W,
     /// Whole records `inner` has not taken yet. Never part of one: a write that is dropped
@@ -157,6 +156,17 @@ impl<W> RecordWriter<W> {
             buf: BytesMut::new(),
             ended: false,
         }
+    }
+}
+
+// By hand because `buf` holds up to a record of tunnel payload, which a derived `Debug` would
+// print into any log that formats the writer.
+impl<W> fmt::Debug for RecordWriter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecordWriter")
+            .field("buffered", &self.buf.len())
+            .field("ended", &self.ended)
+            .finish_non_exhaustive()
     }
 }
 
@@ -220,7 +230,8 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for RecordWriter<W> {
         let len = u16::try_from(n).expect("capped at one record");
         this.buf.extend_from_slice(&record::data(len));
         this.buf.extend_from_slice(&data[..n]);
-        // One poll now, so a caller that never flushes still sends whenever the stream has room.
+        // This one poll sends what the stream takes right now. Whatever it leaves goes out on the
+        // next write, a flush or the shutdown, so a caller that stops writing has to flush.
         if let Poll::Ready(Err(err)) = this.poll_drain(cx) {
             return Poll::Ready(Err(err));
         }
@@ -260,6 +271,17 @@ mod tests {
         *err.get_ref()
             .and_then(|source| source.downcast_ref::<StreamReset>())
             .expect("a StreamReset source")
+    }
+
+    #[tokio::test]
+    async fn debug_shows_the_size_of_what_is_buffered_and_not_the_bytes() {
+        // A full pipe leaves the record in the writer's buffer.
+        let (a, _b) = tokio::io::duplex(1);
+        let mut writer = RecordWriter::new(a);
+        writer.write_all(b"hunter2 hunter2").await.unwrap();
+        let shown = format!("{writer:?}");
+        assert!(shown.contains("buffered: 17"), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
     }
 
     #[tokio::test]

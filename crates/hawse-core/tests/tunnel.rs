@@ -416,6 +416,19 @@ async fn wrong_server_key_fails_before_any_control_message() {
     server.cancel.cancel();
 }
 
+/// The client answered on this stream by resetting it with `code`.
+async fn expect_reset(r: &mut quinn::RecvStream, code: u32, what: &str) {
+    let refusal = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(16)).await;
+    assert!(
+        matches!(
+            &refusal,
+            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(got))))
+                if *got == quinn::VarInt::from_u32(code)
+        ),
+        "client did not reset {what} with {code:#x}: {refusal:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_stream_for_an_unbound_service_never_dials_local() {
     use futures_util::{SinkExt, StreamExt};
@@ -498,15 +511,19 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
             .is_err(),
         "client dialed local for an id it never bound"
     );
-    let refusal = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(16)).await;
-    assert!(
-        matches!(
-            &refusal,
-            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))))
-                if *code == quinn::VarInt::from_u32(reset::UNKNOWN_SERVICE)
-        ),
-        "client did not reset the stream as an unknown service: {refusal:?}"
-    );
+    expect_reset(&mut r, reset::UNKNOWN_SERVICE, "an unknown service").await;
+
+    let (s, mut r) = conn.open_bi().await.unwrap();
+    let mut s = SendHalf::Quic(s);
+    hawse_core::frame::write_body(&mut s, &[0xff])
+        .await
+        .unwrap();
+    expect_reset(
+        &mut r,
+        reset::UNEXPECTED_STREAM,
+        "a stream with no StreamOpen",
+    )
+    .await;
 
     let (s, _r) = conn.open_bi().await.unwrap();
     let mut s = SendHalf::Quic(s);

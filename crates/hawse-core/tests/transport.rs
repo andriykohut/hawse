@@ -202,6 +202,79 @@ async fn a_flushed_reset_carries_its_code_past_a_full_window() {
     let _cs = resetting.await.unwrap();
 }
 
+/// A fresh yamux stream sends 256 KiB before it needs a window update, and a data record costs
+/// its payload plus 3 header bytes. Sixty-four writes of 4,093 bytes fill the window to the byte,
+/// each one leaving the writer's buffer empty, so the write after them is the only thing waiting.
+const FILL_WRITES: usize = 64;
+const FILL_CHUNK: usize = 4096 - 3;
+
+/// Fills the stream's send window exactly and returns the server's read half of it, which has not
+/// been read from.
+async fn fill_the_window(
+    cs: &mut SendHalf,
+    server: &dyn hawse_core::transport::Transport,
+) -> RecvHalf {
+    let chunk = Bytes::from(vec![7u8; FILL_CHUNK]);
+    cs.write_bytes(chunk.clone()).await.unwrap();
+    let (_ss, sr) = server.accept_bi().await.unwrap();
+    for _ in 1..FILL_WRITES {
+        timeout(Duration::from_secs(5), cs.write_bytes(chunk.clone()))
+            .await
+            .expect("a write stalled before the window was full")
+            .unwrap();
+    }
+    sr
+}
+
+/// Reads `len` bytes from `sr` and returns the last four.
+async fn read_through(sr: &mut RecvHalf, len: usize) -> [u8; 4] {
+    let mut got = vec![0u8; len];
+    timeout(Duration::from_secs(10), sr.read_exact(&mut got))
+        .await
+        .expect("the last write never left the sender")
+        .unwrap();
+    got[len - 4..].try_into().unwrap()
+}
+
+/// The write that meets a full window waits behind nothing in the writer, so only its own flush
+/// gets it out once the peer reads.
+#[tokio::test]
+async fn write_bytes_flushes_what_a_full_window_held_back() {
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
+
+    let (mut cs, _cr) = client.open_bi().await.unwrap();
+    let mut sr = fill_the_window(&mut cs, server.as_ref()).await;
+
+    let last = tokio::spawn(async move {
+        cs.write_bytes(Bytes::from_static(b"last")).await.unwrap();
+        cs
+    });
+    let tail = read_through(&mut sr, FILL_WRITES * FILL_CHUNK + 4).await;
+    assert_eq!(&tail, b"last");
+    let _cs = last.await.unwrap();
+}
+
+/// The same for a frame: a 4-byte length and the body leave as one record.
+#[tokio::test]
+async fn write_body_flushes_what_a_full_window_held_back() {
+    let pair = common::tcp_pair().await;
+    let (client, server) = (pair.client, pair.server);
+
+    let (mut cs, _cr) = client.open_bi().await.unwrap();
+    let mut sr = fill_the_window(&mut cs, server.as_ref()).await;
+
+    let last = tokio::spawn(async move {
+        hawse_core::frame::write_body(&mut cs, b"last")
+            .await
+            .unwrap();
+        cs
+    });
+    let tail = read_through(&mut sr, FILL_WRITES * FILL_CHUNK + 8).await;
+    assert_eq!(&tail, b"last");
+    let _cs = last.await.unwrap();
+}
+
 #[tokio::test]
 async fn dropping_a_tcp_stream_unfinished_fails_the_peers_read() {
     let pair = common::tcp_pair().await;

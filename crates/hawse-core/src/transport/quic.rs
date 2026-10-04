@@ -84,7 +84,9 @@ fn transport_config(t: Tuning) -> Result<TransportConfig, QuicError> {
     Ok(tc)
 }
 
-/// An unspecified IPv6 address the host cannot bind falls back to `0.0.0.0` on the same port.
+/// An unspecified IPv6 address the host cannot bind falls back to `0.0.0.0` on the same port,
+/// except when something already holds the port: IPv4 alone would answer only part of the peers,
+/// so that is a bind error.
 pub fn listen(
     addr: SocketAddr,
     tls: rustls::ServerConfig,
@@ -95,6 +97,7 @@ pub fn listen(
     cfg.transport_config(Arc::new(transport_config(tuning)?));
     match Endpoint::server(cfg.clone(), addr) {
         Ok(endpoint) => Ok(endpoint),
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Err(QuicError::Bind(err)),
         Err(err) if addr.is_ipv6() && addr.ip().is_unspecified() => {
             let v4 = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), addr.port());
             Endpoint::server(cfg, v4).map_err(|_| QuicError::Bind(err))
@@ -282,6 +285,25 @@ mod tests {
         let cfg = tls::server_config(cert, key, tls::provider()).unwrap();
         let endpoint = listen("[::]:0".parse().unwrap(), cfg, Tuning::SERVER).unwrap();
         assert!(endpoint.local_addr().unwrap().ip().is_unspecified());
+    }
+
+    /// Falling back to IPv4 here would leave IPv6 peers talking to whoever holds the port.
+    #[tokio::test]
+    async fn an_unspecified_v6_listen_is_refused_when_an_ipv6_address_holds_the_port() {
+        let held = std::net::UdpSocket::bind("[::1]:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        let id = Identity::generate().unwrap();
+        let (cert, key) = id.certificate().unwrap();
+        let cfg = tls::server_config(cert, key, tls::provider()).unwrap();
+        let second = listen(
+            SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), port),
+            cfg,
+            Tuning::SERVER,
+        );
+        match second {
+            Err(QuicError::Bind(err)) => assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse),
+            other => panic!("expected a bind error, got {:?}", other.err()),
+        }
     }
 
     #[tokio::test]
