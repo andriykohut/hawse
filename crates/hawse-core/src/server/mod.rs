@@ -58,6 +58,9 @@ pub struct Shared {
     pub ports: Mutex<PortAllocator>,
     pub buffer: usize,
     pub udp_sessions: usize,
+    /// Streams one session may open toward its client: `limits.streams_per_client` less the
+    /// control stream.
+    pub streams: usize,
     /// One live session per client key, so a reconnecting client is not locked out of its own
     /// ports by the session its previous connection left behind.
     pub sessions: Mutex<HashMap<PublicKey, Arc<Live>>>,
@@ -93,6 +96,7 @@ impl Shared {
             })),
             buffer: 16 << 10,
             udp_sessions: 16,
+            streams: 16,
             sessions: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new(0)),
         }
@@ -177,6 +181,10 @@ impl Server {
             buffer,
             udp_sessions: usize::try_from(cfg.limits.udp_sessions_per_service)
                 .expect("a u32 fits usize on every target hawse builds for"),
+            // Saturating, as `bind` can be handed a config that was never validated.
+            streams: usize::try_from(cfg.limits.streams_per_client)
+                .expect("a u32 fits usize on every target hawse builds for")
+                .saturating_sub(1),
             sessions: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new(cfg.limits.auth_failures_per_minute)),
         });

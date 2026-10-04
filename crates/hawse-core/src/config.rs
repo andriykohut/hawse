@@ -65,6 +65,9 @@ pub struct ClientPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub auth_failures_per_minute: u32,
+    /// The control stream and every stream the server opens toward one client: one per visitor
+    /// connection and one per UDP service. A visitor past it is reset.
+    ///
     /// Costs 256 KiB of receive window per stream on the TCP fallback, where yamux guarantees
     /// every stream that much and the connection window has to cover the whole guarantee: the
     /// default 4096 reserves ~1 GiB per session against QUIC's 64 MiB for the same config.
@@ -241,7 +244,7 @@ pub enum ConfigError {
         "transport idle_timeout must be at least 1s, not {0:?}; the TCP fallback sets its keepalive in whole seconds, and anything shorter rounds down to a zero the kernel rejects"
     )]
     IdleTimeout(Duration),
-    #[error("limits streams_per_client cannot be 0")]
+    #[error("limits streams_per_client must be at least 2: the control stream takes one")]
     StreamsPerClient,
     #[error("limits udp_sessions_per_service cannot be 0")]
     UdpSessions,
@@ -312,9 +315,10 @@ impl ServerConfig {
             self.transport.connection_window,
             self.transport.idle_timeout,
         )?;
-        // A zero budget is not "no limit": yamux answers the first stream over the cap by tearing
-        // the connection down.
-        if self.limits.streams_per_client == 0 {
+        // The control stream takes one, so anything under two leaves no visitor a stream. Nor is a
+        // zero budget "no limit": yamux answers the first stream over the cap by tearing the
+        // connection down.
+        if self.limits.streams_per_client < 2 {
             return Err(ConfigError::StreamsPerClient);
         }
         if self.limits.udp_sessions_per_service == 0 {
@@ -753,10 +757,14 @@ prefer = "tcp"
     }
 
     #[test]
-    fn a_zero_stream_budget_is_rejected() {
+    fn a_stream_budget_with_no_room_for_a_visitor_is_rejected() {
         let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
-        cfg.limits.streams_per_client = 0;
-        assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
+        for streams in [0, 1] {
+            cfg.limits.streams_per_client = streams;
+            assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
+        }
+        cfg.limits.streams_per_client = 2;
+        assert_eq!(cfg.validate(), Ok(()));
     }
 
     #[test]

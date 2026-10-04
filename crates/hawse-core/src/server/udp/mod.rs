@@ -10,7 +10,7 @@ use hawse_proto::msg::{DatagramHeader, StreamOpen};
 use hawse_proto::packet;
 use hawse_proto::port::Port;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use self::table::SessionTable;
@@ -117,12 +117,13 @@ impl UdpService {
 pub async fn serve(
     service: Arc<UdpService>,
     transport: Arc<dyn Transport>,
+    streams: Arc<Semaphore>,
     cancel: CancellationToken,
 ) {
     let (sender, queue) = Sender::new(Arc::clone(&transport), Arc::clone(&service.drops));
     tokio::join!(
         inbound(&service, &sender, &cancel),
-        bulk(&service, &*transport, queue, &cancel),
+        bulk(&service, &*transport, &streams, queue, &cancel),
     );
     tracing::info!(
         service = service.name,
@@ -174,12 +175,19 @@ async fn inbound(service: &UdpService, sender: &Sender, cancel: &CancellationTok
     }
 }
 
+/// The bulk stream is one of the session's `streams`. A service opens one and keeps it, so where
+/// a visitor is turned away this waits its turn; until then large payloads queue and drop.
 async fn bulk(
     service: &UdpService,
     transport: &dyn Transport,
+    streams: &Semaphore,
     mut queue: mpsc::Receiver<Bytes>,
     cancel: &CancellationToken,
 ) {
+    let _permit = tokio::select! {
+        () = cancel.cancelled() => return,
+        permit = streams.acquire() => permit.expect("the session never closes its stream budget"),
+    };
     let opened = tokio::select! {
         () = cancel.cancelled() => return,
         opened = transport.open_bi() => opened,

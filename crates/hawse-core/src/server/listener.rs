@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hawse_proto::msg::{StreamHeader, StreamOpen, reset};
 use hawse_proto::port::Port;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -14,6 +16,9 @@ use crate::net;
 use crate::pump::{Edge, pump};
 use crate::transport::Transport;
 
+/// How often a listener says it is turning visitors away, so that a flood cannot fill the log.
+const REPORT_EVERY: Duration = Duration::from_secs(60);
+
 /// What one TCP listener serves.
 pub struct Public {
     pub service_id: u16,
@@ -22,11 +27,15 @@ pub struct Public {
 }
 
 /// Owns `port`'s claim on the allocator for as long as the socket is open.
+///
+/// A visitor takes one of the session's `streams` for as long as it is pumped, and is reset when
+/// there is none to take.
 pub async fn serve(
     transport: Arc<dyn Transport>,
     listener: TcpListener,
     public: Public,
     shared: Arc<Shared>,
+    streams: Arc<Semaphore>,
     cancel: CancellationToken,
     tasks: TaskTracker,
 ) {
@@ -36,6 +45,8 @@ pub async fn serve(
         allow,
     } = public;
     let buffer = shared.buffer;
+    let mut refused = 0u64;
+    let mut reported: Option<Instant> = None;
     loop {
         let accepted = tokio::select! {
             () = cancel.cancelled() => break,
@@ -62,6 +73,21 @@ pub async fn serve(
             tracing::debug!(%visitor, "visitor is not on the service's allow list");
             continue;
         }
+        // Taken before the task is spawned: a visitor that waited for a stream would hold its
+        // socket and a task while it did, with nothing bounding how many wait.
+        let Ok(permit) = Arc::clone(&streams).try_acquire_owned() else {
+            refused += 1;
+            if reported.is_none_or(|at| at.elapsed() >= REPORT_EVERY) {
+                tracing::warn!(
+                    %port,
+                    refused,
+                    "refusing visitors: the session is at limits.streams_per_client"
+                );
+                reported = Some(Instant::now());
+            }
+            socket.abort();
+            continue;
+        };
         let Ok(listener_addr) = socket.local_addr() else {
             continue;
         };
@@ -71,6 +97,7 @@ pub async fn serve(
         // stream halves do not keep the connection alive, and the last `Arc` dropped ends it.
         let transport = Arc::clone(&transport);
         tasks.spawn(async move {
+            let _permit = permit;
             let (mut send, recv) = match transport.open_bi().await {
                 Ok(streams) => streams,
                 Err(err) => {
