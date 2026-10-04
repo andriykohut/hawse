@@ -64,17 +64,11 @@ pub async fn run(
         }
         greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
     };
-    let Ok(opened) = greeted else {
+    let Ok(Ok((mut control, hello))) = greeted else {
         if stranger {
             shared.auth_failed(remote.ip());
         }
         transport.close(CloseReason::NoHello);
-        return;
-    };
-    let Ok((mut control, hello)) = opened else {
-        if stranger {
-            shared.auth_failed(remote.ip());
-        }
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
@@ -129,6 +123,7 @@ pub async fn run(
             client_name: grant.name.clone(),
         };
         if control.send(&welcome).await.is_err() {
+            transport.close(CloseReason::ControlClosed);
             return;
         }
         tracing::info!(%agent, "client connected");
@@ -514,6 +509,9 @@ mod tests {
     use std::sync::OnceLock;
     use std::task::{Context, Wake, Waker};
 
+    use bytes::Bytes;
+    use futures_util::future::BoxFuture;
+
     use super::*;
     use crate::identity::Identity;
     use crate::tls;
@@ -775,6 +773,60 @@ mod tests {
             ),
             "{closed:?}"
         );
+    }
+
+    /// A connection that is lost before its peer opens a stream. Keeps the reason it was closed
+    /// with, the first one as on a real transport.
+    struct Lost {
+        closed: OnceLock<CloseReason>,
+    }
+
+    impl Transport for Lost {
+        fn open_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>> {
+            Box::pin(async { Err(TransportError::Io(io::ErrorKind::NotConnected.into())) })
+        }
+        fn accept_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>> {
+            Box::pin(async { Err(TransportError::Io(io::ErrorKind::NotConnected.into())) })
+        }
+        fn send_datagram(&self, _data: Bytes) -> Result<(), TransportError> {
+            Err(TransportError::NoDatagrams)
+        }
+        fn recv_datagram(&self) -> BoxFuture<'_, Result<Bytes, TransportError>> {
+            Box::pin(async { Err(TransportError::NoDatagrams) })
+        }
+        fn max_datagram_size(&self) -> Option<usize> {
+            None
+        }
+        fn datagram_send_buffer_space(&self) -> usize {
+            0
+        }
+        fn close(&self, reason: CloseReason) {
+            let _ = self.closed.set(reason);
+        }
+        fn closed(&self) -> BoxFuture<'_, ()> {
+            Box::pin(std::future::pending())
+        }
+        fn remote_address(&self) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], 1))
+        }
+        fn peer_key(&self) -> Option<PublicKey> {
+            Some(PublicKey::from_bytes([1; 32]))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_lost_before_its_control_stream_is_closed_for_want_of_a_hello() {
+        let lost = Arc::new(Lost {
+            closed: OnceLock::new(),
+        });
+        run(
+            lost.clone(),
+            lost.remote_address(),
+            Arc::new(Shared::for_tests()),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(lost.closed.get(), Some(&CloseReason::NoHello));
     }
 
     #[tokio::test]
