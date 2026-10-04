@@ -246,8 +246,10 @@ mod tests {
         }
 
         #[test]
-        fn stream_headers_round_trip(id in any::<u16>(), v4 in any::<[u8; 4]>(), v6 in any::<[u8; 16]>(), p in any::<u16>()) {
-            let h = StreamHeader { service_id: id, visitor: (v4, p).into(), listener: (v6, p).into() };
+        fn stream_headers_round_trip(id in any::<u16>(), v4 in any::<[u8; 4]>(), v6 in any::<[u8; 16]>(), p in any::<u16>(), swapped in any::<bool>()) {
+            let (v4, v6): (SocketAddr, SocketAddr) = ((v4, p).into(), (v6, p).into());
+            let (visitor, listener) = if swapped { (v6, v4) } else { (v4, v6) };
+            let h = StreamHeader { service_id: id, visitor, listener };
             let bytes = encode(&h).unwrap();
             prop_assert_eq!(decode::<StreamHeader>(&bytes).unwrap(), h);
         }
