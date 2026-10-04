@@ -33,43 +33,53 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
-  resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
-  a QUIC visitor's read fails with that code. On yamux neither half carries one,
-  so the visitor gets a clean empty close and reads a refusal as a service that
-  answered with nothing. Same root cause as the truncation gap below, and the
-  same application-level signal fixes both.
-- **`transport.prefer = "auto"` does not fall back to TCP.** It dials QUIC and
-  nothing else, because yamux hands a reset stream to its reader as a clean
-  end-of-stream: a transfer cut short on the fallback arrives looking complete,
-  and neither end can tell. Moving a user onto that because their network blocks
-  UDP trades a loud failure for a silent one, so the fallback is reachable only
-  by asking for it. Give the tunnel an application-level completeness signal — a
-  trailer on each visitor stream, or a length the reader checks — and
-  `Client::connect`'s `Prefer::Auto` arm can fall back again. Lifting the gate
-  means splitting `Prefer::Auto` back off `Prefer::Quic`, choosing a probe
-  deadline and racing `connect_tcp` after it; the deadline wants measuring
-  against a real high-latency path, since the 2 s this branch carried for a
-  while was sized on loopback and would fail a satellite handshake that works.
 - **`Transport::close()` does not complete symmetrically.** On QUIC it is
   immediate and `endpoint.wait_idle()` bounds the flush; on TCP it only cancels
   a token, and the driver then flushes yamux's queue for up to `idle_timeout` in
   a task the server's `TaskTracker` does not know about. The process still
   exits, but a shutdown that looks drained may not be.
-- **`SendHalf::Tcp::reset` is nondeterministic in the peer's write direction.**
-  Its single noop-waker `poll_shutdown` normally emits FIN, but when that poll
-  returns `Pending` the close reaches the peer as an RST from the stream drop
-  instead — leaving it in `RecvClosed` or in `Closed`, and only the latter fails
-  its next write. This matters for the completeness signal above: a probe-write
-  was the leading candidate for telling an abort from a clean finish, and it
-  cannot be, while `reset` picks between FIN and RST on timing.
+- **A session that lands on the TCP fallback stays there.** `auto` tries QUIC
+  first on every connect, but a session that fell back keeps the fallback until
+  it ends, so one bad handshake leaves each UDP service on a single yamux
+  stream for as long as the link holds. Returning needs a prober and a moment
+  to move: reconnecting drops every visitor stream and UDP session. Waits for a
+  deployment this hurts.
+- **A TCP peer learns no close reason.** yamux's go-away has no room for a
+  code, so `Transport::close` tells a QUIC peer why and a TCP peer nothing.
+  `Denied` and `Shutdown` travel as control messages and cover what a client
+  acts on, a superseded session among them; `Unresponsive` and the rest reach
+  only the local log. The stream records could carry one on the control stream.
+- **A pump counts a direction as finished even when its finish failed.**
+  `SendHalf::finish` and the socket's `shutdown` discard their results, so a
+  pump whose last finish never left still closes its socket cleanly. The other
+  direction has delivered its end by then, and the far end reads a reset on TCP
+  or a connection error on QUIC, so no application is misled today. Waits for a
+  case where one is.
+- **A larger `transport.buffer` coarsens the fallback's interleaving.** A record
+  goes out as one yamux frame, up to 64 KiB. With the default 16 KiB buffer the
+  frames are the size they were; a larger one lets a single stream hold the
+  connection longer between other streams' frames and window updates. Not
+  measured.
+- **A dial that loses the `auto` race can cost the client a failed
+  authentication.** The loser is dropped where it stands. Where it had reached
+  the server, as a TCP dial inside its TLS handshake when QUIC connects late or
+  a QUIC handshake in flight on a server with `quic_retry` when TCP wins, the
+  server counts a failed handshake against the client's address: at most one a
+  connect, out of 30 a minute. Letting the loser finish its handshake before
+  closing would cost nothing, since a known key that never greets is not
+  counted. Waits for a deployment where many clients share an address.
 
 ## Deferred from the phase 2b UDP work
 
-- **PROXY protocol for UDP needs the visitor's address on the wire.** A packet
-  carries a service id and a session id; the client never learns who the
-  visitor is. PROXY v2 on a UDP service needs the address sent once per
-  session, which is a wire change.
+- **A UDP PROXY header names the address the client dialed, not the one the
+  visitor reached.** On a wildcard bind the server cannot tell which of its
+  addresses a datagram arrived on without `IP_PKTINFO`, so the destination is
+  right only where the server has one public address or `bind` names one.
+  Waits for a receiver that reads the destination.
+- **A PROXY header takes its room from the largest datagrams.** Header and
+  payload reach `local` as one datagram, so a payload within 28 bytes of the
+  largest a datagram holds, 52 for IPv6, fails to send and is counted as a
+  `socket` drop.
 - **A bulk stream that ends is not reopened.** If the stream fails while the
   session lives, payloads too large for a datagram drop, and on the TCP
   transport all of them do, until the service is bound again. A transport

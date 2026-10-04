@@ -1,8 +1,10 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use hawse_proto::frame::FrameError;
 use hawse_proto::msg::DatagramHeader;
 use hawse_proto::packet;
 use tokio::sync::mpsc;
@@ -135,9 +137,21 @@ impl Sender {
     }
 
     pub fn send(&self, header: DatagramHeader, payload: &[u8]) {
-        let Ok(packet) = packet::encode(header, payload) else {
-            // No socket returns this: UDP caps a payload at 65527 bytes, which fits a frame with its header.
-            tracing::debug!(len = payload.len(), "payload does not fit a frame");
+        self.dispatch(packet::encode(header, payload), payload.len());
+    }
+
+    /// `send`, with the visitor's address in the packet: what a service bound with
+    /// `proxy_protocol` sends toward the client.
+    pub fn send_from(&self, header: DatagramHeader, visitor: SocketAddr, payload: &[u8]) {
+        self.dispatch(packet::encode_from(header, visitor, payload), payload.len());
+    }
+
+    fn dispatch(&self, packet: Result<Bytes, FrameError>, len: usize) {
+        let Ok(packet) = packet else {
+            // Only a payload within a few bytes of UDP's largest, on a service that sends the
+            // visitor's address with it: without the address every payload fits a frame.
+            tracing::debug!(len, "payload does not fit a frame");
+            self.drops.socket();
             return;
         };
         let fits = self

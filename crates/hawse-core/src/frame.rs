@@ -45,5 +45,7 @@ pub async fn write_body(send: &mut SendHalf, body: &[u8]) -> Result<(), StreamFr
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(body);
     send.write_all(&buf).await?;
+    // On the TCP transport a write is only certain to have left once it is flushed.
+    send.flush().await?;
     Ok(())
 }

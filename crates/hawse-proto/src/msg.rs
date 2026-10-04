@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::key::PublicKey;
 use crate::port::Kind;
 
-pub const ALPN: &[u8] = b"hawse/1";
+pub const ALPN: &[u8] = b"hawse/2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -47,6 +47,8 @@ pub enum ServerMessage {
         service: String,
         service_id: u16,
         port: u16,
+        /// The address the public socket is bound to; unspecified for a wildcard bind.
+        address: IpAddr,
     },
     BindFailed {
         service: String,
@@ -109,13 +111,24 @@ pub struct DatagramHeader {
     pub session: u32,
 }
 
-/// Error codes for `SendHalf::reset`. Only the QUIC transport carries them to the peer; a yamux
-/// peer reads end-of-stream with no code.
+/// Error codes for `SendHalf::reset`. QUIC carries them in its own reset; the TCP transport writes
+/// them into a reset record, see `record`.
 pub mod reset {
     pub const UNKNOWN_SERVICE: u32 = 0x10;
     pub const LOCAL_REFUSED: u32 = 0x11;
     pub const ABORTED: u32 = 0x12;
     pub const UNEXPECTED_STREAM: u32 = 0x13;
+
+    /// What a code means, for a log line.
+    pub fn name(code: u32) -> &'static str {
+        match code {
+            UNKNOWN_SERVICE => "unknown service",
+            LOCAL_REFUSED => "local refused",
+            ABORTED => "aborted",
+            UNEXPECTED_STREAM => "unexpected stream",
+            _ => "unknown code",
+        }
+    }
 }
 
 /// Error codes for `Transport::close`. Only the QUIC transport carries them to the peer; yamux's
@@ -185,13 +198,23 @@ mod tests {
                 reason: DenyReason::UnknownKey,
                 key: PublicKey::from_bytes(k)
             }),
-            ("[a-z0-9-]{1,32}", any::<u16>(), 1u16..).prop_map(|(service, service_id, port)| {
-                ServerMessage::Bound {
-                    service,
-                    service_id,
-                    port,
-                }
-            }),
+            (
+                "[a-z0-9-]{1,32}",
+                any::<u16>(),
+                1u16..,
+                prop_oneof![
+                    any::<[u8; 4]>().prop_map(IpAddr::from),
+                    any::<[u8; 16]>().prop_map(IpAddr::from),
+                ]
+            )
+                .prop_map(|(service, service_id, port, address)| {
+                    ServerMessage::Bound {
+                        service,
+                        service_id,
+                        port,
+                        address,
+                    }
+                }),
             (
                 "[a-z0-9-]{1,32}",
                 prop_oneof![
@@ -282,6 +305,15 @@ mod tests {
 
     #[test]
     fn alpn_is_versioned() {
-        assert_eq!(ALPN, b"hawse/1");
+        assert_eq!(ALPN, b"hawse/2");
+    }
+
+    #[test]
+    fn every_reset_code_has_a_name() {
+        assert_eq!(reset::name(reset::UNKNOWN_SERVICE), "unknown service");
+        assert_eq!(reset::name(reset::LOCAL_REFUSED), "local refused");
+        assert_eq!(reset::name(reset::ABORTED), "aborted");
+        assert_eq!(reset::name(reset::UNEXPECTED_STREAM), "unexpected stream");
+        assert_eq!(reset::name(0x7fff), "unknown code");
     }
 }

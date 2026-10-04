@@ -1,14 +1,15 @@
 mod backoff;
+mod race;
 mod udp;
 mod visitor;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage, StreamOpen};
+use hawse_proto::msg::{ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen, reset};
 use hawse_proto::port::{Kind, Port, PortRequest};
 use quinn::Endpoint;
 use tokio::sync::mpsc;
@@ -28,10 +29,16 @@ use crate::transport::{
 };
 use crate::udp::IDLE;
 use backoff::{Backoff, random_unit};
+use race::{Raced, race};
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
 const PING_EVERY: Duration = Duration::from_secs(15);
+
+/// How long `Prefer::Auto` gives QUIC before it starts a TCP dial beside it: above the 99th
+/// percentile of a QUIC handshake over a path losing 5% of its packets, so one lost packet does
+/// not move a session onto the fallback. `docs/measurements.md` carries the measurement.
+pub const FALLBACK_AFTER: Duration = Duration::from_secs(2);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const DRAIN: Duration = Duration::from_secs(2);
 
@@ -99,6 +106,20 @@ pub enum ClientError {
     Shutdown(String),
     #[error("server stopped answering")]
     Unresponsive,
+    #[error(
+        "the server speaks a different hawse protocol than this client's {}; both ends need the same release",
+        String::from_utf8_lossy(ALPN)
+    )]
+    Version,
+    #[error(
+        "cannot connect over QUIC ({}) or over the TCP fallback ({})",
+        chain(.quic),
+        chain(.tcp)
+    )]
+    NoTransport {
+        quic: Box<ClientError>,
+        tcp: Box<ClientError>,
+    },
     #[error("stream window does not fit a QUIC window")]
     Window,
 }
@@ -141,7 +162,7 @@ fn ping_interval() -> tokio::time::Interval {
 }
 
 async fn serve_stream(
-    send: SendHalf,
+    mut send: SendHalf,
     mut recv: RecvHalf,
     targets: Targets,
     udp: Arc<udp::Registry>,
@@ -152,7 +173,10 @@ async fn serve_stream(
             visitor::serve(header, send, recv, targets, buffer).await;
         }
         Ok(StreamOpen::Bulk { service_id }) => udp::serve_bulk(service_id, send, recv, udp).await,
-        Err(err) => tracing::debug!(err = %chain(&err), "bad stream header"),
+        Err(err) => {
+            tracing::debug!(err = %chain(&err), "bad stream header");
+            visitor::refuse(&mut send, &mut recv, reset::UNEXPECTED_STREAM).await;
+        }
     }
 }
 
@@ -161,6 +185,7 @@ pub struct Client {
     identity: Identity,
     targets: Targets,
     udp: Arc<udp::Registry>,
+    fallback_after: Duration,
 }
 
 impl Client {
@@ -170,7 +195,16 @@ impl Client {
             identity,
             targets: Arc::default(),
             udp: Arc::default(),
+            fallback_after: FALLBACK_AFTER,
         }
+    }
+
+    /// Replaces `FALLBACK_AFTER`. No config file reaches this: it is here so tests do not wait
+    /// whole seconds for a fallback.
+    #[must_use]
+    pub fn with_fallback_after(mut self, after: Duration) -> Self {
+        self.fallback_after = after;
+        self
     }
 
     /// Reconnects after every failure, backing off from 1 s to 30 s, until `cancel` fires,
@@ -273,13 +307,13 @@ impl Client {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = Instant::now();
                     match msg {
-                        ServerMessage::Bound { service, service_id, port } => {
+                        ServerMessage::Bound { service, service_id, port, address } => {
                             let Some(expose) = self.cfg.expose.get(&service) else {
                                 tracing::warn!(service, "server bound a service we never asked for");
                                 continue;
                             };
                             let kind = expose.port.kind();
-                            self.register_bound(service.clone(), service_id, expose, &bind_ctx);
+                            self.register_bound(service.clone(), service_id, expose, listener_addr(address, remote, port), &bind_ctx);
                             let port = Port { number: port, kind };
                             emit(events, Event::Bound { service, port });
                         }
@@ -329,7 +363,14 @@ impl Client {
         outcome
     }
 
-    fn register_bound(&self, service: String, service_id: u16, expose: &Expose, ctx: &BindCtx<'_>) {
+    fn register_bound(
+        &self,
+        service: String,
+        service_id: u16,
+        expose: &Expose,
+        listener: SocketAddr,
+        ctx: &BindCtx<'_>,
+    ) {
         let local = expose.local.clone();
         if expose.port.kind() == Kind::Udp {
             self.udp.insert(udp::UdpLocal::new(
@@ -338,6 +379,7 @@ impl Client {
                 local,
                 IDLE,
                 udp::SESSION_CAP,
+                expose.proxy_protocol.then_some(listener),
                 ctx,
             ));
         } else {
@@ -386,13 +428,42 @@ impl Client {
     }
 
     async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
-        match self.cfg.transport.prefer {
-            // `Auto` dials QUIC and nothing else while yamux delivers a reset stream as a clean
-            // end-of-stream: a fallback would answer blocked UDP with a transport on which a
-            // truncated transfer arrives looking complete. Deadline-free for the same reason —
-            // with nothing to fall back to, a probe could only fail a handshake that would land.
-            Prefer::Auto | Prefer::Quic => self.connect_quic(remote).await,
+        let dialed = match self.cfg.transport.prefer {
+            Prefer::Auto => self.connect_auto(remote).await,
+            Prefer::Quic => self.connect_quic(remote).await,
             Prefer::Tcp => self.connect_tcp(remote).await,
+        };
+        dialed.map_err(versioned)
+    }
+
+    /// Neither dial sends a `Hello`, so the one that loses never becomes a session on the server.
+    async fn connect_auto(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        let raced = race(
+            self.connect_quic(remote),
+            || self.connect_tcp(remote),
+            self.fallback_after,
+        )
+        .await;
+        match raced {
+            Raced::Quic(dialed) => Ok(dialed),
+            Raced::Tcp { dialed, quic } => {
+                if let Some(err) = quic {
+                    tracing::warn!(
+                        err = %chain(&err),
+                        "QUIC failed, so this session is on the TCP fallback until it ends; each UDP service's traffic shares one stream there"
+                    );
+                } else {
+                    tracing::warn!(
+                        after = ?self.fallback_after,
+                        "QUIC had not connected, so this session is on the TCP fallback until it ends; each UDP service's traffic shares one stream there"
+                    );
+                }
+                Ok(dialed)
+            }
+            Raced::Failed { quic, tcp } => Err(ClientError::NoTransport {
+                quic: Box::new(quic),
+                tcp: Box::new(tcp),
+            }),
         }
     }
 
@@ -474,6 +545,63 @@ fn emit(events: &mpsc::Sender<Event>, event: Event) {
     }
 }
 
+/// The address a PROXY header names as the destination. A wildcard bind names no address, so it is
+/// the one this client dialed.
+fn listener_addr(bound: IpAddr, dialed: SocketAddr, port: u16) -> SocketAddr {
+    let ip = if bound.is_unspecified() {
+        dialed.ip()
+    } else {
+        bound
+    };
+    SocketAddr::new(ip.to_canonical(), port)
+}
+
+/// Whether a dial failed because the peer offers no protocol this build speaks. TLS says so with
+/// alert 120, which QUIC carries as a crypto error and TLS over TCP as the alert itself.
+fn wrong_version(err: &ClientError) -> bool {
+    const NO_APPLICATION_PROTOCOL: u8 = 120;
+    let refused = quinn::TransportErrorCode::crypto(NO_APPLICATION_PROTOCOL);
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(err) = source {
+        match err.downcast_ref::<quinn::ConnectionError>() {
+            Some(quinn::ConnectionError::ConnectionClosed(close))
+                if close.error_code == refused =>
+            {
+                return true;
+            }
+            Some(quinn::ConnectionError::TransportError(failed)) if failed.code == refused => {
+                return true;
+            }
+            _ => {}
+        }
+        // An `io::Error` reports its inner error's source as its own, skipping the inner error:
+        // tokio-rustls wraps the alert that way, so it has to be reached through `get_ref`.
+        let inner = err
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>());
+        if matches!(
+            inner,
+            Some(rustls::Error::AlertReceived(
+                rustls::AlertDescription::NoApplicationProtocol
+            ))
+        ) {
+            return true;
+        }
+        source = err.source();
+    }
+    false
+}
+
+/// A dial that failed on the protocol version says so, whichever transport met it.
+fn versioned(err: ClientError) -> ClientError {
+    let mismatch = match &err {
+        ClientError::NoTransport { quic, tcp } => wrong_version(quic) || wrong_version(tcp),
+        other => wrong_version(other),
+    };
+    if mismatch { ClientError::Version } else { err }
+}
+
 /// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
 /// sizing, or a message this config cannot encode. DNS failing (`Resolve`, `NoAddress`) is
 /// transient, not a config problem, so it maps to `Transport` and keeps retrying. So does a dial
@@ -488,6 +616,12 @@ fn classify(err: &ClientError) -> DisconnectCause {
         | ClientError::Window
         | ClientError::Tls(_)
         | ClientError::Identity(_) => DisconnectCause::Config(chain(err)),
+        ClientError::NoTransport { quic, tcp }
+            if matches!(classify(quic), DisconnectCause::Config(_))
+                && matches!(classify(tcp), DisconnectCause::Config(_)) =>
+        {
+            DisconnectCause::Config(chain(err))
+        }
         _ => DisconnectCause::Transport(chain(err)),
     }
 }
@@ -506,6 +640,77 @@ mod tests {
     use hawse_proto::frame::FrameError;
 
     use super::*;
+
+    fn no_protocol_alert() -> ClientError {
+        let alert = rustls::Error::AlertReceived(rustls::AlertDescription::NoApplicationProtocol);
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, alert);
+        ClientError::Transport(TransportError::Connection(Box::new(io)))
+    }
+
+    #[test]
+    fn a_mismatch_on_either_dial_is_a_version_error() {
+        let timed_out =
+            || ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
+        let both = ClientError::NoTransport {
+            quic: Box::new(timed_out()),
+            tcp: Box::new(no_protocol_alert()),
+        };
+        assert!(matches!(versioned(both), ClientError::Version));
+        let neither = ClientError::NoTransport {
+            quic: Box::new(timed_out()),
+            tcp: Box::new(timed_out()),
+        };
+        assert!(matches!(
+            versioned(neither),
+            ClientError::NoTransport { .. }
+        ));
+    }
+
+    #[test]
+    fn a_dial_that_failed_both_ways_says_both_and_is_worth_retrying() {
+        let err = ClientError::NoTransport {
+            quic: Box::new(ClientError::Unresponsive),
+            tcp: Box::new(ClientError::ControlClosed),
+        };
+        let text = err.to_string();
+        assert!(text.contains("server stopped answering"), "{text}");
+        assert!(text.contains("control stream closed"), "{text}");
+        assert!(matches!(classify(&err), DisconnectCause::Transport(_)));
+    }
+
+    #[test]
+    fn a_dial_that_failed_both_ways_for_the_config_is_not_retried() {
+        let both = ClientError::NoTransport {
+            quic: Box::new(ClientError::Window),
+            tcp: Box::new(ClientError::Window),
+        };
+        assert!(matches!(classify(&both), DisconnectCause::Config(_)));
+        let one = ClientError::NoTransport {
+            quic: Box::new(ClientError::Window),
+            tcp: Box::new(ClientError::ControlClosed),
+        };
+        assert!(matches!(classify(&one), DisconnectCause::Transport(_)));
+    }
+
+    #[test]
+    fn the_no_protocol_alert_reads_as_a_version_mismatch() {
+        assert!(wrong_version(&no_protocol_alert()));
+        let timed_out = ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
+        assert!(!wrong_version(&timed_out));
+        assert!(matches!(
+            versioned(no_protocol_alert()),
+            ClientError::Version
+        ));
+        assert!(matches!(versioned(timed_out), ClientError::Quic(_)));
+    }
+
+    #[test]
+    fn a_version_mismatch_is_worth_retrying() {
+        assert!(matches!(
+            classify(&ClientError::Version),
+            DisconnectCause::Transport(_)
+        ));
+    }
 
     #[test]
     fn a_resolver_failure_is_worth_retrying() {

@@ -1,11 +1,12 @@
 mod common;
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    DYNAMIC_PORTS, client_config, client_config_over, echo_server, expect_bound,
-    free_port_outside_pool, next_event, server_config, start_client, start_server,
+    DYNAMIC_PORTS, RunningClient, RunningServer, client_config, client_config_over, echo_server,
+    expect_bound, free_port_outside_pool, next_event, server_config, start_client, start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
@@ -15,7 +16,7 @@ use hawse_core::transport::quic::QuicError;
 use hawse_proto::msg::BindFailure;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 fn ids() -> (Identity, Identity) {
@@ -246,6 +247,13 @@ async fn transfers_intact(prefer: Prefer, total: usize) {
             }
             got += n;
         }
+        // The echo ended the stream once it had it all, so the visitor must read that end and not
+        // a reset: the pump aborts its socket unless both directions finished.
+        let end = rd.read(&mut buf).await;
+        assert!(
+            matches!(end, Ok(0)),
+            "the transfer did not end cleanly: {end:?}"
+        );
         writer.await.unwrap();
         server.cancel.cancel();
     };
@@ -390,17 +398,35 @@ async fn wrong_server_key_fails_before_any_control_message() {
         .await
         .expect("the client gives up on the impostor within 10 s")
         .unwrap();
+    // `Auto` tries the fallback too, and the impostor fails the pin on both.
+    let Err(ClientError::NoTransport { quic, tcp }) = result else {
+        panic!("{result:?}");
+    };
     assert!(
         matches!(
-            result,
-            Err(ClientError::Quic(QuicError::Connection(
+            *quic,
+            ClientError::Quic(QuicError::Connection(
                 quinn::ConnectionError::TransportError(_)
-            )))
+            ))
         ),
-        "{result:?}"
+        "{quic:?}"
     );
+    assert!(matches!(*tcp, ClientError::Transport(_)), "{tcp:?}");
     assert!(client.events.try_recv().is_err());
     server.cancel.cancel();
+}
+
+/// The client answered on this stream by resetting it with `code`.
+async fn expect_reset(r: &mut quinn::RecvStream, code: u32, what: &str) {
+    let refusal = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(16)).await;
+    assert!(
+        matches!(
+            &refusal,
+            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(got))))
+                if *got == quinn::VarInt::from_u32(code)
+        ),
+        "client did not reset {what} with {code:#x}: {refusal:?}"
+    );
 }
 
 #[tokio::test]
@@ -461,6 +487,7 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
             service: "svc".into(),
             service_id: 7,
             port: 40000,
+            address: Ipv4Addr::LOCALHOST.into(),
         })
         .unwrap(),
     )
@@ -484,15 +511,19 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
             .is_err(),
         "client dialed local for an id it never bound"
     );
-    let refusal = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(16)).await;
-    assert!(
-        matches!(
-            &refusal,
-            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))))
-                if *code == quinn::VarInt::from_u32(reset::UNKNOWN_SERVICE)
-        ),
-        "client did not reset the stream as an unknown service: {refusal:?}"
-    );
+    expect_reset(&mut r, reset::UNKNOWN_SERVICE, "an unknown service").await;
+
+    let (s, mut r) = conn.open_bi().await.unwrap();
+    let mut s = SendHalf::Quic(s);
+    hawse_core::frame::write_body(&mut s, &[0xff])
+        .await
+        .unwrap();
+    expect_reset(
+        &mut r,
+        reset::UNEXPECTED_STREAM,
+        "a stream with no StreamOpen",
+    )
+    .await;
 
     let (s, _r) = conn.open_bi().await.unwrap();
     let mut s = SendHalf::Quic(s);
@@ -610,38 +641,6 @@ async fn a_client_cancelled_mid_dial_announces_no_retry() {
 }
 
 #[tokio::test]
-async fn a_udp_bind_with_proxy_protocol_is_refused() {
-    let (server_id, client_id) = ids();
-    let server = start_server(
-        &server_config(&[("test", client_id.public_key(), &[])]),
-        &server_id,
-    );
-    let echo = echo_server().await.to_string();
-    let mut cfg = client_config(server.addr, server.key, &[("proxied", &echo, "any/udp")]);
-    cfg.expose.get_mut("proxied").unwrap().proxy_protocol = true;
-    let mut client = start_client(cfg, client_id);
-
-    loop {
-        match next_event(&mut client.events).await {
-            Event::BindFailed { service, reason } => {
-                assert_eq!(
-                    (service.as_str(), reason),
-                    ("proxied", BindFailure::Unsupported)
-                );
-                break;
-            }
-            Event::Bound { service, port } => panic!("{service} was bound on {port}"),
-            _ => {}
-        }
-    }
-
-    let after = tokio::time::timeout(Duration::from_secs(1), client.events.recv()).await;
-    assert!(after.is_err(), "a later event arrived: {after:?}");
-    client.cancel.cancel();
-    server.cancel.cancel();
-}
-
-#[tokio::test]
 async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let (server_id, client_id) = ids();
     let granted = free_port_outside_pool(&[]).await;
@@ -726,43 +725,279 @@ async fn a_second_session_for_the_same_key_supersedes_the_first_over_tcp() {
     a_second_session_for_the_same_key_supersedes_the_first(Prefer::Tcp).await;
 }
 
-#[tokio::test]
-async fn auto_reports_a_retryable_failure_and_never_dials_tcp() {
-    let (server_id, client_id) = ids();
-    // Nothing answers UDP on this port, so the QUIC handshake can only end at the idle timeout —
-    // shortened here, since `Auto` carries no deadline of its own. An accept on the listener would
-    // mean the client had fallen back to the TCP transport.
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let mut cfg = client_config(addr, server_id.public_key(), &[]);
-    assert_eq!(cfg.transport.prefer, Prefer::Auto);
-    cfg.transport.idle_timeout = Duration::from_secs(1);
+/// A server from before the wire changed: ours in every way but the protocol it offers.
+fn old_server_tls(identity: &Identity) -> rustls::ServerConfig {
+    let (cert, key) = identity.certificate().unwrap();
+    let mut cfg = hawse_core::tls::server_config(cert, key, hawse_core::tls::provider()).unwrap();
+    cfg.alpn_protocols = vec![b"hawse/1".to_vec()];
+    cfg
+}
 
-    let (tx, mut events) = mpsc::channel(256);
-    let cancel = CancellationToken::new();
-    let client = Client::new(cfg, client_id);
-    let task = tokio::spawn({
-        let cancel = cancel.clone();
-        async move { client.run(cancel, tx).await }
+#[tokio::test]
+async fn an_old_server_is_reported_as_a_version_mismatch_over_quic() {
+    use hawse_core::transport::quic::{self, Tuning};
+
+    let (server_id, client_id) = ids();
+    let old = quic::listen(
+        "127.0.0.1:0".parse().unwrap(),
+        old_server_tls(&server_id),
+        Tuning::SERVER,
+    )
+    .unwrap();
+    let addr = old.local_addr().unwrap();
+    // The endpoint only answers while something drives its handshakes.
+    tokio::spawn(async move {
+        while let Some(incoming) = old.accept().await {
+            let _ = incoming.await;
+        }
     });
 
-    let disconnect = tokio::time::timeout(Duration::from_secs(20), events.recv())
+    let client = start_client(
+        client_config_over(addr, server_id.public_key(), &[], Prefer::Quic),
+        client_id,
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), client.task)
         .await
-        .expect("a disconnect within 20 s");
-    match disconnect {
-        Some(Event::Disconnected {
-            cause: DisconnectCause::Transport(_),
-            retry_in: Some(_),
-        }) => {}
-        other => panic!("expected a retryable disconnect, got {other:?}"),
-    }
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), listener.accept())
-            .await
-            .is_err(),
-        "auto dialed the TCP fallback"
+        .expect("the dial ends within 5 s")
+        .unwrap();
+    assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
+}
+
+#[tokio::test]
+async fn an_old_server_is_reported_as_a_version_mismatch_over_tcp() {
+    use hawse_core::transport::quic::Tuning;
+    use hawse_core::transport::tcp;
+
+    let (server_id, client_id) = ids();
+    let tls = Arc::new(old_server_tls(&server_id));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let _ = tcp::accept(socket, Arc::clone(&tls), Tuning::SERVER).await;
+        }
+    });
+
+    let client = start_client(
+        client_config_over(addr, server_id.public_key(), &[], Prefer::Tcp),
+        client_id,
+    );
+    let result = tokio::time::timeout(Duration::from_secs(5), client.task)
+        .await
+        .expect("the dial ends within 5 s")
+        .unwrap();
+    assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
+}
+
+/// The TCP twin of `a_stream_for_an_unbound_service_never_dials_local`: a server driven by hand,
+/// so the code can be read where it arrives.
+#[tokio::test]
+async fn a_refusal_carries_its_code_over_tcp() {
+    use hawse_core::control::Control;
+    use hawse_core::frame::write_frame;
+    use hawse_core::tls;
+    use hawse_core::transport::quic::Tuning;
+    use hawse_core::transport::{Transport, reset_code, tcp};
+    use hawse_proto::msg::{ClientMessage, ServerMessage, StreamHeader, StreamOpen, reset};
+
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    let server_tls = Arc::new(tls::server_config(cert, key, tls::provider()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rogue_addr = listener.local_addr().unwrap();
+
+    // Bound and let go, so nothing listens where the client will dial.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut client = start_client(
+        client_config_over(
+            rogue_addr,
+            server_id.public_key(),
+            &[("svc", &dead.to_string(), "any")],
+            Prefer::Tcp,
+        ),
+        client_id,
     );
 
-    cancel.cancel();
-    task.await.unwrap();
+    let (socket, _) = listener.accept().await.unwrap();
+    let rogue: Arc<dyn Transport> = Arc::new(
+        tcp::accept(socket, server_tls, Tuning::SERVER)
+            .await
+            .unwrap(),
+    );
+    let (send, recv) = rogue.accept_bi().await.unwrap();
+    let mut control = Control::new(send, recv);
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Hello { .. })
+    ));
+    control
+        .send(&ServerMessage::Welcome {
+            agent: "rogue".into(),
+            client_name: "test".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Bind { .. })
+    ));
+    control
+        .send(&ServerMessage::Bound {
+            service: "svc".into(),
+            service_id: 7,
+            port: 40000,
+            address: Ipv4Addr::LOCALHOST.into(),
+        })
+        .await
+        .unwrap();
+    expect_bound(&mut client.events, "svc").await;
+
+    let header = |service_id| StreamHeader {
+        service_id,
+        visitor: "203.0.113.9:1".parse().unwrap(),
+        listener: "203.0.113.1:40000".parse().unwrap(),
+    };
+    for (service_id, code) in [(99, reset::UNKNOWN_SERVICE), (7, reset::LOCAL_REFUSED)] {
+        let (mut send, mut recv) = rogue.open_bi().await.unwrap();
+        write_frame(&mut send, &StreamOpen::Visitor(header(service_id)))
+            .await
+            .unwrap();
+        let mut rest = Vec::new();
+        let err = tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(&mut rest))
+            .await
+            .expect("a refusal within 5 s")
+            .expect_err("a refusal must fail the read, not end it");
+        assert_eq!(reset_code(&err), Some(code), "{err:?}");
+    }
+    client.cancel.cancel();
+}
+
+/// A server, and a client exposing `local` as `svc` on a dynamic port over `prefer`.
+async fn tunnel_to(local: SocketAddr, prefer: Prefer) -> (RunningServer, RunningClient, u16) {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let mut client = start_client(
+        client_config_over(
+            server.addr,
+            server.key,
+            &[("svc", &local.to_string(), "any")],
+            prefer,
+        ),
+        client_id,
+    );
+    let port = expect_bound(&mut client.events, "svc").await.number;
+    (server, client, port)
+}
+
+async fn a_local_service_that_resets_gives_the_visitor_a_reset(prefer: Prefer) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 5];
+        socket.read_exact(&mut buf).await.unwrap();
+        socket.set_zero_linger().unwrap();
+    });
+    let (server, client, port) = tunnel_to(local, prefer).await;
+
+    let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    visitor.write_all(b"hello").await.unwrap();
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), visitor.read_to_end(&mut rest))
+        .await
+        .expect("the visitor's connection ends within 5 s");
+    let err = read.expect_err("a service that reset must not read as a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_local_service_that_resets_gives_the_visitor_a_reset_over_quic() {
+    a_local_service_that_resets_gives_the_visitor_a_reset(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn a_local_service_that_resets_gives_the_visitor_a_reset_over_tcp() {
+    a_local_service_that_resets_gives_the_visitor_a_reset(Prefer::Tcp).await;
+}
+
+async fn nothing_listening_on_local_gives_the_visitor_a_reset(prefer: Prefer) {
+    // Bound and let go, so nothing listens where the client will dial.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let (server, client, port) = tunnel_to(dead, prefer).await;
+
+    // Only reads from here on. A socket reports a reset once, to whichever call meets it first,
+    // so a visitor that kept writing could see it there and read end-of-stream after.
+    let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), visitor.read_to_end(&mut rest))
+        .await
+        .expect("the visitor's connection ends within 5 s");
+    let err = read.expect_err("a refused visitor must not read a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn nothing_listening_on_local_gives_the_visitor_a_reset_over_quic() {
+    nothing_listening_on_local_gives_the_visitor_a_reset(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn nothing_listening_on_local_gives_the_visitor_a_reset_over_tcp() {
+    nothing_listening_on_local_gives_the_visitor_a_reset(Prefer::Tcp).await;
+}
+
+async fn a_visitor_that_resets_gives_the_local_service_a_reset(prefer: Prefer) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap();
+    let (seen, hello_arrived) = oneshot::channel();
+    let ending = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 5];
+        socket.read_exact(&mut buf).await.unwrap();
+        seen.send(()).unwrap();
+        let mut rest = Vec::new();
+        socket.read_to_end(&mut rest).await
+    });
+    let (server, client, port) = tunnel_to(local, prefer).await;
+
+    let mut visitor = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    visitor.write_all(b"hello").await.unwrap();
+    // Only once the service has its bytes: a reset can overtake data still on its way.
+    hello_arrived.await.unwrap();
+    visitor.set_zero_linger().unwrap();
+    drop(visitor);
+
+    let read = tokio::time::timeout(Duration::from_secs(5), ending)
+        .await
+        .expect("the service's connection ends within 5 s")
+        .unwrap();
+    let err = read.expect_err("a visitor that reset must not read as a clean end");
+    assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{err:?}");
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_visitor_that_resets_gives_the_local_service_a_reset_over_quic() {
+    a_visitor_that_resets_gives_the_local_service_a_reset(Prefer::Quic).await;
+}
+
+#[tokio::test]
+async fn a_visitor_that_resets_gives_the_local_service_a_reset_over_tcp() {
+    a_visitor_that_resets_gives_the_local_service_a_reset(Prefer::Tcp).await;
 }

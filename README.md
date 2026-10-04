@@ -45,22 +45,24 @@ Working today, with TCP and UDP forwarding and key-based authorization:
   beside it.
 - **Databases and admin interfaces.** `allow` limits a service to the networks
   you list, and the server turns everyone else away. See Configuration.
-- **Networks that block outbound UDP.** `transport.prefer = "tcp"` carries the
-  tunnel over TLS instead of QUIC. Read the caveat under Configuration first:
-  the fallback cannot report a transfer cut short.
+- **Networks that block outbound UDP.** When QUIC does not connect, the client
+  carries the tunnel over TLS instead, and `transport.prefer = "tcp"` asks for
+  that outright.
 - **WireGuard, DNS, and game servers.** `port = "51820/udp"` exposes a UDP
   service. Read the note on UDP under Configuration first: a payload too large
   for one QUIC datagram is carried differently.
 
 Waiting on features that are not implemented yet:
 
-- **UDP services that log or rate-limit by client address** need PROXY
-  protocol v2, which so far reaches TCP services only.
 - **Many HTTPS services on one port 443** need SNI routing.
 
 ## Status
 
 TCP and UDP forwarding work, with fixed or dynamically assigned public ports.
+
+0.5.0 changed the wire format. A 0.5.0 end does not talk to an older one, and a
+0.5.0 client says so when it meets one: upgrade the server and its clients
+together.
 
 Besides the features named above, configuration hot reload and the `expose`,
 `authorize`, `revoke` and `check` subcommands are not implemented either.
@@ -74,9 +76,9 @@ holds the binary, its licenses, `THIRD-PARTY-LICENSES.txt` for the crates
 compiled into it, and the systemd units from `contrib/`:
 
 ```sh
-curl -LO https://github.com/andriykohut/hawse/releases/download/v0.4.0/hawse-0.4.0-x86_64-unknown-linux-musl.tar.gz
-tar -xzf hawse-0.4.0-x86_64-unknown-linux-musl.tar.gz
-install -m755 hawse-0.4.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
+curl -LO https://github.com/andriykohut/hawse/releases/download/v0.5.0/hawse-0.5.0-x86_64-unknown-linux-musl.tar.gz
+tar -xzf hawse-0.5.0-x86_64-unknown-linux-musl.tar.gz
+install -m755 hawse-0.5.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
 ```
 
 `SHA256SUMS` in the same release covers every archive, and
@@ -107,7 +109,7 @@ them, and Docker only forwards ports named when the container starts:
 ```sh
 docker run -d --name hawse-server --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
-  ghcr.io/andriykohut/hawse:0.4.0 server
+  ghcr.io/andriykohut/hawse:0.5.0 server
 ```
 
 The client needs host networking too when a `local` address points at the host.
@@ -117,7 +119,7 @@ On a Compose network it can name other services instead, as in
 ```sh
 docker run -d --name hawse-client --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
-  ghcr.io/andriykohut/hawse:0.4.0 client
+  ghcr.io/andriykohut/hawse:0.5.0 client
 ```
 
 `keygen --out /var/lib/hawse/client.key` with the same volume creates the
@@ -235,13 +237,10 @@ congestion = "bbr"    # or "cubic"
 
 The choice matters most on a path with a long round trip and some random loss,
 where `cubic` shrinks its window on every packet the path loses and `bbr` does
-not. Measured from a home connection through a Hetzner server 27 ms away, with
-forty parallel transfers through the client and a small request timed alongside
-them, median of four runs each: `bbr` reached 204 Mbit/s with the request at
-157 ms (200 ms at p90), a tunnel opening one connection per visitor 199 Mbit/s
-at 158 ms (211), and `cubic` 192 Mbit/s at 165 ms (255). That path lost no
-packets; on one that does, `cubic` falls further behind, as the UDP note below
-shows. `bench/` measures both on the path you have.
+not.
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
+has both measured over a real path, and `bench/` measures them on the path you
+have.
 
 `bind` is the address those public ports listen on. The default answers on
 every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
@@ -278,12 +277,14 @@ of the server's list when the service names none, and a service whose list
 shares nothing with the server's fails to bind as not granted. Without either
 list a service admits everyone.
 
-`proxy_protocol = true` on a TCP service sends a PROXY protocol v2 header ahead
+`proxy_protocol = true` on a service sends a PROXY protocol v2 header ahead
 of each visitor's bytes, naming the visitor's address and the public address it
 reached, so a service that logs or limits by address sees the visitor instead of
 the client. The service has to expect the header, or it reads it as the start
-of the request. UDP services cannot use it yet. Both ends need this release or
-later: an older client accepts the setting but sends no header.
+of the request. On a UDP service the header goes in front of every datagram the
+service receives, and its replies carry none. Where the server answers on every
+interface, a UDP service's header names the address the client dialed as the
+public one, whichever of the server's addresses the visitor reached.
 
 A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
 above, sees every visitor arrive from the proxy, so its allow list and its PROXY
@@ -326,24 +327,24 @@ Client settings: `server` and `server_key` are required, `key` defaults to
 prefer = "auto"    # or "quic", or "tcp"
 ```
 
-`auto` is the default and today dials QUIC and only QUIC, exactly as `quic`
-does; a failed connection is retried from the beginning every five seconds.
-`tcp` selects the fallback transport, which carries every stream over one TLS
-connection multiplexed with yamux — for networks that block outbound UDP.
+`auto` is the default. It dials QUIC, and when QUIC has not connected after 2
+seconds it dials the fallback beside it and takes whichever connects first; if
+QUIC fails sooner, the fallback is dialed at once. `quic` never falls back.
+`tcp` selects the fallback outright, which carries every stream over one TLS
+connection multiplexed with yamux — for networks that block outbound UDP. A
+session that lands on the fallback stays there until it ends, and the client
+logs a warning when it does; the next connection tries QUIC first again. The 2
+seconds are measured, so that one lost packet does not move a session onto the
+fallback: see
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md).
 
-**The TCP fallback cannot detect a truncated transfer.** yamux has no way to
-abort a stream distinguishably from finishing one: the reader sees
-end-of-stream either way. So if a visitor connection is cut short in the
-middle, the data that did arrive is delivered as if it were the whole thing,
-and neither end can tell. On QUIC the stream is reset and the read fails
-loudly. This is why `auto` does not fall back on its own — blocked UDP is not
-consent to silent truncation. Choose `tcp` when the traffic can survive
-arriving short, or when UDP leaves you no other way through.
-
-`auto` stays a separate setting because it is where the fallback returns once a
-visitor stream can report that it arrived whole. Until then it means "let hawse
-choose", and hawse chooses the transport that can tell you when a transfer was
-cut short.
+A visitor's connection that is cut short ends in a connection reset, on either
+transport: when the local service resets it, when nothing is listening on
+`local`, or when the tunnel itself drops. One that finished ends as the service
+ended it. On the fallback that takes a marker written into every stream, at a
+small cost to a request competing with heavy transfers, which
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
+puts a figure on.
 
 A UDP service needs `/udp` on both ends: `port = "51820/udp"` or `"any/udp"` in
 the client's `[expose.NAME]` table, and a grant such as `"51820/udp"` in the
@@ -353,24 +354,16 @@ default MTU is one — goes over a reliable stream instead, where packets arrive
 in order and a lost one delays those behind it. Setting `MTU = 1370` on both
 WireGuard peers keeps their packets inside a datagram on a path with the usual
 1500-byte MTU: payloads up to 1412 bytes crossed as datagrams, and 1370 leaves
-room for hawse's own header to grow as a service sees more visitors. With
-`prefer = "tcp"` every payload takes that stream. hawse never holds a UDP sender
-back: when the tunnel cannot keep up, packets are dropped, as on any congested
-path.
-
-Measured with `iperf3` from a home connection through a Hetzner server: payloads
-of 1100 bytes, small enough for a datagram before QUIC has probed the path,
-crossed from visitor to service with at most 0.04% loss and under 1 ms of
-jitter at 10, 50 and 100 Mbit/s, and from service to visitor with none up to
-50 Mbit/s. At 100 Mbit/s from service to visitor a client on `cubic` lost
-between 0.4% and 41% of packets over ten runs, median 28%: it shrinks its
-window on every packet the path loses, and while it regrows the client queues
-only about 1 MiB of datagrams and drops the oldest. On `bbr`, the client's
-default, the same runs lost 0.03%, worst 0.3%. The service end line in the
-client's log counts these drops as `queue_full`.
-With `prefer = "tcp"`, traffic from visitor to service shares one yamux stream
-and tops out between 40 and 65 Mbit/s, dropping the rest; from service to
-visitor it lost under 2.5% at every rate.
+room for hawse's own header to grow as a service sees more visitors. A service
+with `proxy_protocol` sends the visitor's address in every packet, 7 bytes for
+an IPv4 visitor and 19 for IPv6, so its payloads leave a datagram that much
+sooner. On the fallback every payload takes that stream. hawse never holds a
+UDP sender back: when the tunnel cannot keep up, packets are dropped, as on any
+congested path. On the fallback each UDP service's traffic from visitor to
+service takes one stream, which caps it well below what QUIC carries;
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
+has the loss and jitter measured on both. The service end line in the client's
+log counts packets dropped from a full datagram queue as `queue_full`.
 
 Give a UDP service's `local` as a literal address such as `127.0.0.1:51820`. A
 hostname is looked up again for every new visitor, only its first address is
@@ -401,8 +394,8 @@ The rest of `[transport]` is not honoured equally by the two. Both use
 `connection_window` and `buffer`. `stream_window` and `congestion` are QUIC's
 alone: yamux guarantees every stream 256 KiB and grows it only into the
 connection window's slack, so there is no per-stream knob to set, and TCP's
-congestion control belongs to the kernel — so under `prefer = "tcp"` both
-settings are accepted, validated and then ignored.
+congestion control belongs to the kernel — so on the fallback both settings
+are accepted, validated and then ignored.
 
 `--threads` sets the number of worker threads and defaults to the number of
 CPUs.

@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tls;
 use crate::transport::quic::Tuning;
+use crate::transport::records::{RecordReader, RecordWriter};
 use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError};
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +45,9 @@ fn config(tuning: Tuning) -> yamux::Config {
     cfg.set_max_connection_receive_window(None);
     cfg.set_max_num_streams(streams);
     cfg.set_max_connection_receive_window(Some(window));
+    // A whole record in one frame: a chunk and its header would otherwise straddle the default
+    // 16 KiB split and go out as two.
+    cfg.set_split_send_size(hawse_proto::record::MAX_DATA + 3);
     cfg
 }
 
@@ -215,7 +219,10 @@ impl Transport for TcpTransport {
 
 fn halves(stream: yamux::Stream) -> (SendHalf, RecvHalf) {
     let (recv, send) = tokio::io::split(stream.compat());
-    (SendHalf::Tcp(send), RecvHalf::Tcp(recv))
+    (
+        SendHalf::Tcp(RecordWriter::new(send)),
+        RecvHalf::Tcp(RecordReader::new(recv)),
+    )
 }
 
 enum Step {

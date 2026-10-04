@@ -32,6 +32,8 @@ pub struct UdpService {
     table: Mutex<SessionTable>,
     drops: Arc<Drops>,
     allow: AllowList,
+    /// The client writes a PROXY header for this service, so each packet carries the visitor.
+    proxy_protocol: bool,
     // After `socket`: fields drop in declaration order, and a port released while its socket is
     // still open could be claimed by the next bind and refused by the kernel.
     _claim: PortClaim,
@@ -61,6 +63,7 @@ impl UdpService {
         port: Port,
         shared: Arc<Shared>,
         allow: AllowList,
+        proxy_protocol: bool,
     ) -> Self {
         Self {
             id,
@@ -69,6 +72,7 @@ impl UdpService {
             table: Mutex::new(SessionTable::new(shared.udp_sessions, IDLE)),
             drops: Arc::default(),
             allow,
+            proxy_protocol,
             _claim: PortClaim { port, shared },
         }
     }
@@ -160,7 +164,11 @@ async fn inbound(service: &UdpService, sender: &Sender, cancel: &CancellationTok
                     tracing::debug!(service = service.name, %visitor, session = seen.session, "udp session opened");
                 }
                 let header = DatagramHeader { service_id: service.id, session: seen.session };
-                sender.send(header, &buf[..len]);
+                if service.proxy_protocol {
+                    sender.send_from(header, visitor, &buf[..len]);
+                } else {
+                    sender.send(header, &buf[..len]);
+                }
             }
         }
     }
@@ -273,6 +281,7 @@ mod tests {
             },
             Arc::new(Shared::for_tests()),
             allow,
+            false,
         );
         assert!(!service.admits("127.0.0.1:5000".parse().unwrap()));
         assert!(service.admits("[::ffff:192.0.2.9]:5000".parse().unwrap()));

@@ -21,6 +21,7 @@ use crate::allow::AllowList;
 use crate::control::Control;
 use crate::net;
 use crate::transport::{CloseReason, Transport, TransportError};
+use crate::udp::FINISH_WAIT;
 
 const PING_EVERY: Duration = Duration::from_secs(15);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
@@ -174,7 +175,11 @@ async fn refuse_streams(transport: Arc<dyn Transport>, cancel: CancellationToken
             tracing::debug!("refusing a stream the client opened");
             logged = true;
         }
-        send.reset(reset::UNEXPECTED_STREAM);
+        // Raced against the shutdown: a stream on a stalled link must not hold the session's drain.
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = tokio::time::timeout(FINISH_WAIT, send.reset_flushed(reset::UNEXPECTED_STREAM)) => {}
+        }
         recv.stop(reset::UNEXPECTED_STREAM);
     }
 }
@@ -329,11 +334,6 @@ impl Session {
             );
             return failed(BindFailure::NotGranted);
         };
-        // The client never learns a UDP visitor's address, so it could not write the header.
-        if proxy_protocol && kind == Kind::Udp {
-            tracing::warn!(service, "proxy protocol is not supported on udp yet");
-            return failed(BindFailure::Unsupported);
-        }
         let live = self.services.values().map(|bound| bound.id).collect();
         let Some(id) = self.ids.claim(&live) else {
             tracing::warn!(service, "every service id is taken");
@@ -372,6 +372,7 @@ impl Session {
                     port,
                     Arc::clone(&self.shared),
                     allow,
+                    proxy_protocol,
                 ));
                 self.udp
                     .write()
@@ -392,6 +393,7 @@ impl Session {
             service: service.to_owned(),
             service_id: id,
             port: port.number,
+            address: self.grant.bind,
         }
     }
 

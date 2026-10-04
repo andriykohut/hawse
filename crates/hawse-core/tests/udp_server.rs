@@ -1,5 +1,6 @@
 mod common;
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use common::{
@@ -9,7 +10,7 @@ use common::{
 use hawse_core::config::{Limits, ServerConfig};
 use hawse_core::frame::{read_body, write_body};
 use hawse_core::identity::Identity;
-use hawse_proto::msg::{BindFailure, ClientMessage, DatagramHeader, ServerMessage};
+use hawse_proto::msg::{ClientMessage, DatagramHeader, ServerMessage};
 use hawse_proto::packet;
 use hawse_proto::port::Kind;
 
@@ -174,7 +175,7 @@ async fn a_fixed_udp_port_is_free_again_once_its_session_ends() {
 }
 
 #[tokio::test]
-async fn a_udp_bind_with_proxy_protocol_is_still_refused() {
+async fn a_proxied_udp_service_gets_the_visitors_address_in_each_packet() {
     let (server_id, client_id) = ids();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[])]),
@@ -192,12 +193,51 @@ async fn a_udp_bind_with_proxy_protocol_is_still_refused() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        client.reply().await,
-        ServerMessage::BindFailed {
-            service: "dns".to_owned(),
-            reason: BindFailure::Unsupported,
-        }
-    );
+    let ServerMessage::Bound {
+        service_id,
+        port,
+        address,
+        ..
+    } = client.reply().await
+    else {
+        panic!("expected Bound");
+    };
+    assert!(address.is_unspecified(), "the default bind is a wildcard");
+    let (_bulk_id, _send, _recv) = client.accept_bulk().await;
+
+    let visitor = udp_visitor().await;
+    for query in [&b"first"[..], &b"second"[..]] {
+        visitor.send_to(query, ("127.0.0.1", port)).await.unwrap();
+        let packet = tokio::time::timeout(Duration::from_secs(2), client.conn.read_datagram())
+            .await
+            .expect("a datagram within 2 s")
+            .unwrap();
+        let (header, from, payload) = packet::decode_from(&packet).unwrap();
+        assert_eq!(header.service_id, service_id);
+        // The visitor reached a dual-stack socket IPv4-mapped; the wire carries it as IPv4.
+        assert_eq!(from, visitor.local_addr().unwrap());
+        assert_eq!(payload, query);
+
+        // The way back carries no address: the server reads a plain packet.
+        client
+            .conn
+            .send_datagram(packet::encode(header, b"answer").unwrap())
+            .unwrap();
+        assert_eq!(udp_recv(&visitor).await.as_deref(), Some(&b"answer"[..]));
+    }
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_bind_reports_the_address_it_listens_on() {
+    let (server_id, client_id) = ids();
+    let mut cfg = server_config(&[("test", client_id.public_key(), &[])]);
+    cfg.bind = Ipv4Addr::LOCALHOST.into();
+    let server = start_server(&cfg, &server_id);
+    let mut client = raw_client(&server, &client_id).await;
+    let ServerMessage::Bound { address, .. } = client.bind_udp("dns", None).await else {
+        panic!("expected Bound");
+    };
+    assert_eq!(address, IpAddr::from(Ipv4Addr::LOCALHOST));
     server.cancel.cancel();
 }

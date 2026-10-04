@@ -13,6 +13,8 @@ pub enum FrameError {
     Decode(#[source] postcard::Error),
     #[error("frame of {0} bytes exceeds the {MAX_FRAME} byte limit")]
     TooLarge(usize),
+    #[error("packet's visitor address is malformed")]
+    Visitor,
 }
 
 pub fn codec() -> LengthDelimitedCodec {

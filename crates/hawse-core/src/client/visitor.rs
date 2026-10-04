@@ -10,13 +10,14 @@ use super::Target;
 use crate::error::chain;
 use crate::pump::pump;
 use crate::transport::{RecvHalf, SendHalf};
+use crate::udp::FINISH_WAIT;
 
-/// The matching `stop` is what keeps the reason on both halves: dropping `recv` would send the
-/// server `STOP_SENDING(0)` instead. On the TCP transport neither call carries a code — `stop` is a
-/// no-op and `reset` degrades to a clean shutdown — so the visitor cannot tell a refusal from a
-/// service that answered with nothing.
-pub(super) fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
-    send.reset(code);
+/// The matching `stop` is what keeps the reason on both halves over QUIC: dropping `recv` would
+/// send the server `STOP_SENDING(0)` instead. On the TCP transport the code travels in a record,
+/// so this waits for it to leave before the stream is dropped; the wait is bounded because a
+/// stalled link would otherwise hold a visitor's task.
+pub(super) async fn refuse(send: &mut SendHalf, recv: &mut RecvHalf, code: u32) {
+    let _ = tokio::time::timeout(FINISH_WAIT, send.reset_flushed(code)).await;
     recv.stop(code);
 }
 
@@ -39,7 +40,7 @@ pub async fn serve(
             visitor = %header.visitor,
             "stream for a service we never bound"
         );
-        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE);
+        refuse(&mut send, &mut recv, reset::UNKNOWN_SERVICE).await;
         return;
     };
     let mut socket = match TcpStream::connect(&target.local).await {
@@ -51,7 +52,7 @@ pub async fn serve(
                 err = %chain(&err),
                 "local service refused the connection"
             );
-            refuse(&mut send, &mut recv, reset::LOCAL_REFUSED);
+            refuse(&mut send, &mut recv, reset::LOCAL_REFUSED).await;
             return;
         }
     };
@@ -65,7 +66,7 @@ pub async fn serve(
                 err = %chain(&err),
                 "local service closed before the PROXY header"
             );
-            refuse(&mut send, &mut recv, reset::LOCAL_REFUSED);
+            refuse(&mut send, &mut recv, reset::LOCAL_REFUSED).await;
             return;
         }
     }
@@ -77,6 +78,11 @@ pub async fn serve(
             down = stats.to_stream,
             "visitor done"
         ),
-        Err(err) => tracing::debug!(service = target.service, err = %chain(&err), "visitor ended"),
+        Err(err) => tracing::debug!(
+            service = target.service,
+            reset = err.reset_code().map(reset::name),
+            err = %chain(&err),
+            "visitor ended"
+        ),
     }
 }
