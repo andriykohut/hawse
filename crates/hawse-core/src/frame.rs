@@ -31,6 +31,8 @@ pub async fn read_body(recv: &mut RecvHalf) -> Result<Vec<u8>, StreamFrameError>
 }
 
 /// Matches `hawse_proto::frame::codec()`'s wire format bit-for-bit, so the two are interchangeable across a stream.
+///
+/// Not cancel-safe: dropped before it resolves, it may have written part of the frame, so whatever cancels it (a timeout, a `select!`) must not write to the stream again.
 pub async fn write_frame<T: Serialize>(
     send: &mut SendHalf,
     value: &T,
@@ -38,7 +40,7 @@ pub async fn write_frame<T: Serialize>(
     write_body(send, &frame::encode(value)?).await
 }
 
-/// `body` must already be capped at `MAX_FRAME`; both encoders do that.
+/// `body` must already be capped at `MAX_FRAME`; both encoders do that. No more cancel-safe than `write_frame`.
 pub async fn write_body(send: &mut SendHalf, body: &[u8]) -> Result<(), StreamFrameError> {
     let len = u32::try_from(body.len()).expect("encoders cap bodies below u32::MAX");
     let mut buf = Vec::with_capacity(4 + body.len());
