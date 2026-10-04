@@ -221,9 +221,12 @@ pub struct RunningClient {
 }
 
 pub fn start_client(cfg: ClientConfig, identity: Identity) -> RunningClient {
+    start(Client::new(cfg, identity))
+}
+
+pub fn start(client: Client) -> RunningClient {
     let (tx, events) = mpsc::channel(256);
     let cancel = CancellationToken::new();
-    let client = Client::new(cfg, identity);
     let task = tokio::spawn({
         let cancel = cancel.clone();
         async move { client.run_once(cancel, &tx).await }

@@ -1,4 +1,5 @@
 mod backoff;
+mod race;
 mod udp;
 mod visitor;
 
@@ -28,10 +29,16 @@ use crate::transport::{
 };
 use crate::udp::IDLE;
 use backoff::{Backoff, random_unit};
+use race::{Raced, race};
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
 
 const PING_EVERY: Duration = Duration::from_secs(15);
+
+/// How long `Prefer::Auto` gives QUIC before it starts a TCP dial beside it: above the 99th
+/// percentile of a QUIC handshake over a path losing 5% of its packets, so one lost packet does
+/// not move a session onto the fallback. The README carries the measurement.
+pub const FALLBACK_AFTER: Duration = Duration::from_secs(2);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const DRAIN: Duration = Duration::from_secs(2);
 
@@ -104,6 +111,15 @@ pub enum ClientError {
         String::from_utf8_lossy(ALPN)
     )]
     Version,
+    #[error(
+        "cannot connect over QUIC ({}) or over the TCP fallback ({})",
+        chain(.quic),
+        chain(.tcp)
+    )]
+    NoTransport {
+        quic: Box<ClientError>,
+        tcp: Box<ClientError>,
+    },
     #[error("stream window does not fit a QUIC window")]
     Window,
 }
@@ -166,6 +182,7 @@ pub struct Client {
     identity: Identity,
     targets: Targets,
     udp: Arc<udp::Registry>,
+    fallback_after: Duration,
 }
 
 impl Client {
@@ -175,7 +192,16 @@ impl Client {
             identity,
             targets: Arc::default(),
             udp: Arc::default(),
+            fallback_after: FALLBACK_AFTER,
         }
+    }
+
+    /// Replaces `FALLBACK_AFTER`. No config file reaches this: it is here so tests do not wait
+    /// whole seconds for a fallback.
+    #[must_use]
+    pub fn with_fallback_after(mut self, after: Duration) -> Self {
+        self.fallback_after = after;
+        self
     }
 
     /// Reconnects after every failure, backing off from 1 s to 30 s, until `cancel` fires,
@@ -400,14 +426,42 @@ impl Client {
 
     async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
         let dialed = match self.cfg.transport.prefer {
-            // `Auto` dials QUIC and nothing else while yamux delivers a reset stream as a clean
-            // end-of-stream: a fallback would answer blocked UDP with a transport on which a
-            // truncated transfer arrives looking complete. Deadline-free for the same reason —
-            // with nothing to fall back to, a probe could only fail a handshake that would land.
-            Prefer::Auto | Prefer::Quic => self.connect_quic(remote).await,
+            Prefer::Auto => self.connect_auto(remote).await,
+            Prefer::Quic => self.connect_quic(remote).await,
             Prefer::Tcp => self.connect_tcp(remote).await,
         };
         dialed.map_err(versioned)
+    }
+
+    /// Neither dial sends a `Hello`, so the one that loses never becomes a session on the server.
+    async fn connect_auto(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
+        let raced = race(
+            self.connect_quic(remote),
+            || self.connect_tcp(remote),
+            self.fallback_after,
+        )
+        .await;
+        match raced {
+            Raced::Quic(dialed) => Ok(dialed),
+            Raced::Tcp { dialed, quic } => {
+                if let Some(err) = quic {
+                    tracing::warn!(
+                        err = %chain(&err),
+                        "QUIC failed, so this session is on the TCP fallback until it ends; UDP services share one stream there"
+                    );
+                } else {
+                    tracing::warn!(
+                        after = ?self.fallback_after,
+                        "QUIC had not connected, so this session is on the TCP fallback until it ends; UDP services share one stream there"
+                    );
+                }
+                Ok(dialed)
+            }
+            Raced::Failed { quic, tcp } => Err(ClientError::NoTransport {
+                quic: Box::new(quic),
+                tcp: Box::new(tcp),
+            }),
+        }
     }
 
     async fn connect_quic(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
@@ -538,11 +592,11 @@ fn wrong_version(err: &ClientError) -> bool {
 
 /// A dial that failed on the protocol version says so, whichever transport met it.
 fn versioned(err: ClientError) -> ClientError {
-    if wrong_version(&err) {
-        ClientError::Version
-    } else {
-        err
-    }
+    let mismatch = match &err {
+        ClientError::NoTransport { quic, tcp } => wrong_version(quic) || wrong_version(tcp),
+        other => wrong_version(other),
+    };
+    if mismatch { ClientError::Version } else { err }
 }
 
 /// `Config` marks a failure a retry cannot fix — a malformed address, TLS, identity, window
@@ -582,6 +636,37 @@ mod tests {
         let alert = rustls::Error::AlertReceived(rustls::AlertDescription::NoApplicationProtocol);
         let io = std::io::Error::new(std::io::ErrorKind::InvalidData, alert);
         ClientError::Transport(TransportError::Connection(Box::new(io)))
+    }
+
+    #[test]
+    fn a_mismatch_on_either_dial_is_a_version_error() {
+        let timed_out =
+            || ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
+        let both = ClientError::NoTransport {
+            quic: Box::new(timed_out()),
+            tcp: Box::new(no_protocol_alert()),
+        };
+        assert!(matches!(versioned(both), ClientError::Version));
+        let neither = ClientError::NoTransport {
+            quic: Box::new(timed_out()),
+            tcp: Box::new(timed_out()),
+        };
+        assert!(matches!(
+            versioned(neither),
+            ClientError::NoTransport { .. }
+        ));
+    }
+
+    #[test]
+    fn a_dial_that_failed_both_ways_says_both_and_is_worth_retrying() {
+        let err = ClientError::NoTransport {
+            quic: Box::new(ClientError::Unresponsive),
+            tcp: Box::new(ClientError::ControlClosed),
+        };
+        let text = err.to_string();
+        assert!(text.contains("server stopped answering"), "{text}");
+        assert!(text.contains("control stream closed"), "{text}");
+        assert!(matches!(classify(&err), DisconnectCause::Transport(_)));
     }
 
     #[test]

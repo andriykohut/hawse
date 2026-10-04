@@ -146,9 +146,8 @@ pub struct Expose {
     pub proxy_protocol: bool,
 }
 
-/// `Auto` dials exactly what `Quic` does today. It stays a distinct setting because it is where
-/// the TCP fallback returns once a visitor stream can report that it arrived whole; until then
-/// hawse will not pick a transport on which a truncated transfer looks complete.
+/// `Auto` dials QUIC, and when QUIC has not connected after `client::FALLBACK_AFTER` it dials the
+/// TCP fallback beside it and takes whichever connects first. `Quic` never falls back.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Prefer {
