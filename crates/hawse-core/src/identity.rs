@@ -97,7 +97,7 @@ impl Identity {
             .self_signed(&self.key_pair)
             .map_err(IdentityError::Certificate)?;
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pair.serialize_der()));
-        Ok((cert.der().clone(), key))
+        Ok((cert.into(), key))
     }
 }
 
