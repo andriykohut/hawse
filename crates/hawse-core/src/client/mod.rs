@@ -613,6 +613,12 @@ fn classify(err: &ClientError) -> DisconnectCause {
         | ClientError::Window
         | ClientError::Tls(_)
         | ClientError::Identity(_) => DisconnectCause::Config(chain(err)),
+        ClientError::NoTransport { quic, tcp }
+            if matches!(classify(quic), DisconnectCause::Config(_))
+                && matches!(classify(tcp), DisconnectCause::Config(_)) =>
+        {
+            DisconnectCause::Config(chain(err))
+        }
         _ => DisconnectCause::Transport(chain(err)),
     }
 }
@@ -667,6 +673,20 @@ mod tests {
         assert!(text.contains("server stopped answering"), "{text}");
         assert!(text.contains("control stream closed"), "{text}");
         assert!(matches!(classify(&err), DisconnectCause::Transport(_)));
+    }
+
+    #[test]
+    fn a_dial_that_failed_both_ways_for_the_config_is_not_retried() {
+        let both = ClientError::NoTransport {
+            quic: Box::new(ClientError::Window),
+            tcp: Box::new(ClientError::Window),
+        };
+        assert!(matches!(classify(&both), DisconnectCause::Config(_)));
+        let one = ClientError::NoTransport {
+            quic: Box::new(ClientError::Window),
+            tcp: Box::new(ClientError::ControlClosed),
+        };
+        assert!(matches!(classify(&one), DisconnectCause::Transport(_)));
     }
 
     #[test]

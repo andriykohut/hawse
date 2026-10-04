@@ -104,10 +104,14 @@ async fn auto_reports_both_failures_when_the_server_has_no_fallback() {
     server.cancel.cancel();
 }
 
-/// With one failure allowed a minute, a fallback that counted against the client would lock the
-/// second connect out.
+/// Where UDP is blocked the server never sees the QUIC dial, so a fallback is one clean TCP
+/// session to it and costs nothing; with one failure allowed a minute, a charge would lock the
+/// second connect out. That is not the whole story: a losing dial that does reach the server (QUIC
+/// connecting late while the TCP dial is inside its TLS handshake, or TCP winning while a QUIC
+/// handshake is in flight on a server with `quic_retry`) costs one token, and this test does not
+/// reach those.
 #[tokio::test]
-async fn falling_back_twice_never_counts_against_the_client() {
+async fn falling_back_where_udp_is_blocked_never_counts_against_the_client() {
     let (server_id, client_id) = ids();
     let mut cfg = server_config(&[("test", client_id.public_key(), &[])]);
     cfg.limits.auth_failures_per_minute = 1;
