@@ -33,6 +33,11 @@ pub fn provider() -> Arc<CryptoProvider> {
 
 const ED25519_OID: &str = "1.3.101.112";
 
+/// RFC 8410 fixes every byte ahead of the key: no parameters, no unused bits.
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum PeerKeyError {
     #[error("peer certificate is not valid DER")]
@@ -41,6 +46,8 @@ pub enum PeerKeyError {
     Algorithm(String),
     #[error("peer key is not 32 bytes")]
     Length,
+    #[error("peer key is not the canonical Ed25519 encoding")]
+    Encoding,
 }
 
 pub fn peer_key(cert: &CertificateDer<'_>) -> Result<PublicKey, PeerKeyError> {
@@ -51,7 +58,13 @@ pub fn peer_key(cert: &CertificateDer<'_>) -> Result<PublicKey, PeerKeyError> {
     if oid != ED25519_OID {
         return Err(PeerKeyError::Algorithm(oid));
     }
-    PublicKey::from_slice(&spki.subject_public_key.data).map_err(|_| PeerKeyError::Length)
+    let key =
+        PublicKey::from_slice(&spki.subject_public_key.data).map_err(|_| PeerKeyError::Length)?;
+    // The parser skips parameters and anything after the key; `raw` keeps the lengths that give them away.
+    if spki.raw.strip_prefix(&ED25519_SPKI_PREFIX) != Some(key.as_bytes()) {
+        return Err(PeerKeyError::Encoding);
+    }
+    Ok(key)
 }
 
 fn bad_cert(_: PeerKeyError) -> TlsError {
@@ -339,6 +352,20 @@ mod tests {
                 "{len}"
             );
         }
+    }
+
+    #[test]
+    fn peer_key_rejects_bytes_trailing_the_key() {
+        let algorithm = der(0x30, &ED25519_OID_DER);
+        let cert = cert_around(&spki(&algorithm, &[7; 32], &[0x05, 0x00]));
+        assert!(matches!(peer_key(&cert), Err(PeerKeyError::Encoding)));
+    }
+
+    #[test]
+    fn peer_key_rejects_algorithm_parameters() {
+        let algorithm = der(0x30, &[&ED25519_OID_DER[..], &[0x05, 0x00]].concat());
+        let cert = cert_around(&spki(&algorithm, &[7; 32], &[]));
+        assert!(matches!(peer_key(&cert), Err(PeerKeyError::Encoding)));
     }
 
     #[test]
