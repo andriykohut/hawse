@@ -727,8 +727,10 @@ mod tests {
         // `_peer` is told and neither reads it nor closes, so nothing cuts the linger short.
         stop.cancel();
         live.cancel.cancel();
-        let ended = tokio::time::timeout(crate::server::DRAIN, serving).await;
-        assert!(ended.is_ok(), "the server gave up waiting for the session");
+        tokio::time::timeout(crate::server::DRAIN, serving)
+            .await
+            .expect("the session ends inside the server's wait")
+            .unwrap();
     }
 
     #[tokio::test]
