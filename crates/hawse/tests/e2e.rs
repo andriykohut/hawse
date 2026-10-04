@@ -200,3 +200,48 @@ fn udp_echo_round_trip_through_real_binaries() {
     };
     assert_eq!(&buf[..len], b"ping");
 }
+
+/// Runs `role` on a config holding `text`, and returns its exit code and what it wrote to stderr.
+fn run_with_config(role: &str, text: &str) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("hawse.toml");
+    fs::write(&config, text).unwrap();
+    let out = hawse()
+        .args([role, "--config"])
+        .arg(&config)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    (out.status.code(), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn a_server_config_that_does_not_parse_exits_2_with_its_diagnostic() {
+    let (code, stderr) = run_with_config("server", "listne = \"[::]:4433\"\n");
+    assert!(stderr.contains("listne"), "{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
+fn a_client_config_that_does_not_validate_exits_2_with_its_diagnostic() {
+    let text = "server = \"tunnel.example.com:4433\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n\n[expose.Web]\nlocal = \"127.0.0.1:8080\"\n";
+    let (code, stderr) = run_with_config("client", text);
+    assert!(stderr.contains("expose `Web`"), "{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
+fn a_server_that_cannot_bind_its_listen_port_exits_1() {
+    let pool = ServerConfig::default().dynamic_ports;
+    // A listen port inside the pool is a config error, which is not what this is about.
+    let held = loop {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        if !pool.contains_number(socket.local_addr().unwrap().port()) {
+            break socket;
+        }
+    };
+    let port = held.local_addr().unwrap().port();
+    let (code, stderr) = run_with_config("server", &format!("listen = \"127.0.0.1:{port}\"\n"));
+    assert!(stderr.contains("cannot start the server"), "{stderr}");
+    assert_eq!(code, Some(1), "{stderr}");
+}
