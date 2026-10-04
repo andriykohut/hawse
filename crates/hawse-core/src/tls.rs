@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::ALPN;
@@ -18,14 +18,17 @@ compile_error!("enable exactly one of the `ring` and `aws-lc-rs` features");
 compile_error!("enable one of the `ring` and `aws-lc-rs` features");
 
 pub fn provider() -> Arc<CryptoProvider> {
-    #[cfg(feature = "ring")]
-    {
-        Arc::new(rustls::crypto::ring::default_provider())
-    }
-    #[cfg(feature = "aws-lc-rs")]
-    {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-    }
+    static PROVIDER: OnceLock<Arc<CryptoProvider>> = OnceLock::new();
+    Arc::clone(PROVIDER.get_or_init(|| {
+        #[cfg(feature = "ring")]
+        {
+            Arc::new(rustls::crypto::ring::default_provider())
+        }
+        #[cfg(feature = "aws-lc-rs")]
+        {
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+        }
+    }))
 }
 
 const ED25519_OID: &str = "1.3.101.112";
@@ -251,6 +254,11 @@ mod tests {
         let (cert, key) = id.certificate().unwrap();
         let cfg = client_config(cert, key, pinned, provider()).unwrap();
         ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn provider_is_built_once() {
+        assert!(Arc::ptr_eq(&provider(), &provider()));
     }
 
     #[test]
