@@ -46,8 +46,10 @@ pub async fn serve(
             Err(err) if out_of_descriptors(&err) => {
                 tracing::warn!(err = %chain(&err), "accept failed");
                 // Every accept fails until something closes, so without this the loop spins on it.
-                tokio::time::sleep(ACCEPT_BACKOFF).await;
-                continue;
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(ACCEPT_BACKOFF) => continue,
+                }
             }
             // Anything else is one visitor's doing — see `out_of_descriptors` — and this is the
             // published port, so pausing would hand a stranger its accept rate.
