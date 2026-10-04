@@ -703,6 +703,138 @@ async fn a_client_cancelled_mid_greeting_announces_no_retry() {
     }
 }
 
+/// The client has a runtime of its own here that ends the moment `run_once` returns, as the
+/// process's does: whatever is not on the wire by then is never sent.
+#[tokio::test]
+async fn a_client_turned_away_at_the_greeting_closes_before_it_returns() {
+    use hawse_core::control::Control;
+    use hawse_core::tls;
+    use hawse_core::transport::quic::{self, Tuning};
+    use hawse_core::transport::{RecvHalf, SendHalf};
+    use hawse_proto::msg::{ClientMessage, ServerMessage, close};
+
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    let confused = quic::listen(
+        "127.0.0.1:0".parse().unwrap(),
+        tls::server_config(cert, key, tls::provider()).unwrap(),
+        Tuning::SERVER,
+    )
+    .unwrap();
+    let cfg = client_config_over(
+        confused.local_addr().unwrap(),
+        server_id.public_key(),
+        &[],
+        Prefer::Quic,
+    );
+    let client = Client::new(cfg, client_id);
+    let left = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, _events) = mpsc::channel(16);
+        runtime.block_on(client.run_once(CancellationToken::new(), &tx))
+    });
+    let conn = confused.accept().await.unwrap().await.unwrap();
+    let (send, recv) = conn.accept_bi().await.unwrap();
+    let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Hello { .. })
+    ));
+    let no_greeting = ServerMessage::Pong { nonce: 0 };
+    control.send(&no_greeting).await.unwrap();
+
+    // Well inside the 30 s idle timeout, which is how a server told nothing finds out.
+    let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the client closes within 5 s");
+    assert!(
+        matches!(
+            &closed,
+            quinn::ConnectionError::ApplicationClosed(end)
+                if end.error_code == quinn::VarInt::from_u32(close::SHUTDOWN)
+        ),
+        "{closed:?}"
+    );
+    let result = left.join().unwrap();
+    assert!(
+        matches!(result, Err(ClientError::Protocol(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_goes_quiet_is_reported_at_the_deadline_and_not_a_tick_later() {
+    use hawse_core::control::Control;
+    use hawse_core::tls;
+    use hawse_core::transport::quic::Tuning;
+    use hawse_core::transport::{Transport, tcp};
+    use hawse_proto::msg::{ClientMessage, ServerMessage};
+
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    let tls = Arc::new(tls::server_config(cert, key, tls::provider()).unwrap());
+    // Over TCP: on its way out a QUIC client waits a few round trips for its close to drain, and a
+    // round trip measured on a paused clock comes out seconds long.
+    let quiet = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = client_config_over(
+        quiet.local_addr().unwrap(),
+        server_id.public_key(),
+        &[],
+        Prefer::Tcp,
+    );
+    let mut client = start_client(cfg, client_id);
+    let (socket, _) = quiet.accept().await.unwrap();
+    let transport = tcp::accept(socket, tls, Tuning::SERVER).await.unwrap();
+    let (send, recv) = transport.accept_bi().await.unwrap();
+    let mut control = Control::new(send, recv);
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Hello { .. })
+    ));
+    let welcome = ServerMessage::Welcome {
+        agent: "quiet".to_owned(),
+        client_name: "test".to_owned(),
+    };
+    control.send(&welcome).await.unwrap();
+    assert!(matches!(
+        next_event(&mut client.events).await,
+        Event::Connected { .. }
+    ));
+
+    // Out of step with the ping tick, as a server's last word is: the deadline then falls between
+    // two ticks.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ping = ServerMessage::Ping { nonce: 1 };
+    control.send(&ping).await.unwrap();
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Pong { nonce: 1 })
+    ));
+
+    // Paused only for the wait: a paused clock runs ahead of whatever is still on a real socket.
+    tokio::time::pause();
+    let heard = tokio::time::Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(90), client.task)
+        .await
+        .expect("the client gives up on a server it no longer hears from")
+        .unwrap();
+    let took = heard.elapsed();
+    tokio::time::resume();
+    assert!(
+        matches!(result, Err(ClientError::Unresponsive)),
+        "{result:?}"
+    );
+    // The client heard that ping a moment before the clock stopped, and the tick after the
+    // deadline is nearly 15 s past it.
+    assert!(
+        (Duration::from_secs(44)..Duration::from_secs(46)).contains(&took),
+        "{took:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let (server_id, client_id) = ids();

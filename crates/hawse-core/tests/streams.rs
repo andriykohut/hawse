@@ -5,10 +5,12 @@ use std::time::Duration;
 
 use common::{raw_client, raw_hello, server_config, start_server};
 use hawse_core::control::Control;
+use hawse_core::frame::{read_frame, write_frame};
 use hawse_core::identity::Identity;
 use hawse_core::tls;
-use hawse_core::transport::quic::Tuning;
-use hawse_core::transport::{Transport, reset_code, tcp};
+use hawse_core::transport::quic::{self, Tuning};
+use hawse_core::transport::{RecvHalf, SendHalf, Transport, reset_code, tcp};
+use hawse_proto::frame::MAX_FRAME;
 use hawse_proto::msg::{ClientMessage, ServerMessage, close, reset};
 use hawse_proto::port::Kind;
 use quinn::VarInt;
@@ -164,4 +166,91 @@ async fn a_session_waiting_to_supersede_another_stops_when_the_server_does() {
         ),
         "{closed:?}"
     );
+}
+
+#[tokio::test]
+async fn a_client_that_cannot_be_welcomed_is_told_its_control_stream_closed() {
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let (cert, key) = client_id.certificate().unwrap();
+    let endpoint = quic::dialer(
+        tls::client_config(cert, key, server.key, tls::provider()).unwrap(),
+        Tuning::CLIENT,
+        server.addr,
+    )
+    .unwrap();
+    let conn = quic::connect(&endpoint, server.addr).await.unwrap();
+    let (send, mut recv) = conn.open_bi().await.unwrap();
+    // Ahead of the `Hello`, so the server already has nowhere to write when it comes to answer.
+    recv.stop(VarInt::from_u32(0)).unwrap();
+    let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
+    control
+        .send(&ClientMessage::Hello {
+            name: None,
+            agent: "raw".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the server closes within 5 s");
+    assert!(
+        matches!(
+            &closed,
+            quinn::ConnectionError::ApplicationClosed(end)
+                if end.error_code == VarInt::from_u32(close::CONTROL_CLOSED)
+        ),
+        "{closed:?}"
+    );
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_length_prefix_over_the_limit_ends_the_session_as_a_closed_control_stream() {
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let (cert, key) = client_id.certificate().unwrap();
+    let endpoint = quic::dialer(
+        tls::client_config(cert, key, server.key, tls::provider()).unwrap(),
+        Tuning::CLIENT,
+        server.addr,
+    )
+    .unwrap();
+    let conn = quic::connect(&endpoint, server.addr).await.unwrap();
+    let (send, recv) = conn.open_bi().await.unwrap();
+    let (mut send, mut recv) = (SendHalf::Quic(send), RecvHalf::Quic(recv));
+    let hello = ClientMessage::Hello {
+        name: None,
+        agent: "raw".to_owned(),
+    };
+    write_frame(&mut send, &hello).await.unwrap();
+    assert!(matches!(
+        read_frame::<ServerMessage>(&mut recv).await,
+        Ok(ServerMessage::Welcome { .. })
+    ));
+
+    let over = u32::try_from(MAX_FRAME + 1).unwrap();
+    send.write_all(&over.to_le_bytes()).await.unwrap();
+
+    let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the server closes within 5 s");
+    assert!(
+        matches!(
+            &closed,
+            quinn::ConnectionError::ApplicationClosed(end)
+                if end.error_code == VarInt::from_u32(close::CONTROL_CLOSED)
+        ),
+        "{closed:?}"
+    );
+    server.cancel.cancel();
 }

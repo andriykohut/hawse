@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, reset};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
@@ -64,17 +64,11 @@ pub async fn run(
         }
         greeted = tokio::time::timeout(HELLO_DEADLINE, greeting) => greeted,
     };
-    let Ok(opened) = greeted else {
+    let Ok(Ok((mut control, hello))) = greeted else {
         if stranger {
             shared.auth_failed(remote.ip());
         }
         transport.close(CloseReason::NoHello);
-        return;
-    };
-    let Ok((mut control, hello)) = opened else {
-        if stranger {
-            shared.auth_failed(remote.ip());
-        }
         return;
     };
     let Some(ClientMessage::Hello { agent, .. }) = hello else {
@@ -129,6 +123,7 @@ pub async fn run(
             client_name: grant.name.clone(),
         };
         if control.send(&welcome).await.is_err() {
+            transport.close(CloseReason::ControlClosed);
             return;
         }
         tracing::info!(%agent, "client connected");
@@ -293,17 +288,24 @@ impl Session {
                     told = control.send(&shutdown).await.is_ok().then(tokio::time::Instant::now);
                     break if superseded { CloseReason::Superseded } else { CloseReason::Shutdown };
                 }
+                () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
+                    break CloseReason::Unresponsive;
+                }
                 _ = ping.tick() => {
-                    if last_heard.elapsed() > PONG_DEADLINE {
-                        break CloseReason::Unresponsive;
-                    }
                     nonce += 1;
                     if control.send(&ServerMessage::Ping { nonce }).await.is_err() {
                         break CloseReason::ControlClosed;
                     }
                 }
-                msg = control.next::<ClientMessage>() => {
-                    let Some(msg) = msg else { break CloseReason::PeerLeft };
+                msg = control.try_next::<ClientMessage>() => {
+                    let msg = match msg {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) => break CloseReason::PeerLeft,
+                        Err(err) => {
+                            tracing::warn!(err = %chain(&err), "malformed control frame");
+                            break CloseReason::ControlClosed;
+                        }
+                    };
                     last_heard = Instant::now();
                     let reply = match msg {
                         ClientMessage::Bind { service, kind, port, allow, proxy_protocol } => {
@@ -514,6 +516,9 @@ mod tests {
     use std::sync::OnceLock;
     use std::task::{Context, Wake, Waker};
 
+    use bytes::Bytes;
+    use futures_util::future::BoxFuture;
+
     use super::*;
     use crate::identity::Identity;
     use crate::tls;
@@ -523,7 +528,7 @@ mod tests {
     /// The client's end of a session built by `unserved`.
     struct Peer {
         control: Control,
-        _conn: quinn::Connection,
+        conn: quinn::Connection,
         _endpoints: (quinn::Endpoint, quinn::Endpoint),
     }
 
@@ -581,7 +586,7 @@ mod tests {
         let (send, recv) = conn.open_bi().await.unwrap();
         let mut peer = Peer {
             control: Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv)),
-            _conn: conn,
+            conn,
             _endpoints: (server, client),
         };
         // A stream reaches the other end with its first bytes, not before.
@@ -631,6 +636,21 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), granted)
             .await
             .is_ok()
+    }
+
+    /// Waits for the session to close `peer`'s connection, which has to be for `reason`.
+    async fn expect_closed(peer: &Peer, reason: CloseReason) {
+        let closed = tokio::time::timeout(Duration::from_secs(5), peer.conn.closed())
+            .await
+            .expect("the session closes within 5 s");
+        assert!(
+            matches!(
+                &closed,
+                quinn::ConnectionError::ApplicationClosed(end)
+                    if end.error_code == quinn::VarInt::from_u32(reason.code())
+            ),
+            "{closed:?}"
+        );
     }
 
     #[tokio::test]
@@ -731,6 +751,115 @@ mod tests {
             .await
             .expect("the session ends inside the server's wait")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_goes_quiet_is_dropped_at_the_deadline_and_not_a_tick_later() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut peer) = unserved(&shared).await;
+        let serving = tokio::spawn(session.serve(control, CancellationToken::new()));
+        // Out of step with the ping tick, as a client's last word is: the deadline then falls
+        // between two ticks.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let ping = ClientMessage::Ping { nonce: 1 };
+        peer.control.send(&ping).await.unwrap();
+        loop {
+            let reply = peer.control.next::<ServerMessage>().await;
+            if let ServerMessage::Pong { nonce: 1 } = reply.expect("control stream open") {
+                break;
+            }
+        }
+
+        // Paused only for the wait: a paused clock runs ahead of whatever is still on a real
+        // socket.
+        tokio::time::pause();
+        let heard = Instant::now();
+        tokio::time::timeout(2 * PONG_DEADLINE, serving)
+            .await
+            .expect("the session gives up on a client it no longer hears from")
+            .unwrap();
+        let took = heard.elapsed();
+        tokio::time::resume();
+        // The session heard that ping a moment before the clock stopped, and the tick after the
+        // deadline is nearly 15 s past it.
+        assert!(
+            (Duration::from_secs(44)..Duration::from_secs(46)).contains(&took),
+            "{took:?}"
+        );
+        expect_closed(&peer, CloseReason::Unresponsive).await;
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_is_no_message_ends_the_session_as_a_closed_control_stream() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut peer) = unserved(&shared).await;
+        tokio::spawn(session.serve(control, CancellationToken::new()));
+        // A variant number that says more bytes follow, in a frame that has none.
+        peer.control.send(&u8::MAX).await.unwrap();
+        expect_closed(&peer, CloseReason::ControlClosed).await;
+    }
+
+    #[tokio::test]
+    async fn a_client_that_finishes_its_control_stream_has_left() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut peer) = unserved(&shared).await;
+        tokio::spawn(session.serve(control, CancellationToken::new()));
+        peer.control.finish().await;
+        expect_closed(&peer, CloseReason::PeerLeft).await;
+    }
+
+    /// A connection that is lost before its peer opens a stream. Keeps the reason it was closed
+    /// with, the first one as on a real transport.
+    struct Lost {
+        closed: OnceLock<CloseReason>,
+    }
+
+    impl Transport for Lost {
+        fn open_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>> {
+            Box::pin(async { Err(TransportError::Io(io::ErrorKind::NotConnected.into())) })
+        }
+        fn accept_bi(&self) -> BoxFuture<'_, Result<(SendHalf, RecvHalf), TransportError>> {
+            Box::pin(async { Err(TransportError::Io(io::ErrorKind::NotConnected.into())) })
+        }
+        fn send_datagram(&self, _data: Bytes) -> Result<(), TransportError> {
+            Err(TransportError::NoDatagrams)
+        }
+        fn recv_datagram(&self) -> BoxFuture<'_, Result<Bytes, TransportError>> {
+            Box::pin(async { Err(TransportError::NoDatagrams) })
+        }
+        fn max_datagram_size(&self) -> Option<usize> {
+            None
+        }
+        fn datagram_send_buffer_space(&self) -> usize {
+            0
+        }
+        fn close(&self, reason: CloseReason) {
+            let _ = self.closed.set(reason);
+        }
+        fn closed(&self) -> BoxFuture<'_, ()> {
+            Box::pin(std::future::pending())
+        }
+        fn remote_address(&self) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], 1))
+        }
+        fn peer_key(&self) -> Option<PublicKey> {
+            Some(PublicKey::from_bytes([1; 32]))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_lost_before_its_control_stream_is_closed_for_want_of_a_hello() {
+        let lost = Arc::new(Lost {
+            closed: OnceLock::new(),
+        });
+        run(
+            lost.clone(),
+            lost.remote_address(),
+            Arc::new(Shared::for_tests()),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(lost.closed.get(), Some(&CloseReason::NoHello));
     }
 
     #[tokio::test]

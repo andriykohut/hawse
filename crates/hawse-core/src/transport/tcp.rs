@@ -110,7 +110,7 @@ type OpenRequest = oneshot::Sender<Result<yamux::Stream, TransportError>>;
 /// error `open_bi` returns there is not a per-stream failure — the transport is already dead.
 ///
 /// What notices a peer that vanished silently is the control-stream heartbeat, which runs on both
-/// transports and reports in 45 to 60 s. The kernel keepalive configured here is only the backstop
+/// transports and reports in 45 s. The kernel keepalive configured here is only the backstop
 /// under it, and is far slower: `Tuning::idle_timeout` of quiet plus a probe schedule that on
 /// stock Linux and macOS runs another nine or ten minutes.
 ///
