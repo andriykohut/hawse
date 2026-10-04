@@ -241,8 +241,8 @@ async fn transfers_intact(prefer: Prefer, total: usize) {
         while got < total {
             let n = rd.read(&mut buf).await.unwrap();
             assert!(n > 0, "eof after {got} bytes");
-            for &b in &buf[..n] {
-                assert_eq!(u32::from(b), expected % 251, "corruption at byte {got}");
+            for (at, &b) in (got..).zip(&buf[..n]) {
+                assert_eq!(u32::from(b), expected % 251, "corruption at byte {at}");
                 expected = (expected + 1) % 65536;
             }
             got += n;
