@@ -262,7 +262,10 @@ pub async fn echo_server() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("the echo server accepts a connection");
             tokio::spawn(async move {
                 let (mut rd, mut wr) = socket.split();
                 let _ = tokio::io::copy(&mut rd, &mut wr).await;

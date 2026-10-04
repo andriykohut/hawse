@@ -25,6 +25,14 @@ fn pattern(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
+/// `assert_eq!` on payloads this size would print both of them in full.
+#[track_caller]
+fn assert_same_bytes(got: &[u8], expected: &[u8]) {
+    assert_eq!(got.len(), expected.len(), "the lengths differ");
+    let differs = got.iter().zip(expected).position(|(a, b)| a != b);
+    assert_eq!(differs, None, "the first byte that differs");
+}
+
 /// A pipe that remembers whether `pump` aborted it.
 struct Watched {
     pipe: DuplexStream,
@@ -146,8 +154,8 @@ async fn moves_large_payloads_intact_both_ways() {
 
     writer_far.await.unwrap();
     writer_peer.await.unwrap();
-    assert_eq!(reader_far.await.unwrap(), down_expected);
-    assert_eq!(reader_peer.await.unwrap(), up_expected);
+    assert_same_bytes(&reader_far.await.unwrap(), &down_expected);
+    assert_same_bytes(&reader_peer.await.unwrap(), &up_expected);
     let stats = pumped.await.unwrap().unwrap();
     assert_eq!((stats.to_stream, stats.to_socket), (LEN as u64, LEN as u64));
 }

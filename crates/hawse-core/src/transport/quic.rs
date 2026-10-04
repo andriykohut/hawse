@@ -127,7 +127,7 @@ pub fn dialer(
 }
 
 pub async fn connect(endpoint: &Endpoint, remote: SocketAddr) -> Result<Connection, QuicError> {
-    // The pinned-key verifier ignores server names.
+    // "hawse" is a placeholder: the pinned-key verifier ignores server names.
     Ok(endpoint.connect(remote, "hawse")?.await?)
 }
 
