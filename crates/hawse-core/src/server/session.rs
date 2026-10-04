@@ -277,7 +277,7 @@ impl Session {
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_heard = Instant::now();
         let mut nonce = 0u64;
-        let mut told_client = false;
+        let mut told = None;
 
         let mine = self.claim.live.cancel.clone();
         let reason = loop {
@@ -289,7 +289,8 @@ impl Session {
                     } else {
                         "server shutting down"
                     };
-                    told_client = control.send(&ServerMessage::Shutdown { reason: why.to_owned() }).await.is_ok();
+                    let shutdown = ServerMessage::Shutdown { reason: why.to_owned() };
+                    told = control.send(&shutdown).await.is_ok().then(tokio::time::Instant::now);
                     break if superseded { CloseReason::Superseded } else { CloseReason::Shutdown };
                 }
                 _ = ping.tick() => {
@@ -336,9 +337,10 @@ impl Session {
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
         drop(self.claim);
         // A QUIC `close` drops whatever is not yet on the wire, so let a client that was told why
-        // read it and close first.
-        if told_client {
-            let _ = tokio::time::timeout(SHUTDOWN_LINGER, self.transport.closed()).await;
+        // read it and close first. Counted from the telling, so it runs alongside the drain and
+        // the two together stay inside the server's wait.
+        if let Some(told) = told {
+            let _ = tokio::time::timeout_at(told + SHUTDOWN_LINGER, self.transport.closed()).await;
         }
         self.transport.close(reason);
     }
@@ -710,6 +712,23 @@ mod tests {
 
         drop(session);
         assert_eq!(watcher.at_wake.get(), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_drain_runs_out_still_ends_inside_the_servers_wait() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, _peer) = unserved(&shared).await;
+        let live = Arc::clone(&session.claim.live);
+        // Stands in for a visitor the shutdown does not end, so the drain runs its whole length.
+        session.tasks.spawn(std::future::pending::<()>());
+        let stop = CancellationToken::new();
+        let serving = tokio::spawn(session.serve(control, stop.clone()));
+
+        // `_peer` is told and neither reads it nor closes, so nothing cuts the linger short.
+        stop.cancel();
+        live.cancel.cancel();
+        let ended = tokio::time::timeout(crate::server::DRAIN, serving).await;
+        assert!(ended.is_ok(), "the server gave up waiting for the session");
     }
 
     #[tokio::test]
