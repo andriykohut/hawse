@@ -158,6 +158,17 @@ async fn open_control(transport: &Arc<dyn Transport>) -> Result<Control, ClientE
     Ok(Control::new(send, recv))
 }
 
+/// How a session ends, however far it got. The last wait is what puts the close on the wire: a
+/// caller may drop its runtime as soon as the session returns.
+async fn hang_up(transport: &Arc<dyn Transport>, tasks: &TaskTracker, endpoint: Option<Endpoint>) {
+    tasks.close();
+    transport.close(CloseReason::Shutdown);
+    let _ = tokio::time::timeout(DRAIN, tasks.wait()).await;
+    if let Some(endpoint) = endpoint {
+        endpoint.wait_idle().await;
+    }
+}
+
 fn ping_interval() -> tokio::time::Interval {
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -297,22 +308,27 @@ impl Client {
             mut control,
         } = dialed;
 
-        let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
-        *welcomed = Some(Instant::now());
-        emit(
-            events,
-            Event::Connected {
-                remote,
-                transport: kind,
-                name: client_name,
-                agent,
-            },
-        );
-
-        self.send_binds(&mut control).await?;
+        let tasks = TaskTracker::new();
+        let greeting = async {
+            let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
+            *welcomed = Some(Instant::now());
+            emit(
+                events,
+                Event::Connected {
+                    remote,
+                    transport: kind,
+                    name: client_name,
+                    agent,
+                },
+            );
+            self.send_binds(&mut control).await
+        };
+        if let Err(err) = greeting.await {
+            hang_up(&transport, &tasks, endpoint).await;
+            return Err(err);
+        }
 
         self.targets.write().expect("targets lock").clear();
-        let tasks = TaskTracker::new();
         self.udp.clear();
         let udp_cancel = CancellationToken::new();
         let bind_ctx = BindCtx {
@@ -388,12 +404,7 @@ impl Client {
         // Each service holds the transport through its `Sender`; on the TCP transport the
         // connection lives until the last handle drops.
         self.udp.clear();
-        tasks.close();
-        transport.close(CloseReason::Shutdown);
-        let _ = tokio::time::timeout(DRAIN, tasks.wait()).await;
-        if let Some(endpoint) = endpoint {
-            endpoint.wait_idle().await;
-        }
+        hang_up(&transport, &tasks, endpoint).await;
         outcome
     }
 

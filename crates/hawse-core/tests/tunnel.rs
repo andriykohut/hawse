@@ -703,6 +703,68 @@ async fn a_client_cancelled_mid_greeting_announces_no_retry() {
     }
 }
 
+/// The client has a runtime of its own here that ends the moment `run_once` returns, as the
+/// process's does: whatever is not on the wire by then is never sent.
+#[tokio::test]
+async fn a_client_turned_away_at_the_greeting_closes_before_it_returns() {
+    use hawse_core::control::Control;
+    use hawse_core::tls;
+    use hawse_core::transport::quic::{self, Tuning};
+    use hawse_core::transport::{RecvHalf, SendHalf};
+    use hawse_proto::msg::{ClientMessage, ServerMessage, close};
+
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    let confused = quic::listen(
+        "127.0.0.1:0".parse().unwrap(),
+        tls::server_config(cert, key, tls::provider()).unwrap(),
+        Tuning::SERVER,
+    )
+    .unwrap();
+    let cfg = client_config_over(
+        confused.local_addr().unwrap(),
+        server_id.public_key(),
+        &[],
+        Prefer::Quic,
+    );
+    let client = Client::new(cfg, client_id);
+    let left = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, _events) = mpsc::channel(16);
+        runtime.block_on(client.run_once(CancellationToken::new(), &tx))
+    });
+    let conn = confused.accept().await.unwrap().await.unwrap();
+    let (send, recv) = conn.accept_bi().await.unwrap();
+    let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
+    assert!(matches!(
+        control.next::<ClientMessage>().await,
+        Some(ClientMessage::Hello { .. })
+    ));
+    let no_greeting = ServerMessage::Pong { nonce: 0 };
+    control.send(&no_greeting).await.unwrap();
+
+    // Well inside the 30 s idle timeout, which is how a server told nothing finds out.
+    let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the client closes within 5 s");
+    assert!(
+        matches!(
+            &closed,
+            quinn::ConnectionError::ApplicationClosed(end)
+                if end.error_code == quinn::VarInt::from_u32(close::SHUTDOWN)
+        ),
+        "{closed:?}"
+    );
+    let result = left.join().unwrap();
+    assert!(
+        matches!(result, Err(ClientError::Protocol(_))),
+        "{result:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_server_that_goes_quiet_is_reported_at_the_deadline_and_not_a_tick_later() {
     use hawse_core::control::Control;
