@@ -215,7 +215,7 @@ impl Client {
             let mut welcomed = None;
             let wait = match self.session(cancel.clone(), &events, &mut welcomed).await {
                 Ok(()) => return,
-                // The dial is not cancel-aware, so a failure can land after shutdown began;
+                // The greeting is not cancel-aware, so a failure can land after shutdown began;
                 // announcing a retry then would promise one that never comes.
                 Err(_) if cancel.is_cancelled() => return,
                 Err(err) => {
@@ -254,13 +254,34 @@ impl Client {
         events: &mpsc::Sender<Event>,
         welcomed: &mut Option<Instant>,
     ) -> Result<(), ClientError> {
-        let remote = self.resolve().await?;
+        let dial = async {
+            let remote = self.resolve().await?;
+            Ok::<_, ClientError>((remote, self.connect(remote).await?))
+        };
+        // Left to itself a dial nobody answers runs on to the idle timeout, and a stop would wait
+        // out all of it.
+        let (remote, dialed) = tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            dialed = dial => dialed?,
+        };
+        self.serve(remote, dialed, cancel, events, welcomed).await
+    }
+
+    /// The session from its greeting on, over a transport already dialed.
+    async fn serve(
+        &self,
+        remote: SocketAddr,
+        dialed: Dialed,
+        cancel: CancellationToken,
+        events: &mpsc::Sender<Event>,
+        welcomed: &mut Option<Instant>,
+    ) -> Result<(), ClientError> {
         let Dialed {
             transport,
             kind,
             endpoint,
             mut control,
-        } = self.connect(remote).await?;
+        } = dialed;
 
         let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
         *welcomed = Some(Instant::now());
