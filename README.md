@@ -60,8 +60,9 @@ Waiting on features that are not implemented yet:
 
 TCP and UDP forwarding work, with fixed or dynamically assigned public ports.
 
-0.5.0 changed the wire format. A 0.5.0 end does not talk to an older one, and
-says so when it meets one: upgrade the server and its clients together.
+0.5.0 changed the wire format. A 0.5.0 end does not talk to an older one, and a
+0.5.0 client says so when it meets one: upgrade the server and its clients
+together.
 
 Besides the features named above, configuration hot reload and the `expose`,
 `authorize`, `revoke` and `check` subcommands are not implemented either.
@@ -236,8 +237,10 @@ congestion = "bbr"    # or "cubic"
 
 The choice matters most on a path with a long round trip and some random loss,
 where `cubic` shrinks its window on every packet the path loses and `bbr` does
-not. [docs/measurements.md](docs/measurements.md) has both measured over a real
-path, and `bench/` measures them on the path you have.
+not.
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
+has both measured over a real path, and `bench/` measures them on the path you
+have.
 
 `bind` is the address those public ports listen on. The default answers on
 every interface. Set it to `127.0.0.1` when a reverse proxy on the same host is
@@ -323,21 +326,23 @@ prefer = "auto"    # or "quic", or "tcp"
 ```
 
 `auto` is the default. It dials QUIC, and when QUIC has not connected after 2
-seconds it dials the fallback beside it and takes whichever connects first.
-`quic` never falls back. `tcp` selects the fallback outright, which carries
-every stream over one TLS connection multiplexed with yamux — for networks that
-block outbound UDP. A session that lands on the fallback stays there until it
-ends, and the client logs a warning when it does; the next connection tries
-QUIC first again. The 2 seconds are measured, so that one lost packet does not
-move a session onto the fallback: see
-[docs/measurements.md](docs/measurements.md).
+seconds it dials the fallback beside it and takes whichever connects first; if
+QUIC fails sooner, the fallback is dialed at once. `quic` never falls back.
+`tcp` selects the fallback outright, which carries every stream over one TLS
+connection multiplexed with yamux — for networks that block outbound UDP. A
+session that lands on the fallback stays there until it ends, and the client
+logs a warning when it does; the next connection tries QUIC first again. The 2
+seconds are measured, so that one lost packet does not move a session onto the
+fallback: see
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md).
 
 A visitor's connection that is cut short ends in a connection reset, on either
-transport: when the local service dies in the middle of a transfer, when
-nothing is listening on `local`, or when the tunnel itself drops. One that
-finished ends as the service ended it. On the fallback that takes a marker
-written into every stream, at a small cost to a request competing with heavy
-transfers, which [docs/measurements.md](docs/measurements.md) puts a figure on.
+transport: when the local service resets it, when nothing is listening on
+`local`, or when the tunnel itself drops. One that finished ends as the service
+ended it. On the fallback that takes a marker written into every stream, at a
+small cost to a request competing with heavy transfers, which
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
+puts a figure on.
 
 A UDP service needs `/udp` on both ends: `port = "51820/udp"` or `"any/udp"` in
 the client's `[expose.NAME]` table, and a grant such as `"51820/udp"` in the
@@ -350,13 +355,13 @@ WireGuard peers keeps their packets inside a datagram on a path with the usual
 room for hawse's own header to grow as a service sees more visitors. A service
 with `proxy_protocol` sends the visitor's address in every packet, 7 bytes for
 an IPv4 visitor and 19 for IPv6, so its payloads leave a datagram that much
-sooner. With `prefer = "tcp"` every payload takes that stream. hawse never
-holds a UDP sender back: when the tunnel cannot keep up, packets are dropped, as
-on any congested path. On the fallback every UDP service's traffic from visitor
-to service shares one stream, which caps it well below what QUIC carries;
-[docs/measurements.md](docs/measurements.md) has the loss and jitter measured on
-both. The service end line in the client's log counts packets dropped from a
-full datagram queue as `queue_full`.
+sooner. With `prefer = "tcp"` every payload takes that stream. hawse never holds
+a UDP sender back: when the tunnel cannot keep up, packets are dropped, as on
+any congested path. On the fallback every UDP service's traffic from visitor to
+service shares one stream, which caps it well below what QUIC carries;
+[docs/measurements.md](https://github.com/andriykohut/hawse/blob/main/docs/measurements.md)
+has the loss and jitter measured on both. The service end line in the client's
+log counts packets dropped from a full datagram queue as `queue_full`.
 
 Give a UDP service's `local` as a literal address such as `127.0.0.1:51820`. A
 hostname is looked up again for every new visitor, only its first address is

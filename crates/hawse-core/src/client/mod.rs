@@ -37,7 +37,7 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 
 /// How long `Prefer::Auto` gives QUIC before it starts a TCP dial beside it: above the 99th
 /// percentile of a QUIC handshake over a path losing 5% of its packets, so one lost packet does
-/// not move a session onto the fallback. The README carries the measurement.
+/// not move a session onto the fallback. `docs/measurements.md` carries the measurement.
 pub const FALLBACK_AFTER: Duration = Duration::from_secs(2);
 const PONG_DEADLINE: Duration = Duration::from_secs(45);
 const DRAIN: Duration = Duration::from_secs(2);

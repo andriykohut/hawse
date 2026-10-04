@@ -71,6 +71,6 @@ two runs after the 0.5.0 client reconnected, the 90th percentile read 465 and
 422 ms; 0.4.0's first run after its own reconnect read 165 ms. That is not
 explained.
 
-On loopback, where the tunnel is the only limit, the fallback moved 1075 MiB/s
-from client to server where 0.4.0 moved 1156, and 1200 MiB/s from server to
-client where 0.4.0 moved 1119. QUIC did not move.
+On loopback, where the tunnel is the only limit, the fallback moved 1070 MiB/s
+from client to server where 0.4.0 moved 1141, and 1199 MiB/s from server to
+client where 0.4.0 moved 1118, median of three runs each. QUIC did not move.

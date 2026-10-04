@@ -47,8 +47,8 @@ parked for later. Each entry says what it is and why it waits.
 - **A TCP peer learns no close reason.** yamux's go-away has no room for a
   code, so `Transport::close` tells a QUIC peer why and a TCP peer nothing.
   `Denied` and `Shutdown` travel as control messages and cover what a client
-  acts on; `Superseded` and the rest reach only the local log. The stream
-  records could carry one on the control stream.
+  acts on, a superseded session among them; `Unresponsive` and the rest reach
+  only the local log. The stream records could carry one on the control stream.
 
 ## Deferred from the phase 2b UDP work
 
