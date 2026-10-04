@@ -59,13 +59,13 @@ fn bad_cert(_: PeerKeyError) -> TlsError {
 }
 
 #[derive(Debug)]
-pub struct PinnedServer {
+pub(crate) struct PinnedServer {
     expected: PublicKey,
     algs: WebPkiSupportedAlgorithms,
 }
 
 impl PinnedServer {
-    pub fn new(expected: PublicKey, provider: &CryptoProvider) -> Self {
+    pub(crate) fn new(expected: PublicKey, provider: &CryptoProvider) -> Self {
         Self {
             expected,
             algs: provider.signature_verification_algorithms,
@@ -119,12 +119,12 @@ impl ServerCertVerifier for PinnedServer {
 
 /// Possession is proven by the TLS 1.3 `CertificateVerify` message; authorization happens in the control stream.
 #[derive(Debug)]
-pub struct AnyEd25519Client {
+pub(crate) struct AnyEd25519Client {
     algs: WebPkiSupportedAlgorithms,
 }
 
 impl AnyEd25519Client {
-    pub fn new(provider: &CryptoProvider) -> Self {
+    pub(crate) fn new(provider: &CryptoProvider) -> Self {
         Self {
             algs: provider.signature_verification_algorithms,
         }
