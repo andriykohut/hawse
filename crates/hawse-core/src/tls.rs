@@ -209,6 +209,7 @@ mod tests {
     use super::*;
     use crate::identity::Identity;
     use rustls::pki_types::ServerName;
+    use rustls::sign::{CertifiedKey, SingleCertAndKey};
     use rustls::{ClientConnection, ServerConnection};
 
     fn handshake(
@@ -353,6 +354,38 @@ mod tests {
         let err = handshake(&mut client, &mut server).unwrap_err();
         assert!(
             matches!(err, rustls::Error::NoCertificatesPresented),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn server_refuses_a_client_that_lacks_the_certificate_key() {
+        let (s, c) = pair();
+        let other = Identity::generate().unwrap();
+        let mut server = server(&s);
+        let (cert, _) = c.certificate().unwrap();
+        let (_, key) = other.certificate().unwrap();
+        let key = provider().key_provider.load_private_key(key).unwrap();
+        // `with_client_auth_cert` refuses a mismatched pair up front; a resolver takes it as given.
+        let resolver = SingleCertAndKey::from(CertifiedKey::new(vec![cert], key));
+        let mut cfg = rustls::ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedServer::new(
+                s.public_key(),
+                &provider(),
+            )))
+            .with_client_cert_resolver(Arc::new(resolver));
+        cfg.alpn_protocols = vec![ALPN.to_vec()];
+        let mut client =
+            ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap();
+        let err = handshake(&mut client, &mut server).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+            ),
             "{err:?}"
         );
     }
