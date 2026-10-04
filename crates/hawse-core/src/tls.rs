@@ -113,7 +113,7 @@ impl ServerCertVerifier for PinnedServer {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algs.supported_schemes()
+        vec![SignatureScheme::ED25519]
     }
 }
 
@@ -168,7 +168,7 @@ impl ClientCertVerifier for AnyEd25519Client {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algs.supported_schemes()
+        vec![SignatureScheme::ED25519]
     }
 }
 
@@ -279,6 +279,25 @@ mod tests {
             peer_key(cert.der()),
             Err(PeerKeyError::Algorithm(_))
         ));
+    }
+
+    #[test]
+    fn pinned_server_advertises_only_ed25519() {
+        let (s, _) = pair();
+        let verifier = PinnedServer::new(s.public_key(), &provider());
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            [SignatureScheme::ED25519]
+        );
+    }
+
+    #[test]
+    fn any_ed25519_client_advertises_only_ed25519() {
+        let verifier = AnyEd25519Client::new(&provider());
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            [SignatureScheme::ED25519]
+        );
     }
 
     #[test]
