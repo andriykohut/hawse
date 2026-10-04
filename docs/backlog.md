@@ -33,43 +33,25 @@ parked for later. Each entry says what it is and why it waits.
 
 ## Deferred from the phase 2a transport work
 
-- **A refusal is unobservable on the TCP fallback.** `client::visitor::refuse`
-  resets the stream with `reset::UNKNOWN_SERVICE` or `reset::LOCAL_REFUSED`, and
-  a QUIC visitor's read fails with that code. On yamux neither half carries one,
-  so the visitor gets a clean empty close and reads a refusal as a service that
-  answered with nothing. Same root cause as the truncation gap below, and the
-  same application-level signal fixes both.
-- **`transport.prefer = "auto"` does not fall back to TCP.** It dials QUIC and
-  nothing else, because yamux hands a reset stream to its reader as a clean
-  end-of-stream: a transfer cut short on the fallback arrives looking complete,
-  and neither end can tell. Moving a user onto that because their network blocks
-  UDP trades a loud failure for a silent one, so the fallback is reachable only
-  by asking for it. Give the tunnel an application-level completeness signal — a
-  trailer on each visitor stream, or a length the reader checks — and
-  `Client::connect`'s `Prefer::Auto` arm can fall back again. Lifting the gate
-  means splitting `Prefer::Auto` back off `Prefer::Quic`, choosing a probe
-  deadline and racing `connect_tcp` after it; the deadline wants measuring
-  against a real high-latency path, since the 2 s this branch carried for a
-  while was sized on loopback and would fail a satellite handshake that works.
 - **`Transport::close()` does not complete symmetrically.** On QUIC it is
   immediate and `endpoint.wait_idle()` bounds the flush; on TCP it only cancels
   a token, and the driver then flushes yamux's queue for up to `idle_timeout` in
   a task the server's `TaskTracker` does not know about. The process still
   exits, but a shutdown that looks drained may not be.
-- **`SendHalf::Tcp::reset` is nondeterministic in the peer's write direction.**
-  Its single noop-waker `poll_shutdown` normally emits FIN, but when that poll
-  returns `Pending` the close reaches the peer as an RST from the stream drop
-  instead — leaving it in `RecvClosed` or in `Closed`, and only the latter fails
-  its next write. This matters for the completeness signal above: a probe-write
-  was the leading candidate for telling an abort from a clean finish, and it
-  cannot be, while `reset` picks between FIN and RST on timing.
+- **A session that lands on the TCP fallback stays there.** `auto` tries QUIC
+  first on every connect, but a session that fell back keeps the fallback until
+  it ends, so one bad handshake leaves UDP services on a single yamux stream
+  for as long as the link holds. Returning needs a prober and a moment to move:
+  reconnecting drops every visitor stream and UDP session. Waits for a
+  deployment this hurts.
+- **A TCP peer learns no close reason.** yamux's go-away has no room for a
+  code, so `Transport::close` tells a QUIC peer why and a TCP peer nothing.
+  `Denied` and `Shutdown` travel as control messages and cover what a client
+  acts on; `Superseded` and the rest reach only the local log. The stream
+  records could carry one on the control stream.
 
 ## Deferred from the phase 2b UDP work
 
-- **PROXY protocol for UDP needs the visitor's address on the wire.** A packet
-  carries a service id and a session id; the client never learns who the
-  visitor is. PROXY v2 on a UDP service needs the address sent once per
-  session, which is a wire change.
 - **A bulk stream that ends is not reopened.** If the stream fails while the
   session lives, payloads too large for a datagram drop, and on the TCP
   transport all of them do, until the service is bound again. A transport
