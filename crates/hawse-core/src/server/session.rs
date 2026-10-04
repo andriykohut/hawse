@@ -19,6 +19,7 @@ use super::udp::{self, UdpService, UdpServices};
 use super::{AGENT, Live, Shared, listener};
 use crate::allow::AllowList;
 use crate::control::Control;
+use crate::error::chain;
 use crate::net;
 use crate::transport::{CloseReason, Transport, TransportError};
 use crate::udp::FINISH_WAIT;
@@ -452,7 +453,7 @@ impl Session {
             match bind(self.grant.bind, port.number) {
                 Ok(socket) => break Ok((port, socket)),
                 Err(err) => {
-                    tracing::warn!(service, %port, %err, "cannot bind");
+                    tracing::warn!(service, %port, err = %chain(&err), "cannot bind");
                     refused.push(port);
                     if fixed.is_some() {
                         break Err(BindFailure::InUse);
