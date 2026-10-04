@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -244,4 +244,38 @@ fn a_server_that_cannot_bind_its_listen_port_exits_1() {
     let (code, stderr) = run_with_config("server", &format!("listen = \"127.0.0.1:{port}\"\n"));
     assert!(stderr.contains("cannot start the server"), "{stderr}");
     assert_eq!(code, Some(1), "{stderr}");
+}
+
+#[test]
+fn a_client_warns_at_startup_about_a_quic_setting_under_prefer_tcp() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let config = dir.path().join("client.toml");
+    fs::write(
+        &config,
+        format!("server = \"127.0.0.1:{}\"\nserver_key = \"{server_key}\"\n\n[transport]\nprefer = \"tcp\"\nstream_window = \"1MiB\"\n", free_tcp_port()),
+    )
+    .unwrap();
+    let mut client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(&config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stderr = BufReader::new(client.0.stderr.take().unwrap());
+    // Nothing listens on the port, so the first dial is refused at once, and by then startup is
+    // over.
+    let startup: Vec<String> = stderr
+        .lines()
+        .map(Result::unwrap)
+        .take_while(|line| !line.contains("disconnected"))
+        .collect();
+    assert!(
+        startup
+            .iter()
+            .any(|line| line.contains("WARN") && line.contains("stream_window")),
+        "{startup:#?}"
+    );
 }
