@@ -15,15 +15,15 @@ pub enum NameError {
 pub fn validate(name: &str) -> Result<(), NameError> {
     let mut chars = name.chars();
     let first = chars.next().ok_or(NameError::Empty)?;
-    if name.len() > MAX_LEN {
-        return Err(NameError::TooLong(name.len()));
-    }
     if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
         return Err(if first == '-' {
             NameError::Start(first)
         } else {
             NameError::Char(first)
         });
+    }
+    if name.len() > MAX_LEN {
+        return Err(NameError::TooLong(name.len()));
     }
     if let Some(bad) = chars.find(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && *c != '-') {
         return Err(NameError::Char(bad));
@@ -49,5 +49,11 @@ mod tests {
         assert_eq!(validate("Web"), Err(NameError::Char('W')));
         assert_eq!(validate("my_svc"), Err(NameError::Char('_')));
         assert_eq!(validate(&"x".repeat(33)), Err(NameError::TooLong(33)));
+    }
+
+    #[test]
+    fn reports_a_leading_dash_before_the_length() {
+        let name = format!("-{}", "x".repeat(39));
+        assert_eq!(validate(&name), Err(NameError::Start('-')));
     }
 }

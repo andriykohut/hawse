@@ -195,7 +195,11 @@ impl FromStr for PortSpan {
 
 impl fmt::Display for PortSpan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.first, self.last)
+        if self.first == self.last {
+            write!(f, "{}", self.first)
+        } else {
+            write!(f, "{}-{}", self.first, self.last)
+        }
     }
 }
 
@@ -354,6 +358,40 @@ mod tests {
     fn range_serde_is_text() {
         let r: PortRange = serde_json::from_str("\"1-2/udp\"").unwrap();
         assert_eq!(serde_json::to_string(&r).unwrap(), "\"1-2/udp\"");
+    }
+
+    #[test]
+    fn single_port_range_displays_as_one_number() {
+        let r = PortRange {
+            first: 443,
+            last: 443,
+            kind: Kind::Tcp,
+        };
+        assert_eq!(r.to_string(), "443");
+        let r = PortRange {
+            first: 53,
+            last: 53,
+            kind: Kind::Udp,
+        };
+        assert_eq!(r.to_string(), "53/udp");
+    }
+
+    #[test]
+    fn span_displays_both_ends() {
+        let s = PortSpan {
+            first: 40000,
+            last: 40002,
+        };
+        assert_eq!(s.to_string(), "40000-40002");
+    }
+
+    #[test]
+    fn single_port_span_displays_as_one_number() {
+        let s = PortSpan {
+            first: 40000,
+            last: 40000,
+        };
+        assert_eq!(s.to_string(), "40000");
     }
 
     #[test]
