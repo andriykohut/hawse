@@ -2,12 +2,14 @@
 #
 #     vhs demo/demo.tape
 #
-# Needs vhs and tmux, and ports 4433, 8080 and 3000 free on loopback.
+# Needs vhs, tmux, python3 and curl, and ports 4433, 8080 and 3000 free on loopback.
 # HAWSE_DEMO_PORT moves the first of them.
 
 Output assets/hawse-demo.gif
 
 Require tmux
+Require python3
+Require curl
 
 Set Shell bash
 Set FontSize 15
@@ -47,3 +49,4 @@ Sleep 4s
 Hide
 Ctrl+B
 Type ":kill-server" Enter
+Sleep 500ms
