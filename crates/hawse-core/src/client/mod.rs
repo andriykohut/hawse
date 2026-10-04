@@ -4,6 +4,7 @@ mod udp;
 mod visitor;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -259,8 +260,15 @@ impl Client {
         let buffer =
             usize::try_from(self.cfg.transport.buffer.0).map_err(|_| ClientError::Buffer)?;
         let dial = async {
-            let remote = self.resolve().await?;
-            Ok::<_, ClientError>((remote, self.connect(remote).await?))
+            let (target, addrs) = self.resolve().await?;
+            let connect = |remote| async move {
+                let dialed = self.connect(remote).await;
+                if let Err(err) = &dialed {
+                    tracing::debug!(%remote, err = %chain(err), "this address did not connect");
+                }
+                dialed
+            };
+            dial_each(addrs, ClientError::NoAddress(target), connect).await
         };
         // Left to itself a dial nobody answers runs on to the idle timeout, and a stop would wait
         // out all of it.
@@ -551,16 +559,38 @@ impl Client {
         Ok(())
     }
 
-    async fn resolve(&self) -> Result<SocketAddr, ClientError> {
+    /// The `host:port` that was looked up, and its addresses in the resolver's order.
+    async fn resolve(&self) -> Result<(String, Vec<SocketAddr>), ClientError> {
         let (host, port) = split_host_port(&self.cfg.server)
             .ok_or_else(|| ClientError::ServerAddr(self.cfg.server.clone()))?;
         let target = format!("{host}:{}", port.unwrap_or(DEFAULT_PORT));
-        let first = tokio::net::lookup_host(&target)
+        let addrs = tokio::net::lookup_host(&target)
             .await
             .map_err(|e| ClientError::Resolve(target.clone(), e))?
-            .next();
-        first.ok_or(ClientError::NoAddress(target))
+            .collect();
+        Ok((target, addrs))
     }
+}
+
+/// Dials each address in turn and returns the first that connects, with the address it connected
+/// to. When none does the error is the last dial's, or `none` when there was nothing to dial.
+async fn dial_each<T, E, F, C>(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+    none: E,
+    dial: F,
+) -> Result<(SocketAddr, T), E>
+where
+    F: Fn(SocketAddr) -> C,
+    C: Future<Output = Result<T, E>>,
+{
+    let mut failed = none;
+    for remote in addrs {
+        match dial(remote).await {
+            Ok(dialed) => return Ok((remote, dialed)),
+            Err(err) => failed = err,
+        }
+    }
+    Err(failed)
 }
 
 /// Events are informational: awaiting a slow consumer would stall the control loop past the
@@ -664,6 +694,8 @@ async fn send_msg(control: &mut Control, msg: &ClientMessage) -> Result<(), Clie
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use hawse_proto::frame::FrameError;
 
     use super::*;
@@ -672,6 +704,39 @@ mod tests {
         let alert = rustls::Error::AlertReceived(rustls::AlertDescription::NoApplicationProtocol);
         let io = std::io::Error::new(std::io::ErrorKind::InvalidData, alert);
         ClientError::Transport(TransportError::Connection(Box::new(io)))
+    }
+
+    fn addr(host: u8) -> SocketAddr {
+        SocketAddr::from(([192, 0, 2, host], 4433))
+    }
+
+    #[tokio::test]
+    async fn a_dial_moves_on_to_the_next_address_when_one_fails() {
+        let tried = RefCell::new(Vec::new());
+        let dial = |remote| {
+            tried.borrow_mut().push(remote);
+            async move {
+                if remote == addr(2) {
+                    Ok("up")
+                } else {
+                    Err("refused")
+                }
+            }
+        };
+        let dialed = dial_each([addr(1), addr(2), addr(3)], "no address", dial).await;
+        assert_eq!(dialed, Ok((addr(2), "up")));
+        assert_eq!(*tried.borrow(), [addr(1), addr(2)]);
+    }
+
+    #[tokio::test]
+    async fn a_dial_that_fails_at_every_address_reports_the_last_failure() {
+        let dial = |remote| async move { Err::<&str, _>(format!("{remote} refused")) };
+        let none = || "no address".to_owned();
+        assert_eq!(
+            dial_each([addr(1), addr(2)], none(), dial).await,
+            Err("192.0.2.2:4433 refused".to_owned())
+        );
+        assert_eq!(dial_each([], none(), dial).await, Err(none()));
     }
 
     #[test]
