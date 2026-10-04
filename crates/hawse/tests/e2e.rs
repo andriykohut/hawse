@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hawse_core::config::ServerConfig;
@@ -265,17 +266,32 @@ fn a_client_warns_at_startup_about_a_quic_setting_under_prefer_tcp() {
             .unwrap(),
     );
     let stderr = BufReader::new(client.0.stderr.take().unwrap());
-    // Nothing listens on the port, so the first dial is refused at once, and by then startup is
-    // over.
-    let startup: Vec<String> = stderr
-        .lines()
-        .map(Result::unwrap)
-        .take_while(|line| !line.contains("disconnected"))
-        .collect();
-    assert!(
-        startup
-            .iter()
-            .any(|line| line.contains("WARN") && line.contains("stream_window")),
-        "{startup:#?}"
-    );
+    // A read of the pipe blocks for as long as the client says nothing, so the lines come through
+    // a channel, which can be waited on with a deadline.
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut startup = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(left)
+            .unwrap_or_else(|err| panic!("no warning, {err}: {startup:#?}"));
+        if line.contains("WARN") && line.contains("stream_window") {
+            break;
+        }
+        // Nothing listens on the port, so the first dial is refused at once, and by then startup
+        // is over.
+        assert!(
+            !line.contains("disconnected"),
+            "the first dial ended with no warning before it: {startup:#?}"
+        );
+        startup.push(line);
+    }
 }
