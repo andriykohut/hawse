@@ -259,6 +259,44 @@ mod tests {
         ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap()
     }
 
+    const ED25519_OID_DER: [u8; 5] = [0x06, 0x03, 0x2b, 0x65, 0x70];
+
+    fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+        let len = u8::try_from(body.len()).unwrap();
+        let mut out = vec![tag];
+        if len >= 0x80 {
+            out.push(0x81);
+        }
+        out.push(len);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn spki(algorithm: &[u8], key: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let bits = der(0x03, &[&[0][..], key].concat());
+        der(0x30, &[algorithm, &bits, trailing].concat())
+    }
+
+    /// rcgen only writes well-formed keys, and `peer_key` never checks the signature, so zeros do for one.
+    fn cert_around(spki: &[u8]) -> CertificateDer<'static> {
+        let algorithm = der(0x30, &ED25519_OID_DER);
+        let time = der(0x17, b"260101000000Z");
+        let tbs = [
+            &[0x02, 0x01, 0x01][..],
+            &algorithm,
+            &[0x30, 0x00],
+            &der(0x30, &[&time[..], &time].concat()),
+            &[0x30, 0x00],
+            spki,
+        ]
+        .concat();
+        let signature = der(0x03, &[0; 65]);
+        CertificateDer::from(der(
+            0x30,
+            &[&der(0x30, &tbs)[..], &algorithm, &signature].concat(),
+        ))
+    }
+
     #[test]
     fn provider_is_built_once() {
         assert!(Arc::ptr_eq(&provider(), &provider()));
@@ -282,6 +320,25 @@ mod tests {
             peer_key(cert.der()),
             Err(PeerKeyError::Algorithm(_))
         ));
+    }
+
+    #[test]
+    fn peer_key_rejects_a_truncated_certificate() {
+        let (cert, _) = Identity::generate().unwrap().certificate().unwrap();
+        let cut = CertificateDer::from(&cert[..cert.len() - 1]);
+        assert!(matches!(peer_key(&cut), Err(PeerKeyError::Der)));
+    }
+
+    #[test]
+    fn peer_key_rejects_keys_that_are_not_32_bytes() {
+        let algorithm = der(0x30, &ED25519_OID_DER);
+        for len in [31, 33] {
+            let cert = cert_around(&spki(&algorithm, &vec![7; len], &[]));
+            assert!(
+                matches!(peer_key(&cert), Err(PeerKeyError::Length)),
+                "{len}"
+            );
+        }
     }
 
     #[test]
