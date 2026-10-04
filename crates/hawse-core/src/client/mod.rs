@@ -322,16 +322,16 @@ impl Client {
         };
         tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
         let mut ping = ping_interval();
-        let mut last_heard = Instant::now();
+        let mut last_heard = tokio::time::Instant::now();
         let mut nonce = 0u64;
 
         let outcome = loop {
             tokio::select! {
                 () = cancel.cancelled() => break Ok(()),
+                () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
+                    break Err(ClientError::Unresponsive);
+                }
                 _ = ping.tick() => {
-                    if last_heard.elapsed() > PONG_DEADLINE {
-                        break Err(ClientError::Unresponsive);
-                    }
                     nonce += 1;
                     if let Err(err) = send_msg(&mut control, &ClientMessage::Ping { nonce }).await {
                         break Err(err);
@@ -339,7 +339,7 @@ impl Client {
                 }
                 msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
-                    last_heard = Instant::now();
+                    last_heard = tokio::time::Instant::now();
                     match msg {
                         ServerMessage::Bound { service, service_id, port, address } => {
                             let Some(expose) = self.cfg.expose.get(&service) else {

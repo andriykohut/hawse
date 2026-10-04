@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, reset};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
@@ -293,10 +293,10 @@ impl Session {
                     told = control.send(&shutdown).await.is_ok().then(tokio::time::Instant::now);
                     break if superseded { CloseReason::Superseded } else { CloseReason::Shutdown };
                 }
+                () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
+                    break CloseReason::Unresponsive;
+                }
                 _ = ping.tick() => {
-                    if last_heard.elapsed() > PONG_DEADLINE {
-                        break CloseReason::Unresponsive;
-                    }
                     nonce += 1;
                     if control.send(&ServerMessage::Ping { nonce }).await.is_err() {
                         break CloseReason::ControlClosed;
@@ -523,7 +523,7 @@ mod tests {
     /// The client's end of a session built by `unserved`.
     struct Peer {
         control: Control,
-        _conn: quinn::Connection,
+        conn: quinn::Connection,
         _endpoints: (quinn::Endpoint, quinn::Endpoint),
     }
 
@@ -581,7 +581,7 @@ mod tests {
         let (send, recv) = conn.open_bi().await.unwrap();
         let mut peer = Peer {
             control: Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv)),
-            _conn: conn,
+            conn,
             _endpoints: (server, client),
         };
         // A stream reaches the other end with its first bytes, not before.
@@ -731,6 +731,50 @@ mod tests {
             .await
             .expect("the session ends inside the server's wait")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_goes_quiet_is_dropped_at_the_deadline_and_not_a_tick_later() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut peer) = unserved(&shared).await;
+        let serving = tokio::spawn(session.serve(control, CancellationToken::new()));
+        // Out of step with the ping tick, as a client's last word is: the deadline then falls
+        // between two ticks.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let ping = ClientMessage::Ping { nonce: 1 };
+        peer.control.send(&ping).await.unwrap();
+        loop {
+            let reply = peer.control.next::<ServerMessage>().await;
+            if let ServerMessage::Pong { nonce: 1 } = reply.expect("control stream open") {
+                break;
+            }
+        }
+
+        // Paused only for the wait: a paused clock runs ahead of whatever is still on a real
+        // socket.
+        tokio::time::pause();
+        let heard = Instant::now();
+        tokio::time::timeout(2 * PONG_DEADLINE, serving)
+            .await
+            .expect("the session gives up on a client it no longer hears from")
+            .unwrap();
+        let took = heard.elapsed();
+        tokio::time::resume();
+        // The session heard that ping a moment before the clock stopped, and the tick after the
+        // deadline is nearly 15 s past it.
+        assert!(
+            (Duration::from_secs(44)..Duration::from_secs(46)).contains(&took),
+            "{took:?}"
+        );
+        let closed = peer.conn.closed().await;
+        assert!(
+            matches!(
+                &closed,
+                quinn::ConnectionError::ApplicationClosed(end)
+                    if end.error_code == quinn::VarInt::from_u32(CloseReason::Unresponsive.code())
+            ),
+            "{closed:?}"
+        );
     }
 
     #[tokio::test]
