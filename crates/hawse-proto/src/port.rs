@@ -357,6 +357,31 @@ mod tests {
     }
 
     #[test]
+    fn single_port_range_displays_as_one_number() {
+        let r = PortRange {
+            first: 443,
+            last: 443,
+            kind: Kind::Tcp,
+        };
+        assert_eq!(r.to_string(), "443");
+        let r = PortRange {
+            first: 53,
+            last: 53,
+            kind: Kind::Udp,
+        };
+        assert_eq!(r.to_string(), "53/udp");
+    }
+
+    #[test]
+    fn span_displays_both_ends() {
+        let s = PortSpan {
+            first: 40000,
+            last: 40002,
+        };
+        assert_eq!(s.to_string(), "40000-40002");
+    }
+
+    #[test]
     fn span_parses_and_iterates() {
         let s: PortSpan = "40000-40002".parse().unwrap();
         assert_eq!(s.iter().collect::<Vec<u16>>(), vec![40000, 40001, 40002]);
