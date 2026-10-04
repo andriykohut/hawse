@@ -10,6 +10,7 @@ use super::{ACCEPT_BACKOFF, Shared, out_of_descriptors};
 use crate::allow::AllowList;
 use crate::error::chain;
 use crate::frame::write_frame;
+use crate::net;
 use crate::pump::{Edge, pump};
 use crate::transport::Transport;
 
@@ -63,6 +64,7 @@ pub async fn serve(
             continue;
         };
         let _ = socket.set_nodelay(true);
+        let _ = net::keepalive(&socket);
         // Held by the task for the whole pump, not just for `open_bi`: on the TCP transport the
         // stream halves do not keep the connection alive, and the last `Arc` dropped ends it.
         let transport = Arc::clone(&transport);

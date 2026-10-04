@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 
 use super::Target;
 use crate::error::chain;
+use crate::net;
 use crate::pump::pump;
 use crate::transport::{RecvHalf, SendHalf};
 use crate::udp::FINISH_WAIT;
@@ -57,6 +58,7 @@ pub async fn serve(
         }
     };
     let _ = socket.set_nodelay(true);
+    let _ = net::keepalive(&socket);
     if target.proxy_protocol {
         let preamble = proxy::v2_tcp(header.visitor, header.listener);
         if let Err(err) = socket.write_all(&preamble).await {

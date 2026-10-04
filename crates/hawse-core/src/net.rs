@@ -1,8 +1,9 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::{TcpListener, UdpSocket};
+use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 #[derive(Clone, Copy)]
 enum Flavor {
@@ -29,6 +30,21 @@ pub fn bind_tcp(bind: IpAddr, port: u16) -> io::Result<TcpListener> {
 /// Addressed as `bind_tcp` is.
 pub fn bind_udp(bind: IpAddr, port: u16) -> io::Result<UdpSocket> {
     UdpSocket::from_std(bound(Flavor::Udp, bind, port)?.into())
+}
+
+/// The tunnel's own default quiet time.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+
+/// For a visitor's socket and the one to a local service. A stream has no idle timeout, so a peer
+/// that vanished without a FIN would otherwise hold its pump, and the stream and sockets under it,
+/// for as long as the tunnel stayed up.
+///
+/// Only the quiet time is set, as on the tunnel's TCP connection, and the probe schedule is left to
+/// the kernel: another nine or ten minutes on stock Linux and macOS, so a peer is given up on only
+/// after going unheard for that long, and one that answers is never closed for being idle.
+pub fn keepalive(socket: &TcpStream) -> io::Result<()> {
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_IDLE);
+    SockRef::from(socket).set_tcp_keepalive(&keepalive)
 }
 
 fn bound(flavor: Flavor, bind: IpAddr, port: u16) -> io::Result<Socket> {
@@ -105,6 +121,18 @@ mod tests {
     async fn binds_every_interface_for_an_unspecified_address() {
         let listener = bind_tcp(Ipv6Addr::UNSPECIFIED.into(), 0).unwrap();
         assert!(listener.local_addr().unwrap().ip().is_unspecified());
+    }
+
+    #[tokio::test]
+    async fn keepalive_has_the_kernel_probe_a_socket_once_it_has_been_quiet() {
+        let listener = bind_tcp(Ipv4Addr::LOCALHOST.into(), 0).unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        keepalive(&socket).unwrap();
+        let socket = SockRef::from(&socket);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(socket.tcp_keepalive_time().unwrap(), KEEPALIVE_IDLE);
     }
 
     #[tokio::test]
