@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::ALPN;
@@ -18,17 +18,25 @@ compile_error!("enable exactly one of the `ring` and `aws-lc-rs` features");
 compile_error!("enable one of the `ring` and `aws-lc-rs` features");
 
 pub fn provider() -> Arc<CryptoProvider> {
-    #[cfg(feature = "ring")]
-    {
-        Arc::new(rustls::crypto::ring::default_provider())
-    }
-    #[cfg(feature = "aws-lc-rs")]
-    {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-    }
+    static PROVIDER: OnceLock<Arc<CryptoProvider>> = OnceLock::new();
+    Arc::clone(PROVIDER.get_or_init(|| {
+        #[cfg(feature = "ring")]
+        {
+            Arc::new(rustls::crypto::ring::default_provider())
+        }
+        #[cfg(feature = "aws-lc-rs")]
+        {
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+        }
+    }))
 }
 
 const ED25519_OID: &str = "1.3.101.112";
+
+/// RFC 8410 fixes every byte ahead of the key: no parameters, no unused bits.
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerKeyError {
@@ -38,6 +46,8 @@ pub enum PeerKeyError {
     Algorithm(String),
     #[error("peer key is not 32 bytes")]
     Length,
+    #[error("peer key is not the canonical Ed25519 encoding")]
+    Encoding,
 }
 
 pub fn peer_key(cert: &CertificateDer<'_>) -> Result<PublicKey, PeerKeyError> {
@@ -48,7 +58,13 @@ pub fn peer_key(cert: &CertificateDer<'_>) -> Result<PublicKey, PeerKeyError> {
     if oid != ED25519_OID {
         return Err(PeerKeyError::Algorithm(oid));
     }
-    PublicKey::from_slice(&spki.subject_public_key.data).map_err(|_| PeerKeyError::Length)
+    let key =
+        PublicKey::from_slice(&spki.subject_public_key.data).map_err(|_| PeerKeyError::Length)?;
+    // The parser skips parameters and anything after the key; `raw` keeps the lengths that give them away.
+    if spki.raw.strip_prefix(&ED25519_SPKI_PREFIX) != Some(key.as_bytes()) {
+        return Err(PeerKeyError::Encoding);
+    }
+    Ok(key)
 }
 
 fn bad_cert(_: PeerKeyError) -> TlsError {
@@ -56,13 +72,13 @@ fn bad_cert(_: PeerKeyError) -> TlsError {
 }
 
 #[derive(Debug)]
-pub struct PinnedServer {
+pub(crate) struct PinnedServer {
     expected: PublicKey,
     algs: WebPkiSupportedAlgorithms,
 }
 
 impl PinnedServer {
-    pub fn new(expected: PublicKey, provider: &CryptoProvider) -> Self {
+    pub(crate) fn new(expected: PublicKey, provider: &CryptoProvider) -> Self {
         Self {
             expected,
             algs: provider.signature_verification_algorithms,
@@ -110,18 +126,18 @@ impl ServerCertVerifier for PinnedServer {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algs.supported_schemes()
+        vec![SignatureScheme::ED25519]
     }
 }
 
 /// Possession is proven by the TLS 1.3 `CertificateVerify` message; authorization happens in the control stream.
 #[derive(Debug)]
-pub struct AnyEd25519Client {
+pub(crate) struct AnyEd25519Client {
     algs: WebPkiSupportedAlgorithms,
 }
 
 impl AnyEd25519Client {
-    pub fn new(provider: &CryptoProvider) -> Self {
+    pub(crate) fn new(provider: &CryptoProvider) -> Self {
         Self {
             algs: provider.signature_verification_algorithms,
         }
@@ -165,7 +181,7 @@ impl ClientCertVerifier for AnyEd25519Client {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algs.supported_schemes()
+        vec![SignatureScheme::ED25519]
     }
 }
 
@@ -206,6 +222,7 @@ mod tests {
     use super::*;
     use crate::identity::Identity;
     use rustls::pki_types::ServerName;
+    use rustls::sign::{CertifiedKey, SingleCertAndKey};
     use rustls::{ClientConnection, ServerConnection};
 
     fn handshake(
@@ -219,7 +236,8 @@ mod tests {
             }
             let mut cursor = &c2s[..];
             while !cursor.is_empty() {
-                server.read_tls(&mut cursor).unwrap();
+                let read = server.read_tls(&mut cursor).unwrap();
+                assert_ne!(read, 0, "server stopped reading");
             }
             server.process_new_packets()?;
             let mut s2c = Vec::new();
@@ -228,7 +246,8 @@ mod tests {
             }
             let mut cursor = &s2c[..];
             while !cursor.is_empty() {
-                client.read_tls(&mut cursor).unwrap();
+                let read = client.read_tls(&mut cursor).unwrap();
+                assert_ne!(read, 0, "client stopped reading");
             }
             client.process_new_packets()?;
             if !client.is_handshaking() && !server.is_handshaking() {
@@ -253,6 +272,49 @@ mod tests {
         ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap()
     }
 
+    const ED25519_OID_DER: [u8; 5] = [0x06, 0x03, 0x2b, 0x65, 0x70];
+
+    fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+        let len = u8::try_from(body.len()).unwrap();
+        let mut out = vec![tag];
+        if len >= 0x80 {
+            out.push(0x81);
+        }
+        out.push(len);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn spki(algorithm: &[u8], key: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let bits = der(0x03, &[&[0][..], key].concat());
+        der(0x30, &[algorithm, &bits, trailing].concat())
+    }
+
+    /// rcgen only writes well-formed keys, and `peer_key` never checks the signature, so zeros do for one.
+    fn cert_around(spki: &[u8]) -> CertificateDer<'static> {
+        let algorithm = der(0x30, &ED25519_OID_DER);
+        let time = der(0x17, b"260101000000Z");
+        let tbs = [
+            &[0x02, 0x01, 0x01][..],
+            &algorithm,
+            &[0x30, 0x00],
+            &der(0x30, &[&time[..], &time].concat()),
+            &[0x30, 0x00],
+            spki,
+        ]
+        .concat();
+        let signature = der(0x03, &[0; 65]);
+        CertificateDer::from(der(
+            0x30,
+            &[&der(0x30, &tbs)[..], &algorithm, &signature].concat(),
+        ))
+    }
+
+    #[test]
+    fn provider_is_built_once() {
+        assert!(Arc::ptr_eq(&provider(), &provider()));
+    }
+
     #[test]
     fn peer_key_reads_ed25519_spki() {
         let id = Identity::generate().unwrap();
@@ -271,6 +333,58 @@ mod tests {
             peer_key(cert.der()),
             Err(PeerKeyError::Algorithm(_))
         ));
+    }
+
+    #[test]
+    fn peer_key_rejects_a_truncated_certificate() {
+        let (cert, _) = Identity::generate().unwrap().certificate().unwrap();
+        let cut = CertificateDer::from(&cert[..cert.len() - 1]);
+        assert!(matches!(peer_key(&cut), Err(PeerKeyError::Der)));
+    }
+
+    #[test]
+    fn peer_key_rejects_keys_that_are_not_32_bytes() {
+        let algorithm = der(0x30, &ED25519_OID_DER);
+        for len in [31, 33] {
+            let cert = cert_around(&spki(&algorithm, &vec![7; len], &[]));
+            assert!(
+                matches!(peer_key(&cert), Err(PeerKeyError::Length)),
+                "{len}"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_key_rejects_bytes_trailing_the_key() {
+        let algorithm = der(0x30, &ED25519_OID_DER);
+        let cert = cert_around(&spki(&algorithm, &[7; 32], &[0x05, 0x00]));
+        assert!(matches!(peer_key(&cert), Err(PeerKeyError::Encoding)));
+    }
+
+    #[test]
+    fn peer_key_rejects_algorithm_parameters() {
+        let algorithm = der(0x30, &[&ED25519_OID_DER[..], &[0x05, 0x00]].concat());
+        let cert = cert_around(&spki(&algorithm, &[7; 32], &[]));
+        assert!(matches!(peer_key(&cert), Err(PeerKeyError::Encoding)));
+    }
+
+    #[test]
+    fn pinned_server_advertises_only_ed25519() {
+        let (s, _) = pair();
+        let verifier = PinnedServer::new(s.public_key(), &provider());
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            [SignatureScheme::ED25519]
+        );
+    }
+
+    #[test]
+    fn any_ed25519_client_advertises_only_ed25519() {
+        let verifier = AnyEd25519Client::new(&provider());
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            [SignatureScheme::ED25519]
+        );
     }
 
     #[test]
@@ -324,6 +438,38 @@ mod tests {
         let err = handshake(&mut client, &mut server).unwrap_err();
         assert!(
             matches!(err, rustls::Error::NoCertificatesPresented),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn server_refuses_a_client_that_lacks_the_certificate_key() {
+        let (s, c) = pair();
+        let other = Identity::generate().unwrap();
+        let mut server = server(&s);
+        let (cert, _) = c.certificate().unwrap();
+        let (_, key) = other.certificate().unwrap();
+        let key = provider().key_provider.load_private_key(key).unwrap();
+        // `with_client_auth_cert` refuses a mismatched pair up front; a resolver takes it as given.
+        let resolver = SingleCertAndKey::from(CertifiedKey::new(vec![cert], key));
+        let mut cfg = rustls::ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedServer::new(
+                s.public_key(),
+                &provider(),
+            )))
+            .with_client_cert_resolver(Arc::new(resolver));
+        cfg.alpn_protocols = vec![ALPN.to_vec()];
+        let mut client =
+            ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap();
+        let err = handshake(&mut client, &mut server).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
+            ),
             "{err:?}"
         );
     }

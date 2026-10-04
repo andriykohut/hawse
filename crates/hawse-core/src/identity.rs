@@ -54,7 +54,7 @@ impl Identity {
             )));
         }
         let public = PublicKey::from_slice(key_pair.public_key_raw())
-            .map_err(|e| IdentityError::WrongAlgorithm(e.to_string()))?;
+            .expect("an Ed25519 public key is 32 bytes");
         Ok(Self { key_pair, public })
     }
 
@@ -97,7 +97,7 @@ impl Identity {
             .self_signed(&self.key_pair)
             .map_err(IdentityError::Certificate)?;
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pair.serialize_der()));
-        Ok((cert.der().clone(), key))
+        Ok((cert.into(), key))
     }
 }
 
