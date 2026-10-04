@@ -149,7 +149,7 @@ impl Server {
             congestion: cfg.transport.congestion,
             stream_window,
             connection_window: cfg.transport.connection_window.0,
-            max_streams: cfg.limits.streams_per_client,
+            max_streams: cfg.limits.streams_in_effect(),
         };
         // Cloned rather than minted twice, so both listeners present the same certificate and not
         // just the same key.
@@ -182,7 +182,7 @@ impl Server {
             udp_sessions: usize::try_from(cfg.limits.udp_sessions_per_service)
                 .expect("a u32 fits usize on every target hawse builds for"),
             // Saturating, as `bind` can be handed a config that was never validated.
-            streams: usize::try_from(cfg.limits.streams_per_client)
+            streams: usize::try_from(cfg.limits.streams_in_effect())
                 .expect("a u32 fits usize on every target hawse builds for")
                 .saturating_sub(1),
             sessions: Mutex::new(HashMap::new()),

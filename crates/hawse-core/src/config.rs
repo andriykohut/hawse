@@ -13,6 +13,8 @@ pub mod units;
 
 use units::ByteSize;
 
+use crate::transport::quic::Tuning;
+
 pub const DEFAULT_PORT: u16 = 4433;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -66,13 +68,24 @@ pub struct ClientPolicy {
 pub struct Limits {
     pub auth_failures_per_minute: u32,
     /// The control stream and every stream the server opens toward one client: one per visitor
-    /// connection and one per UDP service. A visitor past it is reset.
+    /// connection and one per UDP service. A visitor past it is reset. `streams_in_effect` is
+    /// what the server goes by.
     ///
     /// Costs 256 KiB of receive window per stream on the TCP fallback, where yamux guarantees
     /// every stream that much and the connection window has to cover the whole guarantee: the
     /// default 4096 reserves ~1 GiB per session against QUIC's 64 MiB for the same config.
     pub streams_per_client: u32,
     pub udp_sessions_per_service: u32,
+}
+
+impl Limits {
+    /// `streams_per_client` as far as it can take effect. A client accepts
+    /// `Tuning::CLIENT.max_streams` streams from the server and no more, the control stream being
+    /// its own, so a budget past that would admit visitors the client has no stream for.
+    pub fn streams_in_effect(&self) -> u32 {
+        self.streams_per_client
+            .min(Tuning::CLIENT.max_streams.saturating_add(1))
+    }
 }
 
 impl Default for Limits {
@@ -765,6 +778,24 @@ prefer = "tcp"
         }
         cfg.limits.streams_per_client = 2;
         assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_stream_budget_takes_effect_up_to_what_a_client_accepts() {
+        // A client takes 4096 streams from the server, and the control stream is the client's own.
+        for (set, in_effect) in [
+            (2, 2),
+            (4096, 4096),
+            (4097, 4097),
+            (4098, 4097),
+            (u32::MAX, 4097),
+        ] {
+            let limits = Limits {
+                streams_per_client: set,
+                ..Limits::default()
+            };
+            assert_eq!(limits.streams_in_effect(), in_effect, "set to {set}");
+        }
     }
 
     #[test]

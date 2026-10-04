@@ -296,10 +296,11 @@ header describe the proxy, not the visitor.
 `limits.streams_per_client` caps how many streams one client's connection may
 carry: the control stream, one per visitor connection and one per UDP service.
 It defaults to 4096, and a visitor that arrives when every stream is taken is
-reset. On the TCP fallback, yamux promises every stream 256 KiB of receive
-window, so the default lets a session hold about 1 GiB of unread data. Lower it
-on a server with little memory, but not below the number of visitor connections
-a client carries at once.
+reset. A client accepts 4096 streams from the server, so a value above 4097 does
+nothing more. On the TCP fallback, yamux promises every stream 256 KiB of
+receive window, so the default lets a session hold about 1 GiB of unread data.
+Lower it on a server with little memory, but not below the number of visitor
+connections a client carries at once.
 `limits.udp_sessions_per_service` caps how many visitors one UDP service keeps
 track of at once, and defaults to 4096. Past it the visitor that has been quiet
 longest is forgotten, and any visitor is forgotten after 60 s of silence; its
