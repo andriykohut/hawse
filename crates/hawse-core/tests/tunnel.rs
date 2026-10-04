@@ -277,7 +277,12 @@ async fn transfers_8_mib_intact_over_tcp() {
 /// yamux parks a new outbound stream past an unacknowledged backlog of 256 — a private constant
 /// with no setter, so a failure here cannot be tuned away.
 async fn holds_512_visitor_streams_open_at_once(prefer: Prefer) {
-    let _ = rlimit::increase_nofile_limit(8192);
+    // Each stream holds four sockets in this process: the visitor's two ends and the echo's two.
+    let limit = rlimit::increase_nofile_limit(8192).expect("the open-file limit can be raised");
+    assert!(
+        limit > 4 * 512,
+        "an open-file limit of {limit} cannot hold 512 streams"
+    );
     let (server_id, client_id) = ids();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[])]),
