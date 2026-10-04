@@ -122,6 +122,8 @@ pub enum ClientError {
     },
     #[error("stream window does not fit a QUIC window")]
     Window,
+    #[error("transport buffer does not fit this machine's address space")]
+    Buffer,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +256,8 @@ impl Client {
         events: &mpsc::Sender<Event>,
         welcomed: &mut Option<Instant>,
     ) -> Result<(), ClientError> {
+        let buffer =
+            usize::try_from(self.cfg.transport.buffer.0).map_err(|_| ClientError::Buffer)?;
         let dial = async {
             let remote = self.resolve().await?;
             Ok::<_, ClientError>((remote, self.connect(remote).await?))
@@ -264,7 +268,8 @@ impl Client {
             () = cancel.cancelled() => return Ok(()),
             dialed = dial => dialed?,
         };
-        self.serve(remote, dialed, cancel, events, welcomed).await
+        self.serve(remote, dialed, buffer, cancel, events, welcomed)
+            .await
     }
 
     /// The session from its greeting on, over a transport already dialed.
@@ -272,6 +277,7 @@ impl Client {
         &self,
         remote: SocketAddr,
         dialed: Dialed,
+        buffer: usize,
         cancel: CancellationToken,
         events: &mpsc::Sender<Event>,
         welcomed: &mut Option<Instant>,
@@ -307,7 +313,6 @@ impl Client {
             udp_cancel: &udp_cancel,
         };
         tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
-        let buffer = usize::try_from(self.cfg.transport.buffer.0).expect("a validated buffer");
         let mut ping = ping_interval();
         let mut last_heard = Instant::now();
         let mut nonce = 0u64;
@@ -635,6 +640,7 @@ fn classify(err: &ClientError) -> DisconnectCause {
         ClientError::Encode(_)
         | ClientError::ServerAddr(_)
         | ClientError::Window
+        | ClientError::Buffer
         | ClientError::Tls(_)
         | ClientError::Identity(_) => DisconnectCause::Config(chain(err)),
         ClientError::NoTransport { quic, tcp }
@@ -758,6 +764,7 @@ mod tests {
         let cases = [
             ClientError::ServerAddr("bad".to_owned()),
             ClientError::Window,
+            ClientError::Buffer,
             ClientError::Tls(rustls::Error::General("boom".to_owned())),
             ClientError::Identity(IdentityError::WrongAlgorithm("rsa".to_owned())),
             ClientError::Encode(FrameError::TooLarge(0)),
