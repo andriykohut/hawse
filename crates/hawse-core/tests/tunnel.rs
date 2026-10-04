@@ -1020,12 +1020,9 @@ async fn a_refusal_carries_its_code_over_tcp() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rogue_addr = listener.local_addr().unwrap();
 
-    // Bound and let go, so nothing listens where the client will dial.
-    let dead = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // Nothing listens where the client will dial. Not a port a dropped listener had: the next
+    // socket in the process can draw that number again, and the dial is then answered.
+    let dead = SocketAddr::from((Ipv4Addr::LOCALHOST, fixed_port(Kind::Tcp)));
     let mut client = start_client(
         client_config_over(
             rogue_addr,
@@ -1144,12 +1141,9 @@ async fn a_local_service_that_resets_gives_the_visitor_a_reset_over_tcp() {
 }
 
 async fn nothing_listening_on_local_gives_the_visitor_a_reset(prefer: Prefer) {
-    // Bound and let go, so nothing listens where the client will dial.
-    let dead = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // Nothing listens where the client will dial. Not a port a dropped listener had: the next
+    // socket in the process can draw that number again, and the dial is then answered.
+    let dead = SocketAddr::from((Ipv4Addr::LOCALHOST, fixed_port(Kind::Tcp)));
     let (server, client, port) = tunnel_to(dead, prefer).await;
 
     // Only reads from here on. A socket reports a reset once, to whichever call meets it first,

@@ -11,7 +11,6 @@ use common::{
 use hawse_core::config::Prefer;
 use hawse_core::identity::Identity;
 use hawse_proto::port::Kind;
-use tokio::net::UdpSocket;
 
 struct Tunnel {
     server: RunningServer,
@@ -150,12 +149,9 @@ async fn a_small_request_gets_its_oversized_reply_over_tcp() {
 }
 
 async fn a_silent_local_service_costs_only_silence(prefer: Prefer) {
-    let closed = UdpSocket::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .to_string();
+    // Not a port a dropped socket had: the next socket in the process can draw that number again,
+    // and the dead service then answers, or its packets land on another test's visitor.
+    let closed = format!("127.0.0.1:{}", fixed_port(Kind::Udp));
     let echo = udp_echo_server().await.to_string();
     let tunnel = tunnel(prefer, &[("dead", &closed), ("echo", &echo)]).await;
     let visitor = udp_visitor().await;
