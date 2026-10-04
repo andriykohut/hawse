@@ -302,6 +302,16 @@ pub struct RawClient {
 }
 
 pub async fn raw_client(server: &RunningServer, identity: &Identity) -> RawClient {
+    let mut client = raw_hello(server, identity).await;
+    assert!(matches!(
+        client.reply().await,
+        ServerMessage::Welcome { .. }
+    ));
+    client
+}
+
+/// `raw_client` up to its `Hello`, for a test that cares what the server does before it answers.
+pub async fn raw_hello(server: &RunningServer, identity: &Identity) -> RawClient {
     let (cert, key) = identity.certificate().unwrap();
     let endpoint = quic::dialer(
         tls::client_config(cert, key, server.key, tls::provider()).unwrap(),
@@ -319,16 +329,11 @@ pub async fn raw_client(server: &RunningServer, identity: &Identity) -> RawClien
         })
         .await
         .unwrap();
-    let mut client = RawClient {
+    RawClient {
         conn,
         control,
         _endpoint: endpoint,
-    };
-    assert!(matches!(
-        client.reply().await,
-        ServerMessage::Welcome { .. }
-    ));
-    client
+    }
 }
 
 impl RawClient {

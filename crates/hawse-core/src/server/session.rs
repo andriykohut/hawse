@@ -114,7 +114,14 @@ pub async fn run(
         if let Some(previous) = previous {
             previous.cancel.cancel();
             tracing::info!(previous = %previous.remote, "superseding this key's previous session");
-            let _ = tokio::time::timeout(SUPERSEDE_WAIT, previous.done.cancelled()).await;
+            // Not welcomed yet, so a shutdown finds nothing here to tell the client or to drain.
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    transport.close(CloseReason::Shutdown);
+                    return;
+                }
+                _ = tokio::time::timeout(SUPERSEDE_WAIT, previous.done.cancelled()) => {}
+            }
         }
         let welcome = ServerMessage::Welcome {
             agent: AGENT.to_owned(),
