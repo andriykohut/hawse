@@ -30,8 +30,17 @@ fn failed(err: impl std::error::Error + Send + Sync + 'static) -> TransportError
     TransportError::Connection(Box::new(err))
 }
 
+/// yamux's own stream limit, as a multiple of `Tuning::max_streams`. yamux counts a stream until
+/// both ends have let it go: one the caller dropped while the tunnel's socket was too full to say
+/// so, and one the peer still holds after this end finished with it. It answers the stream past
+/// its limit by ending the connection, so the limit is kept clear of what the caller counts.
+const HEADROOM: usize = 2;
+
 fn config(tuning: Tuning) -> yamux::Config {
-    let streams = tuning.max_streams as usize;
+    // Capped where the window below would stop fitting, which only a 32-bit target can reach.
+    let streams = (tuning.max_streams as usize)
+        .saturating_mul(HEADROOM)
+        .min(usize::MAX / yamux::DEFAULT_CREDIT as usize);
     // Every stream is guaranteed `DEFAULT_CREDIT`, and yamux grows a stream's window only into
     // whatever the connection limit has left over that guarantee. Set the limit to the guarantee
     // exactly and the slack is zero, pinning every stream at 256 KiB per round trip for the life
@@ -105,9 +114,10 @@ type OpenRequest = oneshot::Sender<Result<yamux::Stream, TransportError>>;
 /// Dropping it closes the connection. Unlike quinn's streams, the halves handed out by `open_bi`
 /// and `accept_bi` do not keep it alive, so a caller still pumping them must hold it too.
 ///
-/// The caller is the only thing bounding concurrent streams to `Tuning::max_streams`. yamux answers
-/// the one past the limit by tearing the whole connection down, inbound and outbound alike, so the
-/// error `open_bi` returns there is not a per-stream failure — the transport is already dead.
+/// The caller is the only thing bounding concurrent streams to `Tuning::max_streams`. yamux's own
+/// limit sits `HEADROOM` times above that, and it answers the one past it by tearing the whole
+/// connection down, inbound and outbound alike, so the error `open_bi` returns there is not a
+/// per-stream failure — the transport is already dead.
 ///
 /// What notices a peer that vanished silently is the control-stream heartbeat, which runs on both
 /// transports and reports in 45 s. The kernel keepalive configured here is only the backstop
@@ -276,6 +286,10 @@ impl Driver {
     /// `poll_new_outbound` parks once 256 streams are unacknowledged, and the acknowledgement that
     /// releases it arrives only through `poll_next_inbound` — so awaiting the former in a `select!`
     /// arm of its own deadlocks against the peer.
+    ///
+    /// `poll_next_inbound` is also where yamux gets to the streams dropped since it was last
+    /// polled, and until then it counts them. So it runs between taking a request and opening for
+    /// it: a caller that dropped a stream to make room for this one finds the room there.
     fn poll_step(&mut self, cx: &mut Context<'_>) -> Poll<Step> {
         loop {
             if self.pending.is_none() {
@@ -285,21 +299,21 @@ impl Driver {
                     Poll::Pending => {}
                 }
             }
-            if self.pending.is_some()
-                && let Poll::Ready(opened) = self.conn.poll_new_outbound(cx)
-            {
-                let request = self.pending.take().expect("checked above");
-                let _: Result<(), _> = request.send(opened.map_err(failed));
-                continue;
-            }
-            return Poll::Ready(match ready!(self.conn.poll_next_inbound(cx)) {
-                Some(Ok(stream)) => Step::Inbound(stream),
-                Some(Err(err)) => {
+            match self.conn.poll_next_inbound(cx) {
+                Poll::Ready(Some(Ok(stream))) => return Poll::Ready(Step::Inbound(stream)),
+                Poll::Ready(Some(Err(err))) => {
                     tracing::debug!(err = %chain(&err), "multiplexer failed");
-                    Step::Done
+                    return Poll::Ready(Step::Done);
                 }
-                None => Step::Done,
-            });
+                Poll::Ready(None) => return Poll::Ready(Step::Done),
+                Poll::Pending => {}
+            }
+            if self.pending.is_none() {
+                return Poll::Pending;
+            }
+            let opened = ready!(self.conn.poll_new_outbound(cx));
+            let request = self.pending.take().expect("checked above");
+            let _: Result<(), _> = request.send(opened.map_err(failed));
         }
     }
 }

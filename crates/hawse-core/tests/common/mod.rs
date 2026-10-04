@@ -84,6 +84,10 @@ pub struct TcpPair {
 }
 
 pub async fn tcp_pair() -> TcpPair {
+    tcp_pair_tuned(Tuning::SERVER, Tuning::CLIENT).await
+}
+
+pub async fn tcp_pair_tuned(server: Tuning, client: Tuning) -> TcpPair {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
     let (cert, key) = server_id.certificate().unwrap();
@@ -96,11 +100,9 @@ pub async fn tcp_pair() -> TcpPair {
     let (server, client) = tokio::join!(
         async {
             let (stream, _) = listener.accept().await.unwrap();
-            tcp::accept(stream, server_tls, Tuning::SERVER)
-                .await
-                .unwrap()
+            tcp::accept(stream, server_tls, server).await.unwrap()
         },
-        tcp::connect(addr, client_tls, Tuning::CLIENT),
+        tcp::connect(addr, client_tls, client),
     );
     TcpPair {
         client: Arc::new(client.unwrap()),
