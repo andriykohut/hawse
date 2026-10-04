@@ -541,6 +541,15 @@ prefer = "tcp"
     }
 
     #[test]
+    fn a_zero_listen_port_is_rejected() {
+        let cfg = ServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.validate(), Err(ConfigError::ListenPort));
+    }
+
+    #[test]
     fn listen_port_inside_the_dynamic_pool_is_rejected() {
         let cfg = ServerConfig {
             listen: "127.0.0.1:40500".parse().unwrap(),
@@ -638,6 +647,17 @@ prefer = "tcp"
         let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         cfg.name = Some("Home Lab".into());
         assert!(matches!(cfg.validate(), Err(ConfigError::Name(_))));
+    }
+
+    #[test]
+    fn a_service_name_with_an_uppercase_letter_is_rejected() {
+        let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
+        let entry = cfg.expose.remove("dev").unwrap();
+        cfg.expose.insert("Dev".into(), entry);
+        assert_eq!(
+            cfg.validate(),
+            Err(ConfigError::ServiceName("Dev".into(), NameError::Char('D')))
+        );
     }
 
     #[test]
