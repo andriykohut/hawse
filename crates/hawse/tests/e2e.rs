@@ -1,11 +1,14 @@
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv6Addr, TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hawse_core::config::ServerConfig;
+use hawse_core::net;
+use hawse_proto::port::Kind;
 
 struct Proc(Child);
 
@@ -56,6 +59,33 @@ fn free_tcp_port() -> u16 {
         .port()
 }
 
+/// A public port nothing holds on any interface, from below the range the kernel draws from for a
+/// bind to port 0 and for an outgoing connection, which also keeps it out of the default dynamic
+/// pool. A port from that range is free only until the next socket on the machine draws the same
+/// number, and the server binds this one some time after it is picked.
+fn free_public_port(kind: Kind) -> u16 {
+    const FIRST: u16 = 20000;
+    const COUNT: u16 = 10000;
+    // The probe is the server's own bind, and its sockets register with a runtime.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let every_interface = Ipv6Addr::UNSPECIFIED.into();
+    // Each process starts somewhere else in the range, so two runs side by side do not probe the
+    // same ports in the same order.
+    let start = RandomState::new().hash_one(()) % u64::from(COUNT);
+    let start = u16::try_from(start).expect("below the count");
+    (0..COUNT)
+        .map(|step| FIRST + (start + step) % COUNT)
+        .find(|&port| match kind {
+            Kind::Tcp => net::bind_tcp(every_interface, port).is_ok(),
+            Kind::Udp => net::bind_udp(every_interface, port).is_ok(),
+        })
+        .expect("a free port below the ephemeral range")
+}
+
 fn keygen(path: &std::path::Path) -> String {
     let out = hawse()
         .args(["keygen", "--out"])
@@ -72,7 +102,7 @@ fn echo_round_trip_through_real_binaries() {
     let server_key = keygen(&dir.path().join("server.key"));
     let client_key = keygen(&dir.path().join("client.key"));
     let server_port = free_listen_port();
-    let public_port = free_tcp_port();
+    let public_port = free_public_port(Kind::Tcp);
 
     let echo = TcpListener::bind("127.0.0.1:0").unwrap();
     let echo_addr = echo.local_addr().unwrap();
@@ -140,13 +170,7 @@ fn udp_echo_round_trip_through_real_binaries() {
     let server_key = keygen(&dir.path().join("server.key"));
     let client_key = keygen(&dir.path().join("client.key"));
     let server_port = free_listen_port();
-    let pool = ServerConfig::default().dynamic_ports;
-    let public_port = loop {
-        let port = free_udp_port();
-        if port != server_port && !pool.contains_number(port) {
-            break port;
-        }
-    };
+    let public_port = free_public_port(Kind::Udp);
 
     let echo = UdpSocket::bind("127.0.0.1:0").unwrap();
     let echo_addr = echo.local_addr().unwrap();
