@@ -54,7 +54,7 @@ impl Identity {
             )));
         }
         let public = PublicKey::from_slice(key_pair.public_key_raw())
-            .map_err(|e| IdentityError::WrongAlgorithm(e.to_string()))?;
+            .expect("an Ed25519 public key is 32 bytes");
         Ok(Self { key_pair, public })
     }
 
