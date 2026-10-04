@@ -146,6 +146,8 @@ pub async fn pump<S: Edge>(
                 .await
                 .map_err(PumpError::Socket)?;
         }
+        // Every byte is already written, so a half-close that fails only leaves the close to the
+        // drop. Returning it would have try_join! cancel a direction that may still be running.
         let _ = writer.shutdown().await;
         Ok::<u64, PumpError>(total)
     };
