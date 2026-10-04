@@ -282,7 +282,9 @@ of each visitor's bytes, naming the visitor's address and the public address it
 reached, so a service that logs or limits by address sees the visitor instead of
 the client. The service has to expect the header, or it reads it as the start
 of the request. On a UDP service the header goes in front of every datagram the
-service receives, and its replies carry none.
+service receives, and its replies carry none. Where the server answers on every
+interface, a UDP service's header names the address the client dialed as the
+public one, whichever of the server's addresses the visitor reached.
 
 A service behind a reverse proxy on the server, with `bind = "127.0.0.1"` as
 above, sees every visitor arrive from the proxy, so its allow list and its PROXY

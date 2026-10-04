@@ -60,9 +60,26 @@ parked for later. Each entry says what it is and why it waits.
   frames are the size they were; a larger one lets a single stream hold the
   connection longer between other streams' frames and window updates. Not
   measured.
+- **A dial that loses the `auto` race can cost the client a failed
+  authentication.** The loser is dropped where it stands. Where it had reached
+  the server, as a TCP dial inside its TLS handshake when QUIC connects late or
+  a QUIC handshake in flight on a server with `quic_retry` when TCP wins, the
+  server counts a failed handshake against the client's address: at most one a
+  connect, out of 30 a minute. Letting the loser finish its handshake before
+  closing would cost nothing, since a known key that never greets is not
+  counted. Waits for a deployment where many clients share an address.
 
 ## Deferred from the phase 2b UDP work
 
+- **A UDP PROXY header names the address the client dialed, not the one the
+  visitor reached.** On a wildcard bind the server cannot tell which of its
+  addresses a datagram arrived on without `IP_PKTINFO`, so the destination is
+  right only where the server has one public address or `bind` names one.
+  Waits for a receiver that reads the destination.
+- **A PROXY header takes its room from the largest datagrams.** Header and
+  payload reach `local` as one datagram, so a payload within 28 bytes of the
+  largest a datagram holds, 52 for IPv6, fails to send and is counted as a
+  `socket` drop.
 - **A bulk stream that ends is not reopened.** If the stream fails while the
   session lives, payloads too large for a datagram drop, and on the TCP
   transport all of them do, until the service is bound again. A transport
