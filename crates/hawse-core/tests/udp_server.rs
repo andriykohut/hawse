@@ -4,8 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use common::{
-    DYNAMIC_PORTS, free_udp_port_outside_pool, raw_client, server_config, start_server, udp_recv,
-    udp_visitor,
+    DYNAMIC_PORTS, fixed_port, raw_client, server_config, start_server, udp_recv, udp_visitor,
 };
 use hawse_core::config::{Limits, ServerConfig};
 use hawse_core::frame::{read_body, write_body};
@@ -152,7 +151,7 @@ async fn a_visitor_evicted_at_the_cap_stops_receiving_replies() {
 #[tokio::test]
 async fn a_fixed_udp_port_is_free_again_once_its_session_ends() {
     let (server_id, client_id) = ids();
-    let port = free_udp_port_outside_pool().await;
+    let port = fixed_port(Kind::Udp);
     let grant = format!("{port}/udp");
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&grant])]),

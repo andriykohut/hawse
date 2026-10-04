@@ -4,13 +4,13 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::{
-    RunningClient, RunningServer, client_config, client_config_over, expect_bound,
-    free_udp_port_outside_pool, server_config, start_client, start_server, udp_ask,
-    udp_echo_server, udp_recv, udp_replier, udp_visitor,
+    RunningClient, RunningServer, bind_outcome, client_config, client_config_over, expect_bound,
+    fixed_port, server_config, start_client, start_server, udp_ask, udp_echo_server, udp_recv,
+    udp_replier, udp_visitor,
 };
 use hawse_core::config::Prefer;
 use hawse_core::identity::Identity;
-use tokio::net::UdpSocket;
+use hawse_proto::port::Kind;
 
 struct Tunnel {
     server: RunningServer,
@@ -149,12 +149,9 @@ async fn a_small_request_gets_its_oversized_reply_over_tcp() {
 }
 
 async fn a_silent_local_service_costs_only_silence(prefer: Prefer) {
-    let closed = UdpSocket::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .to_string();
+    // Not a port a dropped socket had: the next socket in the process can draw that number again,
+    // and the dead service then answers, or its packets land on another test's visitor.
+    let closed = format!("127.0.0.1:{}", fixed_port(Kind::Udp));
     let echo = udp_echo_server().await.to_string();
     let tunnel = tunnel(prefer, &[("dead", &closed), ("echo", &echo)]).await;
     let visitor = udp_visitor().await;
@@ -188,7 +185,7 @@ async fn a_silent_local_service_costs_only_silence_over_tcp() {
 async fn a_fixed_udp_port_is_free_for_the_next_session(prefer: Prefer) {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
-    let granted = free_udp_port_outside_pool().await;
+    let granted = fixed_port(Kind::Udp);
     let grant = format!("{granted}/udp");
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&grant])]),
@@ -200,18 +197,22 @@ async fn a_fixed_udp_port_is_free_for_the_next_session(prefer: Prefer) {
 
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
+    let bound = bind_outcome(&mut first.events, "echo").await;
     assert_eq!(
-        expect_bound(&mut first.events, "echo").await.number,
-        granted
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the first session's bind"
     );
     assert_eq!(udp_ask(&visitor, granted, b"first").await, b"first");
     first.cancel.cancel();
     assert!(first.task.await.unwrap().is_ok());
 
     let mut second = start_client(cfg, client_id);
+    let bound = bind_outcome(&mut second.events, "echo").await;
     assert_eq!(
-        expect_bound(&mut second.events, "echo").await.number,
-        granted
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the second session's bind"
     );
     assert_eq!(udp_ask(&visitor, granted, b"second").await, b"second");
 

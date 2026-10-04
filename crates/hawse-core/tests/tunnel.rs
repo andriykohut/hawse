@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    DYNAMIC_PORTS, RunningClient, RunningServer, client_config, client_config_over, echo_server,
-    expect_bound, free_port_outside_pool, next_event, server_config, start_client, start_server,
+    DYNAMIC_PORTS, RunningClient, RunningServer, bind_outcome, client_config, client_config_over,
+    echo_server, expect_bound, fixed_port, next_event, server_config, start_client, start_server,
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
@@ -14,6 +14,7 @@ use hawse_core::identity::Identity;
 use hawse_core::transport::TransportKind;
 use hawse_core::transport::quic::QuicError;
 use hawse_proto::msg::BindFailure;
+use hawse_proto::port::Kind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -29,7 +30,7 @@ async fn a_loopback_bind_serves_visitors_on_loopback() {
     // A fixed port outside the shared dynamic pool: with SO_REUSEADDR a loopback
     // bind and another test's wildcard bind can hold the same port at once, and
     // loopback traffic then reaches whichever is more specific.
-    let granted = free_port_outside_pool(&[]).await;
+    let granted = fixed_port(Kind::Tcp);
     let grant = granted.to_string();
     let mut cfg = server_config(&[("test", client_id.public_key(), &[&grant])]);
     cfg.bind = Ipv4Addr::LOCALHOST.into();
@@ -358,8 +359,8 @@ async fn holds_512_visitor_streams_open_at_once_over_tcp() {
 #[tokio::test]
 async fn fixed_ports_need_a_grant() {
     let (server_id, client_id) = ids();
-    let granted = free_port_outside_pool(&[]).await;
-    let denied = free_port_outside_pool(&[granted]).await;
+    let granted = fixed_port(Kind::Tcp);
+    let denied = fixed_port(Kind::Tcp);
     let grant = granted.to_string();
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&grant])]),
@@ -838,7 +839,7 @@ async fn a_server_that_goes_quiet_is_reported_at_the_deadline_and_not_a_tick_lat
 #[tokio::test]
 async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let (server_id, client_id) = ids();
-    let granted = free_port_outside_pool(&[]).await;
+    let granted = fixed_port(Kind::Tcp);
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&granted.to_string()])]),
         &server_id,
@@ -851,7 +852,12 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
     );
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
-    assert_eq!(expect_bound(&mut first.events, "svc").await.number, granted);
+    let bound = bind_outcome(&mut first.events, "svc").await;
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the first session's bind"
+    );
 
     // Aborting sends no close frame, so the server still holds the port for the dead session.
     first.task.abort();
@@ -859,11 +865,15 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
     let mut second = start_client(cfg, client_id);
     let bound = tokio::time::timeout(
         Duration::from_secs(10),
-        expect_bound(&mut second.events, "svc"),
+        bind_outcome(&mut second.events, "svc"),
     )
     .await
     .expect("the reconnecting client binds within 10 s");
-    assert_eq!(bound.number, granted);
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the second session's bind"
+    );
     second.cancel.cancel();
     server.cancel.cancel();
 }
@@ -873,7 +883,7 @@ async fn a_reconnecting_client_supersedes_its_zombie_session() {
 /// open until the client had it.
 async fn a_second_session_for_the_same_key_supersedes_the_first(prefer: Prefer) {
     let (server_id, client_id) = ids();
-    let granted = free_port_outside_pool(&[]).await;
+    let granted = fixed_port(Kind::Tcp);
     let server = start_server(
         &server_config(&[("test", client_id.public_key(), &[&granted.to_string()])]),
         &server_id,
@@ -887,16 +897,25 @@ async fn a_second_session_for_the_same_key_supersedes_the_first(prefer: Prefer) 
     );
     let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
     let mut first = start_client(cfg.clone(), twin);
-    assert_eq!(expect_bound(&mut first.events, "svc").await.number, granted);
+    let bound = bind_outcome(&mut first.events, "svc").await;
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the first session's bind"
+    );
 
     let mut second = start_client(cfg, client_id);
     let bound = tokio::time::timeout(
         Duration::from_secs(10),
-        expect_bound(&mut second.events, "svc"),
+        bind_outcome(&mut second.events, "svc"),
     )
     .await
     .expect("the second session binds within 10 s");
-    assert_eq!(bound.number, granted);
+    assert_eq!(
+        bound.map(|port| port.number),
+        Ok(granted),
+        "the second session's bind"
+    );
 
     let outcome = tokio::time::timeout(Duration::from_secs(10), first.task)
         .await
@@ -1001,12 +1020,9 @@ async fn a_refusal_carries_its_code_over_tcp() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rogue_addr = listener.local_addr().unwrap();
 
-    // Bound and let go, so nothing listens where the client will dial.
-    let dead = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // Nothing listens where the client will dial. Not a port a dropped listener had: the next
+    // socket in the process can draw that number again, and the dial is then answered.
+    let dead = SocketAddr::from((Ipv4Addr::LOCALHOST, fixed_port(Kind::Tcp)));
     let mut client = start_client(
         client_config_over(
             rogue_addr,
@@ -1125,12 +1141,9 @@ async fn a_local_service_that_resets_gives_the_visitor_a_reset_over_tcp() {
 }
 
 async fn nothing_listening_on_local_gives_the_visitor_a_reset(prefer: Prefer) {
-    // Bound and let go, so nothing listens where the client will dial.
-    let dead = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // Nothing listens where the client will dial. Not a port a dropped listener had: the next
+    // socket in the process can draw that number again, and the dial is then answered.
+    let dead = SocketAddr::from((Ipv4Addr::LOCALHOST, fixed_port(Kind::Tcp)));
     let (server, client, port) = tunnel_to(dead, prefer).await;
 
     // Only reads from here on. A socket reports a reset once, to whichever call meets it first,
