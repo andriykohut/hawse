@@ -100,7 +100,7 @@ impl Shared {
 }
 
 /// `done` is cancelled once the session has released its ports, so a session superseding this one
-/// can wait for them.
+/// can wait for them. A session that unwinds cancels it having only told its listeners to stop.
 pub struct Live {
     pub cancel: CancellationToken,
     pub done: CancellationToken,
