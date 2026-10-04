@@ -110,11 +110,7 @@ pub async fn run(
             done: CancellationToken::new(),
             remote,
         });
-        let previous = shared
-            .sessions
-            .lock()
-            .expect("sessions lock")
-            .insert(key, Arc::clone(&live));
+        let (claim, previous) = Claim::stake(Arc::clone(&shared), key, live);
         if let Some(previous) = previous {
             previous.cancel.cancel();
             tracing::info!(previous = %previous.remote, "superseding this key's previous session");
@@ -125,7 +121,6 @@ pub async fn run(
             client_name: grant.name.clone(),
         };
         if control.send(&welcome).await.is_err() {
-            retire(&shared, key, &live);
             return;
         }
         tracing::info!(%agent, "client connected");
@@ -133,8 +128,7 @@ pub async fn run(
             transport,
             shared,
             grant,
-            key,
-            live,
+            claim,
             services: HashMap::new(),
             ids: ServiceIds::new(),
             tasks: TaskTracker::new(),
@@ -146,16 +140,40 @@ pub async fn run(
     .await;
 }
 
-/// Signals that this session's ports are free, then drops its claim on the key unless a newer
-/// session has already taken it.
-fn retire(shared: &Shared, key: PublicKey, live: &Arc<Live>) {
-    live.done.cancel();
-    let mut sessions = shared.sessions.lock().expect("sessions lock");
-    if sessions
-        .get(&key)
-        .is_some_and(|held| Arc::ptr_eq(held, live))
-    {
-        sessions.remove(&key);
+/// A session's hold on its key. Dropping it signals that the session's ports are free, then gives
+/// the key up unless a newer session has already taken it. A drop and not a call, so a session
+/// that panics does not leave every later one for its key waiting out `SUPERSEDE_WAIT`.
+struct Claim {
+    shared: Arc<Shared>,
+    key: PublicKey,
+    live: Arc<Live>,
+}
+
+impl Claim {
+    /// Also returns the session that held the key until now, if there was one.
+    fn stake(shared: Arc<Shared>, key: PublicKey, live: Arc<Live>) -> (Self, Option<Arc<Live>>) {
+        let previous = shared
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(key, Arc::clone(&live));
+        (Self { shared, key, live }, previous)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.live.done.cancel();
+        // This runs during an unwind as well, where a second panic would abort the process.
+        let Ok(mut sessions) = self.shared.sessions.lock() else {
+            return;
+        };
+        if sessions
+            .get(&self.key)
+            .is_some_and(|held| Arc::ptr_eq(held, &self.live))
+        {
+            sessions.remove(&self.key);
+        }
     }
 }
 
@@ -188,8 +206,7 @@ struct Session {
     transport: Arc<dyn Transport>,
     shared: Arc<Shared>,
     grant: Grant,
-    key: PublicKey,
-    live: Arc<Live>,
+    claim: Claim,
     services: HashMap<String, BoundService>,
     ids: ServiceIds,
     tasks: TaskTracker,
@@ -245,7 +262,7 @@ impl Session {
         let mut nonce = 0u64;
         let mut told_client = false;
 
-        let mine = self.live.cancel.clone();
+        let mine = self.claim.live.cancel.clone();
         let reason = loop {
             tokio::select! {
                 () = mine.cancelled() => {
@@ -300,7 +317,7 @@ impl Session {
         control.finish().await;
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
-        retire(&self.shared, self.key, &self.live);
+        drop(self.claim);
         // A QUIC `close` drops whatever is not yet on the wire, so let a client that was told why
         // read it and close first.
         if told_client {
@@ -467,6 +484,27 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_session_that_panics_gives_up_its_key() {
+        let shared = Arc::new(Shared::for_tests());
+        let key = PublicKey::from_bytes([1; 32]);
+        let live = Arc::new(Live {
+            cancel: CancellationToken::new(),
+            done: CancellationToken::new(),
+            remote: "127.0.0.1:1".parse().unwrap(),
+        });
+        let session = tokio::spawn({
+            let (shared, live) = (Arc::clone(&shared), Arc::clone(&live));
+            async move {
+                let _claim = Claim::stake(shared, key, live);
+                panic!("mid-session");
+            }
+        });
+        assert!(session.await.unwrap_err().is_panic());
+        assert!(live.done.is_cancelled());
+        assert!(shared.sessions.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn ids_skip_the_ones_a_live_service_holds() {
