@@ -66,7 +66,8 @@ together.
 
 Besides the features named above, configuration hot reload and the `expose`,
 `authorize`, `revoke` and `check` subcommands are not implemented either.
-`docs/backlog.md` lists everything that is planned or deliberately deferred.
+The [issues](https://github.com/andriykohut/hawse/issues) list everything that
+is planned or deliberately deferred.
 
 ## Install
 
