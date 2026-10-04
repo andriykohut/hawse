@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt;
+use hawse_core::transport::quic::Tuning;
 use hawse_core::transport::records::{RecordReader, RecordWriter};
 use hawse_core::transport::{CloseReason, RecvHalf, SendHalf, TransportError, reset_code};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -455,6 +456,95 @@ async fn tcp_transport_opens_past_the_ack_backlog() {
         .expect("open_bi stalled past the 256-stream acknowledgement backlog");
     assert_eq!(opened.len(), BURST);
     assert_eq!(answering.await.unwrap().len(), BURST);
+}
+
+/// yamux forgets a stream only when its driver gets to the drop, and answers an open past its limit
+/// by ending the connection. A caller that counts its own streams has the room back the moment it
+/// drops one, so an open that follows a drop at once must find the room there as well.
+#[tokio::test]
+async fn tcp_transport_reopens_at_its_limit_as_soon_as_a_stream_is_dropped() {
+    const STREAMS: u32 = 8;
+
+    let pair = common::tcp_pair_tuned(
+        Tuning {
+            max_streams: STREAMS,
+            ..Tuning::SERVER
+        },
+        Tuning::CLIENT,
+    )
+    .await;
+    let mut held = Vec::new();
+    for _ in 0..STREAMS {
+        held.push(pair.server.open_bi().await.unwrap());
+    }
+
+    // Nothing awaited in between, so the driver meets the open before it has seen the drops.
+    drop(held);
+    let reopened = pair.server.open_bi().await;
+
+    assert!(reopened.is_ok(), "{:?}", reopened.err());
+}
+
+/// A stream this end has dropped can still be held at the other, where yamux counts it until it
+/// is let go. A caller keeping to `max_streams` of its own must be able to replace every one of
+/// them meanwhile.
+#[tokio::test]
+async fn tcp_transport_replaces_every_stream_while_the_peer_holds_the_last_ones() {
+    const STREAMS: u32 = 8;
+
+    let tuned = |tuning: Tuning| Tuning {
+        max_streams: STREAMS,
+        ..tuning
+    };
+    let pair = common::tcp_pair_tuned(tuned(Tuning::SERVER), tuned(Tuning::CLIENT)).await;
+    let mut held_by_the_peer = Vec::new();
+    for _ in 0..2 {
+        let mut opened = Vec::new();
+        for _ in 0..STREAMS {
+            let (mut send, recv) = pair.server.open_bi().await.unwrap();
+            send.write_all(b"x").await.unwrap();
+            opened.push((send, recv));
+            let accepted = timeout(Duration::from_secs(5), pair.client.accept_bi())
+                .await
+                .expect("the peer accepts within 5 s");
+            held_by_the_peer.push(accepted.unwrap());
+        }
+    }
+}
+
+/// Callers that reopen as fast as they drop keep an open waiting at the driver the whole time. A
+/// driver that served those before it let yamux get to the drops would have the dropped streams
+/// pile up against yamux's limit, however far above the callers' own it sits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_transport_keeps_up_with_streams_dropped_as_fast_as_they_are_opened() {
+    const STREAMS: u32 = 4;
+
+    let pair = common::tcp_pair_tuned(
+        Tuning {
+            max_streams: STREAMS,
+            ..Tuning::SERVER
+        },
+        Tuning::CLIENT,
+    )
+    .await;
+    // One stream held at a time by each of `STREAMS` callers, so never more than the limit.
+    let callers: Vec<_> = (0..STREAMS)
+        .map(|_| {
+            let server = Arc::clone(&pair.server);
+            tokio::spawn(async move {
+                for turn in 0..5000 {
+                    let opened = server.open_bi().await;
+                    assert!(opened.is_ok(), "turn {turn}: {:?}", opened.err());
+                }
+            })
+        })
+        .collect();
+    for caller in callers {
+        timeout(Duration::from_secs(30), caller)
+            .await
+            .expect("every caller done within 30 s")
+            .unwrap();
+    }
 }
 
 #[tokio::test]

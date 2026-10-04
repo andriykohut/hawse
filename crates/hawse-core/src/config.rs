@@ -13,6 +13,8 @@ pub mod units;
 
 use units::ByteSize;
 
+use crate::transport::quic::Tuning;
+
 pub const DEFAULT_PORT: u16 = 4433;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -65,11 +67,25 @@ pub struct ClientPolicy {
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub auth_failures_per_minute: u32,
+    /// The control stream and every stream the server opens toward one client: one per visitor
+    /// connection and one per UDP service. A visitor past it is reset. `streams_in_effect` is
+    /// what the server goes by.
+    ///
     /// Costs 256 KiB of receive window per stream on the TCP fallback, where yamux guarantees
     /// every stream that much and the connection window has to cover the whole guarantee: the
     /// default 4096 reserves ~1 GiB per session against QUIC's 64 MiB for the same config.
     pub streams_per_client: u32,
     pub udp_sessions_per_service: u32,
+}
+
+impl Limits {
+    /// `streams_per_client` as far as it can take effect. A client accepts
+    /// `Tuning::CLIENT.max_streams` streams from the server and no more, the control stream being
+    /// its own, so a budget past that would admit visitors the client has no stream for.
+    pub fn streams_in_effect(&self) -> u32 {
+        self.streams_per_client
+            .min(Tuning::CLIENT.max_streams.saturating_add(1))
+    }
 }
 
 impl Default for Limits {
@@ -241,7 +257,7 @@ pub enum ConfigError {
         "transport idle_timeout must be at least 1s, not {0:?}; the TCP fallback sets its keepalive in whole seconds, and anything shorter rounds down to a zero the kernel rejects"
     )]
     IdleTimeout(Duration),
-    #[error("limits streams_per_client cannot be 0")]
+    #[error("limits streams_per_client must be at least 2: the control stream takes one")]
     StreamsPerClient,
     #[error("limits udp_sessions_per_service cannot be 0")]
     UdpSessions,
@@ -312,9 +328,10 @@ impl ServerConfig {
             self.transport.connection_window,
             self.transport.idle_timeout,
         )?;
-        // A zero budget is not "no limit": yamux answers the first stream over the cap by tearing
-        // the connection down.
-        if self.limits.streams_per_client == 0 {
+        // The control stream takes one, so anything under two leaves no visitor a stream. Nor is a
+        // zero budget "no limit": yamux answers the first stream over the cap by tearing the
+        // connection down.
+        if self.limits.streams_per_client < 2 {
             return Err(ConfigError::StreamsPerClient);
         }
         if self.limits.udp_sessions_per_service == 0 {
@@ -753,10 +770,32 @@ prefer = "tcp"
     }
 
     #[test]
-    fn a_zero_stream_budget_is_rejected() {
+    fn a_stream_budget_with_no_room_for_a_visitor_is_rejected() {
         let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
-        cfg.limits.streams_per_client = 0;
-        assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
+        for streams in [0, 1] {
+            cfg.limits.streams_per_client = streams;
+            assert_eq!(cfg.validate(), Err(ConfigError::StreamsPerClient));
+        }
+        cfg.limits.streams_per_client = 2;
+        assert_eq!(cfg.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_stream_budget_takes_effect_up_to_what_a_client_accepts() {
+        // A client takes 4096 streams from the server, and the control stream is the client's own.
+        for (set, in_effect) in [
+            (2, 2),
+            (4096, 4096),
+            (4097, 4097),
+            (4098, 4097),
+            (u32::MAX, 4097),
+        ] {
+            let limits = Limits {
+                streams_per_client: set,
+                ..Limits::default()
+            };
+            assert_eq!(limits.streams_in_effect(), in_effect, "set to {set}");
+        }
     }
 
     #[test]

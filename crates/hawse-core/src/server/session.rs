@@ -9,6 +9,7 @@ use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, re
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
+use tokio::sync::Semaphore;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
@@ -129,6 +130,7 @@ pub async fn run(
         tracing::info!(%agent, "client connected");
         let session = Session {
             transport,
+            streams: Arc::new(Semaphore::new(shared.streams)),
             shared,
             grant,
             services: HashMap::new(),
@@ -209,6 +211,10 @@ async fn refuse_streams(transport: Arc<dyn Transport>, cancel: CancellationToken
 
 struct Session {
     transport: Arc<dyn Transport>,
+    /// One permit per stream this session has open toward its client. Past its limit yamux tears
+    /// the connection down and QUIC parks the open, each parked one holding a visitor's socket, so
+    /// the count is kept here, where a visitor can be turned away instead.
+    streams: Arc<Semaphore>,
     shared: Arc<Shared>,
     grant: Grant,
     services: HashMap<String, BoundService>,
@@ -393,6 +399,7 @@ impl Session {
                         allow,
                     },
                     Arc::clone(&self.shared),
+                    Arc::clone(&self.streams),
                     cancel.clone(),
                     self.tasks.clone(),
                 ));
@@ -419,6 +426,7 @@ impl Session {
                 self.tasks.spawn(udp::serve(
                     bound,
                     Arc::clone(&self.transport),
+                    Arc::clone(&self.streams),
                     cancel.clone(),
                 ));
                 port
@@ -602,6 +610,7 @@ mod tests {
         let (claim, _) = Claim::stake(Arc::clone(shared), client_id.public_key(), live);
         let session = Session {
             transport,
+            streams: Arc::new(Semaphore::new(shared.streams)),
             shared: Arc::clone(shared),
             grant: Grant {
                 name: "test".to_owned(),

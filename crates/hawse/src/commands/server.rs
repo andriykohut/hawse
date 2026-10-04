@@ -13,6 +13,15 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
     if let Some(listen) = listen {
         cfg.listen = listen;
     }
+    let streams = cfg.limits.streams_in_effect();
+    if streams < cfg.limits.streams_per_client {
+        tracing::warn!(
+            config = %located.file.display(),
+            streams_per_client = cfg.limits.streams_per_client,
+            in_effect = streams,
+            "limits.streams_per_client is more than a client accepts, and the rest does nothing"
+        );
+    }
     let key_path = located.dir.join(&cfg.key);
     let (identity, created) = Identity::load_or_create(&key_path)
         .into_diagnostic()
