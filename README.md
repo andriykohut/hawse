@@ -23,6 +23,8 @@ Both ends authenticate with Ed25519 keys inside TLS 1.3. The client pins the
 server's public key. The server holds a list of client keys and the ports each
 client may bind.
 
+<img src="https://raw.githubusercontent.com/andriykohut/hawse/main/assets/hawse-demo.gif" width="880" alt="A hawse server and a client starting in two panes, then a visitor's curl to the server's port 8080 answered by the client's local service">
+
 ## What it is for
 
 Working today, with TCP and UDP forwarding and key-based authorization:
