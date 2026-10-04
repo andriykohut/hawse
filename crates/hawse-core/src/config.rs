@@ -181,6 +181,26 @@ impl Default for ClientTransport {
     }
 }
 
+impl ClientTransport {
+    /// The keys that tune QUIC alone and are off their defaults under `Prefer::Tcp`, where they
+    /// are validated and then do nothing; `Tuning` says why. A key written out at its default
+    /// reads the same as one left out, so it is not named.
+    pub fn inert(&self) -> Vec<&'static str> {
+        let mut inert = Vec::new();
+        if self.prefer != Prefer::Tcp {
+            return inert;
+        }
+        let default = Self::default();
+        if self.stream_window != default.stream_window {
+            inert.push("stream_window");
+        }
+        if self.congestion != default.congestion {
+            inert.push("congestion");
+        }
+        inert
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
     #[error("client `{0}`: {1}")]
@@ -682,6 +702,41 @@ prefer = "tcp"
         cfg.transport.stream_window = ByteSize(2 << 20);
         cfg.transport.connection_window = ByteSize(1 << 20);
         assert_eq!(cfg.validate(), Err(ConfigError::Windows(2 << 20, 1 << 20)));
+    }
+
+    #[test]
+    fn a_non_default_quic_setting_under_prefer_tcp_is_named_as_inert() {
+        let transport = |text| toml::from_str::<ClientTransport>(text).unwrap();
+        let none = Vec::<&str>::new();
+        assert_eq!(transport("prefer = \"tcp\"").inert(), none);
+        assert_eq!(
+            transport("prefer = \"tcp\"\nstream_window = \"4MiB\"").inert(),
+            ["stream_window"]
+        );
+        assert_eq!(
+            transport("prefer = \"tcp\"\ncongestion = \"cubic\"").inert(),
+            ["congestion"]
+        );
+        assert_eq!(
+            transport("prefer = \"tcp\"\nstream_window = \"4MiB\"\ncongestion = \"cubic\"").inert(),
+            ["stream_window", "congestion"]
+        );
+        assert_eq!(
+            transport("stream_window = \"4MiB\"\ncongestion = \"cubic\"").inert(),
+            none
+        );
+        assert_eq!(
+            transport("prefer = \"quic\"\ncongestion = \"cubic\"").inert(),
+            none
+        );
+    }
+
+    #[test]
+    fn a_quic_setting_written_at_its_default_is_not_named_as_inert() {
+        let transport: ClientTransport =
+            toml::from_str("prefer = \"tcp\"\nstream_window = \"2MiB\"\ncongestion = \"bbr\"")
+                .unwrap();
+        assert_eq!(transport.inert(), Vec::<&str>::new());
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod paths;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
@@ -73,9 +74,26 @@ pub enum ColorChoice {
     Never,
 }
 
-fn main() -> miette::Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     logging::init(cli.verbose, cli.quiet, cli.log, cli.color);
+    match run(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(report) => {
+            // What returning the report from `main` would print.
+            eprintln!("Error: {report:?}");
+            // 2 is clap's exit for a usage error, and a config that does not load is the same
+            // kind of mistake: starting hawse again will not fix it.
+            if report.downcast_ref::<config_file::LoadError>().is_some() {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run(cli: Cli) -> miette::Result<()> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if let Some(threads) = cli.threads {

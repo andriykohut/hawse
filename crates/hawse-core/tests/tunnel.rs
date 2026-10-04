@@ -117,6 +117,30 @@ async fn echoes_through_the_tunnel_over_tcp() {
 }
 
 #[tokio::test]
+async fn a_client_given_localhost_reaches_a_server_listening_on_ipv4_only() {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    // Where `localhost` resolves to `::1` first, nothing answers there and the dial has to move on
+    // to 127.0.0.1. Over TCP, so the refusal is immediate.
+    let mut cfg = client_config_over(server.addr, server.key, &[], Prefer::Tcp);
+    cfg.server = format!("localhost:{}", server.addr.port());
+    let mut client = start_client(cfg, client_id);
+
+    assert!(matches!(
+        next_event(&mut client.events).await,
+        Event::Connected { remote, .. } if remote == server.addr
+    ));
+
+    client.cancel.cancel();
+    assert!(client.task.await.unwrap().is_ok());
+    server.cancel.cancel();
+    server.task.await.unwrap();
+}
+
+#[tokio::test]
 async fn a_server_without_the_fallback_accepts_no_tcp_client() {
     let (server_id, client_id) = ids();
     let mut cfg = server_config(&[("test", client_id.public_key(), &[])]);

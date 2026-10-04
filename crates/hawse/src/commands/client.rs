@@ -11,6 +11,14 @@ use crate::config_file;
 
 pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
     let (cfg, located) = config_file::load_client(config)?;
+    let inert = cfg.transport.inert();
+    if !inert.is_empty() {
+        tracing::warn!(
+            config = %located.file.display(),
+            settings = inert.join(", "),
+            "[transport] settings that tune QUIC do nothing under prefer = \"tcp\""
+        );
+    }
     let key_path = located.dir.join(&cfg.key);
     let (identity, created) = Identity::load_or_create(&key_path)
         .into_diagnostic()

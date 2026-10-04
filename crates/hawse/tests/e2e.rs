@@ -1,7 +1,8 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hawse_core::config::ServerConfig;
@@ -199,4 +200,98 @@ fn udp_echo_round_trip_through_real_binaries() {
         assert!(Instant::now() < deadline, "no UDP reply through the tunnel");
     };
     assert_eq!(&buf[..len], b"ping");
+}
+
+/// Runs `role` on a config holding `text`, and returns its exit code and what it wrote to stderr.
+fn run_with_config(role: &str, text: &str) -> (Option<i32>, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("hawse.toml");
+    fs::write(&config, text).unwrap();
+    let out = hawse()
+        .args([role, "--config"])
+        .arg(&config)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    (out.status.code(), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn a_server_config_that_does_not_parse_exits_2_with_its_diagnostic() {
+    let (code, stderr) = run_with_config("server", "listne = \"[::]:4433\"\n");
+    assert!(stderr.contains("listne"), "{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
+fn a_client_config_that_does_not_validate_exits_2_with_its_diagnostic() {
+    let text = "server = \"tunnel.example.com:4433\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n\n[expose.Web]\nlocal = \"127.0.0.1:8080\"\n";
+    let (code, stderr) = run_with_config("client", text);
+    assert!(stderr.contains("expose `Web`"), "{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
+fn a_server_that_cannot_bind_its_listen_port_exits_1() {
+    let pool = ServerConfig::default().dynamic_ports;
+    // A listen port inside the pool is a config error, which is not what this is about.
+    let held = loop {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        if !pool.contains_number(socket.local_addr().unwrap().port()) {
+            break socket;
+        }
+    };
+    let port = held.local_addr().unwrap().port();
+    let (code, stderr) = run_with_config("server", &format!("listen = \"127.0.0.1:{port}\"\n"));
+    assert!(stderr.contains("cannot start the server"), "{stderr}");
+    assert_eq!(code, Some(1), "{stderr}");
+}
+
+#[test]
+fn a_client_warns_at_startup_about_a_quic_setting_under_prefer_tcp() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let config = dir.path().join("client.toml");
+    fs::write(
+        &config,
+        format!("server = \"127.0.0.1:{}\"\nserver_key = \"{server_key}\"\n\n[transport]\nprefer = \"tcp\"\nstream_window = \"1MiB\"\n", free_tcp_port()),
+    )
+    .unwrap();
+    let mut client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(&config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stderr = BufReader::new(client.0.stderr.take().unwrap());
+    // A read of the pipe blocks for as long as the client says nothing, so the lines come through
+    // a channel, which can be waited on with a deadline.
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut startup = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(left)
+            .unwrap_or_else(|err| panic!("no warning, {err}: {startup:#?}"));
+        if line.contains("WARN") && line.contains("stream_window") {
+            break;
+        }
+        // Nothing listens on the port, so the first dial is refused at once, and by then startup
+        // is over.
+        assert!(
+            !line.contains("disconnected"),
+            "the first dial ended with no warning before it: {startup:#?}"
+        );
+        startup.push(line);
+    }
 }
