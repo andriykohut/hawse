@@ -609,15 +609,14 @@ async fn a_config_that_cannot_be_retried_stops_the_client() {
 }
 
 #[tokio::test]
-async fn a_client_cancelled_mid_dial_announces_no_retry() {
+async fn a_client_cancelled_mid_dial_stops_without_waiting_for_the_dial() {
     let (server_id, client_id) = ids();
-    // Nothing answers UDP here, so the dial can only end at the shortened idle timeout, well
+    // Nothing answers UDP here, so left alone the dial runs on to the 30 s idle timeout, well
     // after `cancel` has fired.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut cfg = client_config(listener.local_addr().unwrap(), server_id.public_key(), &[]);
-    cfg.transport.idle_timeout = Duration::from_secs(1);
+    let cfg = client_config(listener.local_addr().unwrap(), server_id.public_key(), &[]);
 
-    let (tx, mut events) = mpsc::channel(256);
+    let (tx, _events) = mpsc::channel(256);
     let cancel = CancellationToken::new();
     let client = Client::new(cfg, client_id);
     let task = tokio::spawn({
@@ -627,9 +626,44 @@ async fn a_client_cancelled_mid_dial_announces_no_retry() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
 
-    tokio::time::timeout(Duration::from_secs(20), task)
+    tokio::time::timeout(Duration::from_secs(5), task)
         .await
-        .expect("run returns once the dial fails")
+        .expect("run returns within 5 s of the cancel")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_client_cancelled_mid_greeting_announces_no_retry() {
+    use hawse_core::tls;
+    use hawse_core::transport::quic::{self, Tuning};
+
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    // Takes the connection and never answers the `Hello`, so the session is still waiting for its
+    // `Welcome` when `cancel` fires and fails only afterwards, once the connection closes.
+    let silent = quic::listen(
+        "127.0.0.1:0".parse().unwrap(),
+        tls::server_config(cert, key, tls::provider()).unwrap(),
+        Tuning::SERVER,
+    )
+    .unwrap();
+    let cfg = client_config(silent.local_addr().unwrap(), server_id.public_key(), &[]);
+
+    let (tx, mut events) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+    let client = Client::new(cfg, client_id);
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { client.run(cancel, tx).await }
+    });
+    let conn = silent.accept().await.unwrap().await.unwrap();
+    let _control = conn.accept_bi().await.unwrap();
+    cancel.cancel();
+    conn.close(0u32.into(), b"");
+
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("run returns once the greeting fails")
         .unwrap();
     while let Some(event) = events.recv().await {
         assert!(

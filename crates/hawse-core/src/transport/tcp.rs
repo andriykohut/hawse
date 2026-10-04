@@ -16,6 +16,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tokio_util::sync::CancellationToken;
 
+use crate::error::chain;
 use crate::tls;
 use crate::transport::quic::Tuning;
 use crate::transport::records::{RecordReader, RecordWriter};
@@ -294,7 +295,7 @@ impl Driver {
             return Poll::Ready(match ready!(self.conn.poll_next_inbound(cx)) {
                 Some(Ok(stream)) => Step::Inbound(stream),
                 Some(Err(err)) => {
-                    tracing::debug!(%err, "multiplexer failed");
+                    tracing::debug!(err = %chain(&err), "multiplexer failed");
                     Step::Done
                 }
                 None => Step::Done,

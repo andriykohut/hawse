@@ -122,6 +122,8 @@ pub enum ClientError {
     },
     #[error("stream window does not fit a QUIC window")]
     Window,
+    #[error("transport buffer does not fit this machine's address space")]
+    Buffer,
 }
 
 #[derive(Clone, Debug)]
@@ -215,7 +217,7 @@ impl Client {
             let mut welcomed = None;
             let wait = match self.session(cancel.clone(), &events, &mut welcomed).await {
                 Ok(()) => return,
-                // The dial is not cancel-aware, so a failure can land after shutdown began;
+                // The greeting is not cancel-aware, so a failure can land after shutdown began;
                 // announcing a retry then would promise one that never comes.
                 Err(_) if cancel.is_cancelled() => return,
                 Err(err) => {
@@ -254,13 +256,38 @@ impl Client {
         events: &mpsc::Sender<Event>,
         welcomed: &mut Option<Instant>,
     ) -> Result<(), ClientError> {
-        let remote = self.resolve().await?;
+        let buffer =
+            usize::try_from(self.cfg.transport.buffer.0).map_err(|_| ClientError::Buffer)?;
+        let dial = async {
+            let remote = self.resolve().await?;
+            Ok::<_, ClientError>((remote, self.connect(remote).await?))
+        };
+        // Left to itself a dial nobody answers runs on to the idle timeout, and a stop would wait
+        // out all of it.
+        let (remote, dialed) = tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            dialed = dial => dialed?,
+        };
+        self.serve(remote, dialed, buffer, cancel, events, welcomed)
+            .await
+    }
+
+    /// The session from its greeting on, over a transport already dialed.
+    async fn serve(
+        &self,
+        remote: SocketAddr,
+        dialed: Dialed,
+        buffer: usize,
+        cancel: CancellationToken,
+        events: &mpsc::Sender<Event>,
+        welcomed: &mut Option<Instant>,
+    ) -> Result<(), ClientError> {
         let Dialed {
             transport,
             kind,
             endpoint,
             mut control,
-        } = self.connect(remote).await?;
+        } = dialed;
 
         let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
         *welcomed = Some(Instant::now());
@@ -286,7 +313,6 @@ impl Client {
             udp_cancel: &udp_cancel,
         };
         tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
-        let buffer = usize::try_from(self.cfg.transport.buffer.0).expect("a validated buffer");
         let mut ping = ping_interval();
         let mut last_heard = Instant::now();
         let mut nonce = 0u64;
@@ -614,6 +640,7 @@ fn classify(err: &ClientError) -> DisconnectCause {
         ClientError::Encode(_)
         | ClientError::ServerAddr(_)
         | ClientError::Window
+        | ClientError::Buffer
         | ClientError::Tls(_)
         | ClientError::Identity(_) => DisconnectCause::Config(chain(err)),
         ClientError::NoTransport { quic, tcp }
@@ -737,6 +764,7 @@ mod tests {
         let cases = [
             ClientError::ServerAddr("bad".to_owned()),
             ClientError::Window,
+            ClientError::Buffer,
             ClientError::Tls(rustls::Error::General("boom".to_owned())),
             ClientError::Identity(IdentityError::WrongAlgorithm("rsa".to_owned())),
             ClientError::Encode(FrameError::TooLarge(0)),

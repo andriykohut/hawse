@@ -10,7 +10,7 @@ use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
 use tokio::time::MissedTickBehavior;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
 
@@ -19,6 +19,7 @@ use super::udp::{self, UdpService, UdpServices};
 use super::{AGENT, Live, Shared, listener};
 use crate::allow::AllowList;
 use crate::control::Control;
+use crate::error::chain;
 use crate::net;
 use crate::transport::{CloseReason, Transport, TransportError};
 use crate::udp::FINISH_WAIT;
@@ -110,22 +111,24 @@ pub async fn run(
             done: CancellationToken::new(),
             remote,
         });
-        let previous = shared
-            .sessions
-            .lock()
-            .expect("sessions lock")
-            .insert(key, Arc::clone(&live));
+        let (claim, previous) = Claim::stake(Arc::clone(&shared), key, live);
         if let Some(previous) = previous {
             previous.cancel.cancel();
             tracing::info!(previous = %previous.remote, "superseding this key's previous session");
-            let _ = tokio::time::timeout(SUPERSEDE_WAIT, previous.done.cancelled()).await;
+            // Not welcomed yet, so a shutdown finds nothing here to tell the client or to drain.
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    transport.close(CloseReason::Shutdown);
+                    return;
+                }
+                _ = tokio::time::timeout(SUPERSEDE_WAIT, previous.done.cancelled()) => {}
+            }
         }
         let welcome = ServerMessage::Welcome {
             agent: AGENT.to_owned(),
             client_name: grant.name.clone(),
         };
         if control.send(&welcome).await.is_err() {
-            retire(&shared, key, &live);
             return;
         }
         tracing::info!(%agent, "client connected");
@@ -133,12 +136,11 @@ pub async fn run(
             transport,
             shared,
             grant,
-            key,
-            live,
             services: HashMap::new(),
             ids: ServiceIds::new(),
             tasks: TaskTracker::new(),
             udp: Arc::default(),
+            claim,
         };
         session.serve(control, cancel).await;
     }
@@ -146,16 +148,42 @@ pub async fn run(
     .await;
 }
 
-/// Signals that this session's ports are free, then drops its claim on the key unless a newer
-/// session has already taken it.
-fn retire(shared: &Shared, key: PublicKey, live: &Arc<Live>) {
-    live.done.cancel();
-    let mut sessions = shared.sessions.lock().expect("sessions lock");
-    if sessions
-        .get(&key)
-        .is_some_and(|held| Arc::ptr_eq(held, live))
-    {
-        sessions.remove(&key);
+/// A session's hold on its key. Dropping it signals that the session is done with its ports, then
+/// gives the key up unless a newer session has already taken it. On the way out of `serve` the
+/// ports are free by then; on an unwind their listeners have only been told to stop, and release
+/// them a moment later. A drop and not a call, so a session that panics does not leave every later
+/// one for its key waiting out `SUPERSEDE_WAIT`.
+struct Claim {
+    shared: Arc<Shared>,
+    key: PublicKey,
+    live: Arc<Live>,
+}
+
+impl Claim {
+    /// Also returns the session that held the key until now, if there was one.
+    fn stake(shared: Arc<Shared>, key: PublicKey, live: Arc<Live>) -> (Self, Option<Arc<Live>>) {
+        let previous = shared
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(key, Arc::clone(&live));
+        (Self { shared, key, live }, previous)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.live.done.cancel();
+        // This runs during an unwind as well, where a second panic would abort the process.
+        let Ok(mut sessions) = self.shared.sessions.lock() else {
+            return;
+        };
+        if sessions
+            .get(&self.key)
+            .is_some_and(|held| Arc::ptr_eq(held, &self.live))
+        {
+            sessions.remove(&self.key);
+        }
     }
 }
 
@@ -188,18 +216,20 @@ struct Session {
     transport: Arc<dyn Transport>,
     shared: Arc<Shared>,
     grant: Grant,
-    key: PublicKey,
-    live: Arc<Live>,
     services: HashMap<String, BoundService>,
     ids: ServiceIds,
     tasks: TaskTracker,
     udp: UdpServices,
+    // After `services`: fields drop in declaration order, and on an unwind `done` must not fire
+    // before each service has been told to stop.
+    claim: Claim,
 }
 
 struct BoundService {
     id: u16,
     port: Port,
-    cancel: CancellationToken,
+    /// Stops the service when it drops, so a session that unwinds stops what it bound as well.
+    cancel: DropGuard,
 }
 
 /// Hands out ids in order, skipping any a live service still holds: past a wrap the
@@ -238,6 +268,10 @@ impl Session {
             Arc::clone(&self.transport),
             background.clone(),
         ));
+        // A guard and not only the call further down, which an unwind never reaches: the demux
+        // holds every UDP service, and a service's port stays taken for as long as it is held. A
+        // local drops before `self` does, so this too is ahead of `done`.
+        let background = background.drop_guard();
 
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -245,7 +279,7 @@ impl Session {
         let mut nonce = 0u64;
         let mut told_client = false;
 
-        let mine = self.live.cancel.clone();
+        let mine = self.claim.live.cancel.clone();
         let reason = loop {
             tokio::select! {
                 () = mine.cancelled() => {
@@ -296,11 +330,11 @@ impl Session {
         for name in names {
             self.unbind(&name);
         }
-        background.cancel();
+        drop(background);
         control.finish().await;
         self.tasks.close();
         let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
-        retire(&self.shared, self.key, &self.live);
+        drop(self.claim);
         // A QUIC `close` drops whatever is not yet on the wire, so let a client that was told why
         // read it and close first.
         if told_client {
@@ -386,8 +420,14 @@ impl Session {
                 port
             }
         };
-        self.services
-            .insert(service.to_owned(), BoundService { id, port, cancel });
+        self.services.insert(
+            service.to_owned(),
+            BoundService {
+                id,
+                port,
+                cancel: cancel.drop_guard(),
+            },
+        );
         tracing::info!(service, %port, bind = %self.grant.bind, "bound");
         ServerMessage::Bound {
             service: service.to_owned(),
@@ -428,7 +468,7 @@ impl Session {
             match bind(self.grant.bind, port.number) {
                 Ok(socket) => break Ok((port, socket)),
                 Err(err) => {
-                    tracing::warn!(service, %port, %err, "cannot bind");
+                    tracing::warn!(service, %port, err = %chain(&err), "cannot bind");
                     refused.push(port);
                     if fixed.is_some() {
                         break Err(BindFailure::InUse);
@@ -450,7 +490,7 @@ impl Session {
                 .write()
                 .expect("udp services lock")
                 .remove(&bound.id);
-            bound.cancel.cancel();
+            drop(bound.cancel);
             tracing::info!(service, port = %bound.port, "unbound");
         }
     }
@@ -466,7 +506,232 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future as _;
+    use std::net::Ipv4Addr;
+    use std::pin::pin;
+    use std::sync::OnceLock;
+    use std::task::{Context, Wake, Waker};
+
     use super::*;
+    use crate::identity::Identity;
+    use crate::tls;
+    use crate::transport::quic::{self, QuicTransport, Tuning};
+    use crate::transport::{RecvHalf, SendHalf};
+
+    /// The client's end of a session built by `unserved`.
+    struct Peer {
+        control: Control,
+        _conn: quinn::Connection,
+        _endpoints: (quinn::Endpoint, quinn::Endpoint),
+    }
+
+    impl Peer {
+        async fn ask(&mut self, service: &str, kind: Kind, port: Option<u16>) {
+            let bind = ClientMessage::Bind {
+                service: service.to_owned(),
+                kind,
+                port,
+                allow: vec![],
+                proxy_protocol: false,
+            };
+            self.control.send(&bind).await.unwrap();
+        }
+
+        /// The answer to a bind; the keepalives around it are skipped.
+        async fn bind(&mut self, service: &str, kind: Kind, port: Option<u16>) -> ServerMessage {
+            self.ask(service, kind, port).await;
+            loop {
+                let reply = self.control.next::<ServerMessage>().await;
+                match reply.expect("control stream open") {
+                    ServerMessage::Ping { .. } | ServerMessage::Pong { .. } => {}
+                    reply => return reply,
+                }
+            }
+        }
+    }
+
+    /// A session over a real connection, not yet served, with its control stream and its client.
+    /// Built by hand and not by `run`, so a test can reach the session's own state.
+    async fn unserved(shared: &Arc<Shared>) -> (Session, Control, Peer) {
+        let server_id = Identity::generate().unwrap();
+        let client_id = Identity::generate().unwrap();
+        let (cert, key) = server_id.certificate().unwrap();
+        let server = quic::listen(
+            "127.0.0.1:0".parse().unwrap(),
+            tls::server_config(cert, key, tls::provider()).unwrap(),
+            Tuning::SERVER,
+        )
+        .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (cert, key) = client_id.certificate().unwrap();
+        let client = quic::dialer(
+            tls::client_config(cert, key, server_id.public_key(), tls::provider()).unwrap(),
+            Tuning::CLIENT,
+            addr,
+        )
+        .unwrap();
+        let (accepted, conn) = tokio::join!(
+            async { server.accept().await.unwrap().await.unwrap() },
+            async { quic::connect(&client, addr).await.unwrap() },
+        );
+        let transport: Arc<dyn Transport> = Arc::new(QuicTransport(accepted));
+
+        let (send, recv) = conn.open_bi().await.unwrap();
+        let mut peer = Peer {
+            control: Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv)),
+            _conn: conn,
+            _endpoints: (server, client),
+        };
+        // A stream reaches the other end with its first bytes, not before.
+        let ping = ClientMessage::Ping { nonce: 0 };
+        peer.control.send(&ping).await.unwrap();
+        let (send, recv) = transport.accept_bi().await.unwrap();
+
+        let live = Arc::new(Live {
+            cancel: CancellationToken::new(),
+            done: CancellationToken::new(),
+            remote: "127.0.0.1:1".parse().unwrap(),
+        });
+        let (claim, _) = Claim::stake(Arc::clone(shared), client_id.public_key(), live);
+        let session = Session {
+            transport,
+            shared: Arc::clone(shared),
+            grant: Grant {
+                name: "test".to_owned(),
+                ports: vec![
+                    "40000-41000".parse().unwrap(),
+                    "40000-41000/udp".parse().unwrap(),
+                ],
+                bind: Ipv4Addr::LOCALHOST.into(),
+                allow: vec![],
+            },
+            services: HashMap::new(),
+            ids: ServiceIds::new(),
+            tasks: TaskTracker::new(),
+            udp: Arc::default(),
+            claim,
+        };
+        (session, Control::new(send, recv), peer)
+    }
+
+    /// Binds `port` again and again until the server grants it, for up to 5 s: a session that
+    /// unwound has told its listeners to stop, and they let go of their ports a moment later.
+    async fn rebinds(peer: &mut Peer, service: &str, port: Port) -> bool {
+        let granted = async {
+            loop {
+                let reply = peer.bind(service, port.kind, Some(port.number)).await;
+                if matches!(reply, ServerMessage::Bound { .. }) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), granted)
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn a_session_that_panics_frees_the_ports_it_bound() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, control, mut first) = unserved(&shared).await;
+        let services = Arc::clone(&session.udp);
+        let serving = tokio::spawn(session.serve(control, CancellationToken::new()));
+        let mut bound = Vec::new();
+        for (service, kind) in [("web", Kind::Tcp), ("dns", Kind::Udp)] {
+            let ServerMessage::Bound { port: number, .. } = first.bind(service, kind, None).await
+            else {
+                panic!("expected Bound");
+            };
+            bound.push((service, Port { number, kind }));
+        }
+
+        // The session takes this lock for every UDP bind, and finding it poisoned is a panic of
+        // its own, in the middle of serving.
+        let poisoning = std::panic::catch_unwind(move || {
+            let _held = services.write().unwrap();
+            panic!("poisoning the lock");
+        });
+        assert!(poisoning.is_err());
+        first.ask("more", Kind::Udp, None).await;
+        assert!(serving.await.unwrap_err().is_panic());
+
+        // `first` is still connected, so nothing here is freed by the transport going away.
+        let (session, control, mut second) = unserved(&shared).await;
+        tokio::spawn(session.serve(control, CancellationToken::new()));
+        for (service, port) in bound {
+            assert!(
+                rebinds(&mut second, service, port).await,
+                "{port} is still held"
+            );
+        }
+    }
+
+    /// Notes, at the moment it is woken, whether `stopped` had been cancelled by then.
+    struct Watcher {
+        stopped: CancellationToken,
+        at_wake: OnceLock<bool>,
+    }
+
+    impl Wake for Watcher {
+        fn wake(self: Arc<Self>) {
+            let _ = self.at_wake.set(self.stopped.is_cancelled());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dropped_session_stops_its_services_before_it_signals_done() {
+        let shared = Arc::new(Shared::for_tests());
+        let (mut session, _control, _peer) = unserved(&shared).await;
+        let live = Arc::clone(&session.claim.live);
+        let stopped = CancellationToken::new();
+        session.services.insert(
+            "web".to_owned(),
+            BoundService {
+                id: 1,
+                port: "40000".parse().unwrap(),
+                cancel: stopped.clone().drop_guard(),
+            },
+        );
+
+        // Cancelling a token wakes its waiters before `cancel` returns, so this sees the service's
+        // token as it stood when `done` fired.
+        let watcher = Arc::new(Watcher {
+            stopped,
+            at_wake: OnceLock::new(),
+        });
+        let waker = Waker::from(Arc::clone(&watcher));
+        let mut done = pin!(live.done.cancelled());
+        assert!(
+            done.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+
+        drop(session);
+        assert_eq!(watcher.at_wake.get(), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn a_session_that_panics_gives_up_its_key() {
+        let shared = Arc::new(Shared::for_tests());
+        let key = PublicKey::from_bytes([1; 32]);
+        let live = Arc::new(Live {
+            cancel: CancellationToken::new(),
+            done: CancellationToken::new(),
+            remote: "127.0.0.1:1".parse().unwrap(),
+        });
+        let session = tokio::spawn({
+            let (shared, live) = (Arc::clone(&shared), Arc::clone(&live));
+            async move {
+                let _claim = Claim::stake(shared, key, live);
+                panic!("mid-session");
+            }
+        });
+        assert!(session.await.unwrap_err().is_panic());
+        assert!(live.done.is_cancelled());
+        assert!(shared.sessions.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn ids_skip_the_ones_a_live_service_holds() {

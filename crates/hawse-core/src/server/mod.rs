@@ -100,7 +100,7 @@ impl Shared {
 }
 
 /// `done` is cancelled once the session has released its ports, so a session superseding this one
-/// can wait for them.
+/// can wait for them. A session that unwinds cancels it having only told its listeners to stop.
 pub struct Live {
     pub cancel: CancellationToken,
     pub done: CancellationToken,
@@ -121,6 +121,8 @@ pub enum ServerError {
     Listen(SocketAddr, #[source] std::io::Error),
     #[error("stream window {0} bytes does not fit a QUIC window")]
     Window(u64),
+    #[error("transport buffer {0} bytes does not fit this machine's address space")]
+    Buffer(u64),
 }
 
 pub struct Server {
@@ -136,6 +138,8 @@ impl Server {
     pub fn bind(cfg: &ServerConfig, identity: &Identity) -> Result<Self, ServerError> {
         let stream_window = u32::try_from(cfg.transport.stream_window.0)
             .map_err(|_| ServerError::Window(cfg.transport.stream_window.0))?;
+        let buffer = usize::try_from(cfg.transport.buffer.0)
+            .map_err(|_| ServerError::Buffer(cfg.transport.buffer.0))?;
         let tuning = Tuning {
             idle_timeout: cfg.transport.idle_timeout,
             congestion: cfg.transport.congestion,
@@ -170,7 +174,7 @@ impl Server {
         let shared = Arc::new(Shared {
             policy: Policy::from_config(cfg),
             ports: Mutex::new(ports),
-            buffer: usize::try_from(cfg.transport.buffer.0).expect("a validated buffer"),
+            buffer,
             udp_sessions: usize::try_from(cfg.limits.udp_sessions_per_service)
                 .expect("a u32 fits usize on every target hawse builds for"),
             sessions: Mutex::new(HashMap::new()),
