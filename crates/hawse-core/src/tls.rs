@@ -222,7 +222,8 @@ mod tests {
             }
             let mut cursor = &c2s[..];
             while !cursor.is_empty() {
-                server.read_tls(&mut cursor).unwrap();
+                let read = server.read_tls(&mut cursor).unwrap();
+                assert_ne!(read, 0, "server stopped reading");
             }
             server.process_new_packets()?;
             let mut s2c = Vec::new();
@@ -231,7 +232,8 @@ mod tests {
             }
             let mut cursor = &s2c[..];
             while !cursor.is_empty() {
-                client.read_tls(&mut cursor).unwrap();
+                let read = client.read_tls(&mut cursor).unwrap();
+                assert_ne!(read, 0, "client stopped reading");
             }
             client.process_new_packets()?;
             if !client.is_handshaking() && !server.is_handshaking() {
