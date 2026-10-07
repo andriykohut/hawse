@@ -34,6 +34,10 @@ pub fn init(verbose: u8, quiet: bool, format: LogFormat, color: ColorChoice) {
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        // Left on, a log line that cannot be written is reported with `eprintln!`, which panics
+        // when stderr is what failed: whatever was logging dies with its reader, the task that
+        // answers SIGTERM included.
+        .log_internal_errors(false)
         .with_target(false);
     if json {
         builder.json().init();
