@@ -279,10 +279,11 @@ impl Session {
         let mut last_heard = Instant::now();
         let mut nonce = 0u64;
         let mut told = None;
+        let mut end = None;
 
         let mine = self.claim.live.cancel.clone();
         let reason = loop {
-            tokio::select! {
+            let reply = tokio::select! {
                 () = mine.cancelled() => {
                     let superseded = !server_cancel.is_cancelled();
                     let why = if superseded {
@@ -291,7 +292,14 @@ impl Session {
                         "server shutting down"
                     };
                     let shutdown = ServerMessage::Shutdown { reason: why.to_owned() };
-                    told = control.send(&shutdown).await.is_ok().then(tokio::time::Instant::now);
+                    // A control stream out of credit takes nothing more, and on a dead link that
+                    // is every stream for good. A client that cannot be sent the reason in the
+                    // time it would get to read it is not told, and whatever the telling took
+                    // comes out of the drain.
+                    let began = Instant::now();
+                    end = Some(began + DRAIN);
+                    let sent = tokio::time::timeout_at(began + SHUTDOWN_LINGER, control.send(&shutdown)).await;
+                    told = matches!(sent, Ok(Ok(()))).then(Instant::now);
                     break if superseded { CloseReason::Superseded } else { CloseReason::Shutdown };
                 }
                 () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
@@ -299,9 +307,7 @@ impl Session {
                 }
                 _ = ping.tick() => {
                     nonce += 1;
-                    if control.send(&ServerMessage::Ping { nonce }).await.is_err() {
-                        break CloseReason::ControlClosed;
-                    }
+                    Some(ServerMessage::Ping { nonce })
                 }
                 msg = control.try_next::<ClientMessage>() => {
                     let msg = match msg {
@@ -313,7 +319,7 @@ impl Session {
                         }
                     };
                     last_heard = Instant::now();
-                    let reply = match msg {
+                    match msg {
                         ClientMessage::Bind { service, kind, port, allow, proxy_protocol } => {
                             Some(self.bind(&service, kind, port, &allow, proxy_protocol))
                         }
@@ -324,12 +330,21 @@ impl Session {
                         ClientMessage::Ping { nonce } => Some(ServerMessage::Pong { nonce }),
                         ClientMessage::Pong { .. } => None,
                         ClientMessage::Hello { .. } => break CloseReason::DuplicateHello,
-                    };
-                    if let Some(reply) = reply
-                        && control.send(&reply).await.is_err()
-                    {
+                    }
+                }
+            };
+            let Some(reply) = reply else { continue };
+            // A send waits for credit like the one above, so it is not left to hold up a stop or
+            // to outlast the deadline. A stop that wins is taken by the next turn of the loop.
+            tokio::select! {
+                sent = control.send(&reply) => {
+                    if sent.is_err() {
                         break CloseReason::ControlClosed;
                     }
+                }
+                () = mine.cancelled() => {}
+                () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
+                    break CloseReason::Unresponsive;
                 }
             }
         };
@@ -340,9 +355,12 @@ impl Session {
             self.unbind(&name);
         }
         drop(background);
-        control.finish().await;
+        // One deadline for the rest, from when the session was told to stop if it was: finishing
+        // the stream can wait like a send.
+        let end = end.unwrap_or_else(|| Instant::now() + DRAIN);
+        let _ = tokio::time::timeout_at(end, control.finish()).await;
         self.tasks.close();
-        let _ = tokio::time::timeout(DRAIN, self.tasks.wait()).await;
+        let _ = tokio::time::timeout_at(end, self.tasks.wait()).await;
         drop(self.claim);
         // A QUIC `close` drops whatever is not yet on the wire, so let a client that was told why
         // read it and close first. Counted from the telling, so it runs alongside the drain and
@@ -754,6 +772,34 @@ mod tests {
         let serving = tokio::spawn(session.serve(control, stop.clone()));
 
         // `_peer` is told and neither reads it nor closes, so nothing cuts the linger short.
+        stop.cancel();
+        live.cancel.cancel();
+        tokio::time::timeout(crate::server::DRAIN, serving)
+            .await
+            .expect("the session ends inside the server's wait")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_control_stream_is_stalled_still_ends_inside_the_servers_wait() {
+        let shared = Arc::new(Shared::for_tests());
+        let (session, mut control, _peer) = unserved(&shared).await;
+        let live = Arc::clone(&session.claim.live);
+        // `_peer` reads nothing, so its window for this stream fills, and a send after that waits
+        // for credit that never comes: what a dead link does to every stream at once.
+        let filler = ServerMessage::Shutdown {
+            reason: "x".repeat(32 * 1024),
+        };
+        while tokio::time::timeout(Duration::from_millis(100), control.send(&filler))
+            .await
+            .is_ok()
+        {}
+        let stop = CancellationToken::new();
+        let serving = tokio::spawn(session.serve(control, stop.clone()));
+        // The first ping is due at once, so by now the session is waiting in that send, and the
+        // stop has to reach it there before it gets to the one that says why.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
         stop.cancel();
         live.cancel.cancel();
         tokio::time::timeout(crate::server::DRAIN, serving)
