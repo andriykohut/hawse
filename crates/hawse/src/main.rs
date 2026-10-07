@@ -55,6 +55,10 @@ enum Command {
     },
     /// Generate a key if one does not exist, and print its public key.
     Keygen {
+        /// The client config whose key this is. Without one, the config `client` would read.
+        #[arg(long, env = "HAWSE_CONFIG")]
+        config: Option<PathBuf>,
+        /// Write the key here instead, whatever the config says.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -106,7 +110,9 @@ fn run(cli: Cli) -> miette::Result<ExitCode> {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             Command::Client { config } => commands::client::run(config).await,
-            Command::Keygen { out } => commands::keygen::run(out).map(|()| ExitCode::SUCCESS),
+            Command::Keygen { config, out } => {
+                commands::keygen::run(config, out).map(|()| ExitCode::SUCCESS)
+            }
         }
     })
 }

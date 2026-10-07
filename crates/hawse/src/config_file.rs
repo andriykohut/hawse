@@ -71,6 +71,18 @@ pub fn load_client(explicit: Option<PathBuf>) -> Result<(ClientConfig, Located),
     Ok((cfg, located))
 }
 
+/// Where the client's key is: the path `client` loads it from, for `keygen` to write it to. A
+/// config that is not there yet names no key, so the key goes beside where the config will be.
+pub fn client_key_path(explicit: Option<PathBuf>) -> Result<PathBuf, LoadError> {
+    let located = paths::locate(Role::Client, explicit);
+    let key = if located.exists {
+        parse::<ClientConfig>(&located.file, &read(&located.file)?)?.key
+    } else {
+        PathBuf::from(Role::Client.key_name())
+    };
+    Ok(located.dir.join(key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
