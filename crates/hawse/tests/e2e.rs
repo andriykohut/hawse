@@ -22,6 +22,8 @@ impl Drop for Proc {
 fn hawse() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hawse"));
     cmd.stdin(Stdio::null()).stderr(Stdio::inherit());
+    // Tests read what a child logs, so it logs at its defaults whatever the runner's filter is.
+    cmd.env_remove("HAWSE_LOG");
     cmd
 }
 
@@ -380,11 +382,22 @@ fn a_client_whose_stderr_reader_went_away_stops_on_sigterm() {
     let mut stderr = BufReader::new(client.0.stderr.take().unwrap());
     // Nothing listens on the port, so the first dial is refused at once. By then the client has
     // installed its signal handler, and a SIGTERM before that would end it the default way.
-    let mut line = String::new();
-    while !line.contains("disconnected") {
-        line.clear();
-        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "the client left");
-    }
+    // A read of the pipe blocks for as long as the client says nothing, so a thread does the
+    // reading and hands the pipe back, which can be waited on with a deadline.
+    let (tx, started) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        while !line.contains("disconnected") {
+            line.clear();
+            if stderr.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+        }
+        let _ = tx.send(stderr);
+    });
+    let stderr = started
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the client logs its first disconnect");
     // From here every log write fails, the one on the way out included.
     drop(stderr);
     let killed = Command::new("kill")
