@@ -358,3 +358,47 @@ fn a_client_warns_at_startup_about_a_quic_setting_under_prefer_tcp() {
         startup.push(line);
     }
 }
+
+#[test]
+fn a_client_whose_stderr_reader_went_away_stops_on_sigterm() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let config = dir.path().join("client.toml");
+    fs::write(
+        &config,
+        format!("server = \"127.0.0.1:{}\"\nserver_key = \"{server_key}\"\n\n[transport]\nprefer = \"tcp\"\n", free_tcp_port()),
+    )
+    .unwrap();
+    let mut client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(&config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stderr = BufReader::new(client.0.stderr.take().unwrap());
+    // Nothing listens on the port, so the first dial is refused at once. By then the client has
+    // installed its signal handler, and a SIGTERM before that would end it the default way.
+    let mut line = String::new();
+    while !line.contains("disconnected") {
+        line.clear();
+        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "the client left");
+    }
+    // From here every log write fails, the one on the way out included.
+    drop(stderr);
+    let killed = Command::new("kill")
+        .args(["-TERM", &client.0.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = client.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "still running 5 s after SIGTERM");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+}
