@@ -271,6 +271,40 @@ fn a_server_that_cannot_bind_its_listen_port_exits_1() {
     assert_eq!(code, Some(1), "{stderr}");
 }
 
+/// Runs `keygen` with `HAWSE_CONFIG` naming `config`.
+fn keygen_under(config: &std::path::Path) {
+    let out = hawse()
+        .arg("keygen")
+        .env("HAWSE_CONFIG", config)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{stderr}");
+}
+
+#[test]
+fn keygen_writes_beside_the_config_the_environment_names() {
+    let dir = tempfile::tempdir().unwrap();
+    // The config is not written yet, which is the order the README gives.
+    keygen_under(&dir.path().join("client.toml"));
+    assert!(dir.path().join("client.key").is_file());
+}
+
+#[test]
+fn keygen_writes_the_key_the_config_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("client.toml");
+    fs::write(
+        &config,
+        "server = \"tunnel.example.com:4433\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nkey = \"laptop.key\"\n",
+    )
+    .unwrap();
+    keygen_under(&config);
+    assert!(dir.path().join("laptop.key").is_file());
+    assert!(!dir.path().join("client.key").exists());
+}
+
 #[test]
 fn a_client_that_stops_on_a_config_error_exits_2() {
     let dir = tempfile::tempdir().unwrap();
