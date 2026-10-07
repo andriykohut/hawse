@@ -272,6 +272,45 @@ fn a_server_that_cannot_bind_its_listen_port_exits_1() {
 }
 
 #[test]
+fn a_client_that_stops_on_a_config_error_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let client_key = keygen(&dir.path().join("client.key"));
+    let server_port = free_listen_port();
+    // The config loads, and the one bind that carries this list does not fit in a frame: a
+    // mistake the client only meets once a server has welcomed it.
+    let allow: Vec<String> = (0..5000)
+        .map(|n| format!("\"2001:db8::{n:x}/128\""))
+        .collect();
+    fs::write(
+        dir.path().join("server.toml"),
+        format!("listen = \"127.0.0.1:{server_port}\"\n\n[clients.e2e]\nkey = \"{client_key}\"\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("client.toml"),
+        format!("server = \"127.0.0.1:{server_port}\"\nserver_key = \"{server_key}\"\nname = \"e2e\"\n\n[expose.web]\nlocal = \"127.0.0.1:8080\"\nallow = [{}]\n", allow.join(", ")),
+    )
+    .unwrap();
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(dir.path().join("server.toml"))
+            .spawn()
+            .unwrap(),
+    );
+    let out = hawse()
+        .args(["client", "--config"])
+        .arg(dir.path().join("client.toml"))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("cannot be retried"), "{stderr}");
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+}
+
+#[test]
 fn a_client_warns_at_startup_about_a_quic_setting_under_prefer_tcp() {
     let dir = tempfile::tempdir().unwrap();
     let server_key = keygen(&dir.path().join("server.key"));

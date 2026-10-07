@@ -78,7 +78,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     logging::init(cli.verbose, cli.quiet, cli.log, cli.color);
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(report) => {
             // What returning the report from `main` would print.
             eprintln!("Error: {report:?}");
@@ -93,7 +93,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> miette::Result<()> {
+fn run(cli: Cli) -> miette::Result<ExitCode> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if let Some(threads) = cli.threads {
@@ -102,9 +102,11 @@ fn run(cli: Cli) -> miette::Result<()> {
     let runtime = runtime.build().into_diagnostic()?;
     runtime.block_on(async move {
         match cli.command {
-            Command::Server { config, listen } => commands::server::run(config, listen).await,
+            Command::Server { config, listen } => commands::server::run(config, listen)
+                .await
+                .map(|()| ExitCode::SUCCESS),
             Command::Client { config } => commands::client::run(config).await,
-            Command::Keygen { out } => commands::keygen::run(out),
+            Command::Keygen { out } => commands::keygen::run(out).map(|()| ExitCode::SUCCESS),
         }
     })
 }
