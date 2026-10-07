@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use hawse_core::client::{Client, DisconnectCause, Event};
 use hawse_core::config::split_host_port;
@@ -9,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config_file;
 
-pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
+/// 2 when a config error stopped the client, the exit of a config that does not load: starting
+/// it again will not fix either.
+pub async fn run(config: Option<PathBuf>) -> miette::Result<ExitCode> {
     let (cfg, located) = config_file::load_client(config)?;
     let inert = cfg.transport.inert();
     if !inert.is_empty() {
@@ -40,6 +43,7 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
     tokio::spawn(super::shutdown_signal(cancel.clone()));
     let (tx, mut events) = mpsc::channel(64);
     let printer = tokio::spawn(async move {
+        let mut stopped = false;
         while let Some(event) = events.recv().await {
             match event {
                 Event::Connected {
@@ -71,6 +75,7 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
                             reason
                         }
                     };
+                    stopped |= retry_in.is_none();
                     match retry_in {
                         Some(wait) => tracing::warn!(
                             %reason,
@@ -84,9 +89,14 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<()> {
                 }
             }
         }
+        stopped
     });
     tracing::info!(%key, "client key");
     client.run(cancel, tx).await;
-    printer.await.into_diagnostic()?;
-    Ok(())
+    let stopped = printer.await.into_diagnostic()?;
+    Ok(if stopped {
+        ExitCode::from(2)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
