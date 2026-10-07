@@ -790,10 +790,11 @@ mod tests {
         let filler = ServerMessage::Shutdown {
             reason: "x".repeat(32 * 1024),
         };
-        while tokio::time::timeout(Duration::from_millis(100), control.send(&filler))
-            .await
-            .is_ok()
-        {}
+        while let Ok(sent) =
+            tokio::time::timeout(Duration::from_millis(100), control.send(&filler)).await
+        {
+            sent.expect("the control stream takes the filler");
+        }
         let stop = CancellationToken::new();
         let serving = tokio::spawn(session.serve(control, stop.clone()));
         // The first ping is due at once, so by now the session is waiting in that send, and the
