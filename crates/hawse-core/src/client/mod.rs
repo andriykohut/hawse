@@ -169,6 +169,24 @@ async fn hang_up(transport: &Arc<dyn Transport>, tasks: &TaskTracker, endpoint: 
     }
 }
 
+/// Sends `reply`, and gives how the session ends when it does not go through. A send waits for
+/// credit, and on a dead link every stream is out of it for good, so it is not left to hold up a
+/// stop or to outlast the deadline, which counts from `last_heard`.
+async fn send_or_end(
+    control: &mut Control,
+    reply: &ClientMessage,
+    cancel: &CancellationToken,
+    last_heard: tokio::time::Instant,
+) -> Option<Result<(), ClientError>> {
+    tokio::select! {
+        sent = send_msg(control, reply) => sent.err().map(Err),
+        () = cancel.cancelled() => Some(Ok(())),
+        () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
+            Some(Err(ClientError::Unresponsive))
+        }
+    }
+}
+
 fn ping_interval() -> tokio::time::Interval {
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -342,16 +360,14 @@ impl Client {
         let mut nonce = 0u64;
 
         let outcome = loop {
-            tokio::select! {
+            let reply = tokio::select! {
                 () = cancel.cancelled() => break Ok(()),
                 () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
                     break Err(ClientError::Unresponsive);
                 }
                 _ = ping.tick() => {
                     nonce += 1;
-                    if let Err(err) = send_msg(&mut control, &ClientMessage::Ping { nonce }).await {
-                        break Err(err);
-                    }
+                    Some(ClientMessage::Ping { nonce })
                 }
                 msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
@@ -366,16 +382,14 @@ impl Client {
                             self.register_bound(service.clone(), service_id, expose, listener_addr(address, remote, port), &bind_ctx);
                             let port = Port { number: port, kind };
                             emit(events, Event::Bound { service, port });
+                            None
                         }
                         ServerMessage::BindFailed { service, reason } => {
                             emit(events, Event::BindFailed { service, reason });
+                            None
                         }
-                        ServerMessage::Ping { nonce } => {
-                            if let Err(err) = send_msg(&mut control, &ClientMessage::Pong { nonce }).await {
-                                break Err(err);
-                            }
-                        }
-                        ServerMessage::Pong { .. } => {}
+                        ServerMessage::Ping { nonce } => Some(ClientMessage::Pong { nonce }),
+                        ServerMessage::Pong { .. } => None,
                         ServerMessage::Shutdown { reason } => break Err(ClientError::Shutdown(reason)),
                         ServerMessage::Welcome { .. } | ServerMessage::Denied { .. } => {
                             break Err(ClientError::Protocol("a second greeting"));
@@ -393,10 +407,15 @@ impl Client {
                                 stream.await;
                                 drop(held);
                             });
+                            None
                         }
                         Err(err) => break Err(err.into()),
                     }
                 }
+            };
+            let Some(reply) = reply else { continue };
+            if let Some(end) = send_or_end(&mut control, &reply, &cancel, last_heard).await {
+                break end;
             }
         };
 

@@ -10,10 +10,12 @@ use common::{
 };
 use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
+use hawse_core::control::Control;
 use hawse_core::identity::Identity;
-use hawse_core::transport::TransportKind;
-use hawse_core::transport::quic::QuicError;
-use hawse_proto::msg::BindFailure;
+use hawse_core::tls;
+use hawse_core::transport::quic::{self, QuicError, Tuning};
+use hawse_core::transport::{RecvHalf, SendHalf, TransportKind};
+use hawse_proto::msg::{BindFailure, ClientMessage, ServerMessage};
 use hawse_proto::port::Kind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1208,4 +1210,67 @@ async fn a_visitor_that_resets_gives_the_local_service_a_reset_over_quic() {
 #[tokio::test]
 async fn a_visitor_that_resets_gives_the_local_service_a_reset_over_tcp() {
     a_visitor_that_resets_gives_the_local_service_a_reset(Prefer::Tcp).await;
+}
+
+#[tokio::test]
+async fn a_client_whose_control_stream_is_stalled_still_stops_when_told() {
+    let (server_id, client_id) = ids();
+    let (cert, key) = server_id.certificate().unwrap();
+    // A stand-in for the server with a small window for each stream, so the client's replies run
+    // out of credit after a few hundred of them.
+    let tuning = Tuning {
+        stream_window: 4096,
+        ..Tuning::SERVER
+    };
+    let endpoint = quic::listen(
+        "127.0.0.1:0".parse().unwrap(),
+        tls::server_config(cert, key, tls::provider()).unwrap(),
+        tuning,
+    )
+    .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let mut client = start_client(
+        client_config_over(addr, server_id.public_key(), &[], Prefer::Quic),
+        client_id,
+    );
+
+    let conn = endpoint.accept().await.unwrap().await.unwrap();
+    let (send, recv) = conn.accept_bi().await.unwrap();
+    let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
+    let hello = control.next::<ClientMessage>().await;
+    assert!(
+        matches!(hello, Some(ClientMessage::Hello { .. })),
+        "{hello:?}"
+    );
+    let welcome = ServerMessage::Welcome {
+        agent: "stand-in".to_owned(),
+        client_name: "test".to_owned(),
+    };
+    control.send(&welcome).await.unwrap();
+    let connected = next_event(&mut client.events).await;
+    assert!(
+        matches!(connected, Event::Connected { .. }),
+        "{connected:?}"
+    );
+
+    // It reads nothing from here, and each ping has the client send a pong.
+    for nonce in 0..2000 {
+        control.send(&ServerMessage::Ping { nonce }).await.unwrap();
+    }
+    // A sender out of credit for a stream says so, which is how the stall shows from this end.
+    let stalled = async {
+        while conn.stats().frame_rx.stream_data_blocked == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), stalled)
+        .await
+        .expect("the client runs out of credit for its control stream");
+
+    client.cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), client.task)
+        .await
+        .expect("the client stops within 5 s of being told")
+        .unwrap()
+        .unwrap();
 }
