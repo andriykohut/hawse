@@ -289,7 +289,9 @@ impl Driver {
     ///
     /// `poll_next_inbound` is also where yamux gets to the streams dropped since it was last
     /// polled, and until then it counts them. So it runs between taking a request and opening for
-    /// it: a caller that dropped a stream to make room for this one finds the room there.
+    /// it: a caller that dropped a stream to make room for this one finds the room there, unless
+    /// a thread was descheduled part-way through telling yamux of a drop. That one holds back the
+    /// drops behind its own until it runs again, and `HEADROOM` is all that covers them.
     fn poll_step(&mut self, cx: &mut Context<'_>) -> Poll<Step> {
         loop {
             if self.pending.is_none() {

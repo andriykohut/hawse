@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt;
+use futures_util::future::join_all;
 use hawse_core::transport::quic::Tuning;
 use hawse_core::transport::records::{RecordReader, RecordWriter};
 use hawse_core::transport::{CloseReason, RecvHalf, SendHalf, TransportError, reset_code};
@@ -527,24 +528,18 @@ async fn tcp_transport_keeps_up_with_streams_dropped_as_fast_as_they_are_opened(
         Tuning::CLIENT,
     )
     .await;
-    // One stream held at a time by each of `STREAMS` callers, so never more than the limit.
-    let callers: Vec<_> = (0..STREAMS)
-        .map(|_| {
-            let server = Arc::clone(&pair.server);
-            tokio::spawn(async move {
-                for turn in 0..5000 {
-                    let opened = server.open_bi().await;
-                    assert!(opened.is_ok(), "turn {turn}: {:?}", opened.err());
-                }
-            })
-        })
-        .collect();
-    for caller in callers {
-        timeout(Duration::from_secs(30), caller)
-            .await
-            .expect("every caller done within 30 s")
-            .unwrap();
-    }
+    // One stream held at a time by each of `STREAMS` callers, so never more than the limit. They
+    // share this thread, off the driver's: yamux hears of a drop from the thread that dropped, and
+    // of callers on several, one descheduled part-way through would hold back the others' drops.
+    let callers = (0..STREAMS).map(|_| async {
+        for turn in 0..5000 {
+            let opened = pair.server.open_bi().await;
+            assert!(opened.is_ok(), "turn {turn}: {:?}", opened.err());
+        }
+    });
+    timeout(Duration::from_secs(30), join_all(callers))
+        .await
+        .expect("every caller done within 30 s");
 }
 
 #[tokio::test]
