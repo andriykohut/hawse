@@ -34,6 +34,16 @@ fn load(file: &Path) -> miette::Result<(ClientConfig, Identity)> {
     Ok((cfg, identity))
 }
 
+/// Why a session ended, as the log says it.
+pub(super) fn reason(cause: DisconnectCause) -> String {
+    match cause {
+        DisconnectCause::Shutdown(why) => format!("server ended the session: {why}"),
+        DisconnectCause::Unresponsive => "server stopped answering".to_owned(),
+        DisconnectCause::Denied => "this machine's key is not authorized on the server".to_owned(),
+        DisconnectCause::Transport(reason) | DisconnectCause::Config(reason) => reason,
+    }
+}
+
 /// Logs what the client reports, and says whether it has stopped for good. `cfg` is the config
 /// in force, which a service's addresses are named from.
 fn report(event: Event, cfg: &ClientConfig) -> bool {
@@ -59,16 +69,7 @@ fn report(event: Event, cfg: &ClientConfig) -> bool {
             "not authorized. on the server, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"\nthen wait for the next retry"
         ),
         Event::Disconnected { cause, retry_in } => {
-            let reason = match cause {
-                DisconnectCause::Shutdown(why) => {
-                    format!("server ended the session: {why}")
-                }
-                DisconnectCause::Unresponsive => "server stopped answering".to_owned(),
-                DisconnectCause::Denied => {
-                    "this machine's key is not authorized on the server".to_owned()
-                }
-                DisconnectCause::Transport(reason) | DisconnectCause::Config(reason) => reason,
-            };
+            let reason = reason(cause);
             stopped = retry_in.is_none();
             match retry_in {
                 Some(wait) => tracing::warn!(

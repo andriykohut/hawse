@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use hawse_proto::key::PublicKey;
 use miette::IntoDiagnostic as _;
 
 #[derive(Parser)]
@@ -50,6 +51,18 @@ enum Command {
     },
     /// Run the client: connect to a server and expose the configured services.
     Client {
+        #[arg(long, env = "HAWSE_CONFIG")]
+        config: Option<PathBuf>,
+    },
+    /// Set this machine up as a client: create its key, write its config, and wait for the
+    /// server to authorize the key.
+    Join {
+        /// The server's address, as HOST or HOST:PORT.
+        server: String,
+        /// The server's public key, which it logs when it starts.
+        #[arg(long)]
+        server_key: PublicKey,
+        /// Where to write the client config. Without one, where `client` would read it.
         #[arg(long, env = "HAWSE_CONFIG")]
         config: Option<PathBuf>,
     },
@@ -120,6 +133,11 @@ fn run(cli: Cli) -> miette::Result<ExitCode> {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             Command::Client { config } => commands::client::run(config).await,
+            Command::Join {
+                server,
+                server_key,
+                config,
+            } => commands::join::run(server, server_key, config).await,
             Command::Check { config, connect } => commands::check::run(config, connect)
                 .await
                 .map(|()| ExitCode::SUCCESS),

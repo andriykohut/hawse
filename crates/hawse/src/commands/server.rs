@@ -53,7 +53,7 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
         tracing::warn!(config = %located.file.display(), "no clients are authorized yet; add a [clients.NAME] table with the client's key");
     }
     tracing::info!(
-        "clients connect with: server = \"<this-host>:{}\"  server_key = \"{}\"",
+        "a client joins with: hawse join <this-host>:{} --server-key {}",
         addr.port(),
         identity.public_key()
     );
