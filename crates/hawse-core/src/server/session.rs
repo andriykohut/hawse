@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -134,7 +134,7 @@ pub async fn run(
             shared,
             grant,
             services: HashMap::new(),
-            ids: ServiceIds::new(),
+            last_id: 0,
             tasks: TaskTracker::new(),
             udp: Arc::default(),
             claim,
@@ -218,7 +218,11 @@ struct Session {
     shared: Arc<Shared>,
     grant: Grant,
     services: HashMap<String, BoundService>,
-    ids: ServiceIds,
+    /// The id of the last service bound, each one higher than the last and none given twice. An
+    /// id given again would be one a datagram still on its way to the service that had it names,
+    /// and the new service numbers its visitors from 0 as the old one did, so the datagram could
+    /// reach a visitor it was never for.
+    last_id: u16,
     tasks: TaskTracker,
     udp: UdpServices,
     // After `services`: fields drop in declaration order, and on an unwind `done` must not fire
@@ -231,30 +235,6 @@ struct BoundService {
     port: Port,
     /// Stops the service when it drops, so a session that unwinds stops what it bound as well.
     cancel: DropGuard,
-}
-
-/// Hands out ids in order, skipping any a live service still holds: past a wrap the
-/// counter would otherwise reissue an id the client is still routing visitors on.
-#[derive(Debug)]
-struct ServiceIds {
-    next: u16,
-}
-
-impl ServiceIds {
-    fn new() -> Self {
-        Self { next: 1 }
-    }
-
-    fn claim(&mut self, live: &HashSet<u16>) -> Option<u16> {
-        for _ in 0..u16::MAX {
-            let id = self.next;
-            self.next = if id == u16::MAX { 1 } else { id + 1 };
-            if !live.contains(&id) {
-                return Some(id);
-            }
-        }
-        None
-    }
 }
 
 impl Session {
@@ -341,6 +321,12 @@ impl Session {
                     if sent.is_err() {
                         break CloseReason::ControlClosed;
                     }
+                    // What a bind answers when no service id is left: the client reconnects, and
+                    // the session it gets counts from the start.
+                    if matches!(reply, ServerMessage::Shutdown { .. }) {
+                        told = Some(Instant::now());
+                        break CloseReason::Shutdown;
+                    }
                 }
                 () = mine.cancelled() => {}
                 () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
@@ -396,10 +382,13 @@ impl Session {
             );
             return failed(BindFailure::NotGranted);
         };
-        let live = self.services.values().map(|bound| bound.id).collect();
-        let Some(id) = self.ids.claim(&live) else {
-            tracing::warn!(service, "every service id is taken");
-            return failed(BindFailure::InUse);
+        // Taken only once the bind has gone through, so a bind that fails uses none up.
+        let Some(id) = self.last_id.checked_add(1) else {
+            tracing::warn!(service, "this session has used every service id");
+            return ServerMessage::Shutdown {
+                reason: "this session has used every service id, and a new one starts over"
+                    .to_owned(),
+            };
         };
         let cancel = CancellationToken::new();
         let port = match kind {
@@ -450,6 +439,7 @@ impl Session {
                 port
             }
         };
+        self.last_id = id;
         self.services.insert(
             service.to_owned(),
             BoundService {
@@ -640,7 +630,7 @@ mod tests {
                 allow: vec![],
             },
             services: HashMap::new(),
-            ids: ServiceIds::new(),
+            last_id: 0,
             tasks: TaskTracker::new(),
             udp: Arc::default(),
             claim,
@@ -939,26 +929,32 @@ mod tests {
         assert!(shared.sessions.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn ids_skip_the_ones_a_live_service_holds() {
-        let mut ids = ServiceIds::new();
-        let live = HashSet::from([1, 2, 4]);
-        assert_eq!(ids.claim(&live), Some(3));
-        assert_eq!(ids.claim(&live), Some(5));
-    }
+    #[tokio::test]
+    async fn a_session_gives_no_service_id_twice_and_ends_when_none_is_left() {
+        let shared = Arc::new(Shared::for_tests());
+        let (mut session, control, mut peer) = unserved(&shared).await;
+        session.last_id = u16::MAX - 1;
+        tokio::spawn(session.serve(control, CancellationToken::new()));
 
-    #[test]
-    fn ids_wrap_past_the_top_onto_a_free_one() {
-        let mut ids = ServiceIds { next: u16::MAX };
-        let live = HashSet::from([1]);
-        assert_eq!(ids.claim(&live), Some(u16::MAX));
-        assert_eq!(ids.claim(&live), Some(2));
-    }
+        // Port 1 is outside the grant, and a bind that fails takes no id.
+        let refused = peer.bind("refused", Kind::Tcp, Some(1)).await;
+        assert!(
+            matches!(refused, ServerMessage::BindFailed { .. }),
+            "{refused:?}"
+        );
+        let last = peer.bind("last", Kind::Udp, None).await;
+        assert!(
+            matches!(last, ServerMessage::Bound { service_id, .. } if service_id == u16::MAX),
+            "{last:?}"
+        );
 
-    #[test]
-    fn ids_run_out_when_every_one_is_live() {
-        let mut ids = ServiceIds::new();
-        let live: HashSet<u16> = (1..=u16::MAX).collect();
-        assert_eq!(ids.claim(&live), None);
+        // Its id is free again and still not given out.
+        let unbind = ClientMessage::Unbind {
+            service: "last".to_owned(),
+        };
+        peer.control.send(&unbind).await.unwrap();
+        let ended = peer.bind("more", Kind::Udp, None).await;
+        assert!(matches!(ended, ServerMessage::Shutdown { .. }), "{ended:?}");
+        expect_closed(&peer, CloseReason::Shutdown).await;
     }
 }
