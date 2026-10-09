@@ -67,7 +67,7 @@ TCP and UDP forwarding work, with fixed or dynamically assigned public ports.
 together.
 
 Besides the features named above, configuration hot reload and the `expose`,
-`authorize`, `revoke` and `check` subcommands are not implemented either.
+`authorize` and `revoke` subcommands are not implemented either.
 The [issues](https://github.com/andriykohut/hawse/issues) list everything that
 is planned or deliberately deferred.
 
@@ -202,6 +202,13 @@ up to 30 s; a session that stayed up for a minute starts it over.
 `local` is any address the client can open a TCP connection to, not only one on
 the client itself. `local = "192.168.1.50:80"` forwards to another host on the
 client's network.
+
+`hawse check` reads a config the way `server` and `client` do and exits 2 when
+it would not load, without starting anything or creating a key. `hawse check
+--connect` also dials the server a client config names and logs the transport
+it answered on. It hangs up before the client would introduce itself, so a
+client already running with the same key keeps its session, and the server
+does not say whether the key is authorized.
 
 ## Configuration
 

@@ -258,6 +258,86 @@ fn a_client_config_that_does_not_validate_exits_2_with_its_diagnostic() {
 }
 
 #[test]
+fn check_exits_2_on_a_config_that_does_not_validate() {
+    let text = "server = \"tunnel.example.com:4433\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n\n[expose.Web]\nlocal = \"127.0.0.1:8080\"\n";
+    let (code, stderr) = run_with_config("check", text);
+    assert!(stderr.contains("expose `Web`"), "{stderr}");
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
+fn check_tells_the_roles_apart_and_creates_no_key() {
+    let client = "server = \"tunnel.example.com\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n";
+    for (role, text) in [("server", "listen = \"[::]:4433\"\n"), ("client", client)] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("hawse.toml");
+        fs::write(&config, text).unwrap();
+        let out = hawse()
+            .args(["check", "--config"])
+            .arg(&config)
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains(&format!("valid {role} config")), "{stderr}");
+        assert_eq!(out.status.code(), Some(0), "{stderr}");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "{role}");
+    }
+}
+
+#[test]
+fn check_connect_reports_the_transport_a_server_answered_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    keygen(&dir.path().join("client.key"));
+    let server_port = free_listen_port();
+    fs::write(
+        dir.path().join("server.toml"),
+        format!("listen = \"127.0.0.1:{server_port}\"\n"),
+    )
+    .unwrap();
+    let config = dir.path().join("client.toml");
+    fs::write(
+        &config,
+        // A QUIC dial nobody answers runs to the idle timeout, and the first check below is one.
+        format!("server = \"127.0.0.1:{server_port}\"\nserver_key = \"{server_key}\"\n\n[transport]\nidle_timeout = \"1s\"\n"),
+    )
+    .unwrap();
+    let check = || {
+        let out = hawse()
+            .args(["check", "--connect", "--config"])
+            .arg(&config)
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        (out.status.code(), String::from_utf8(out.stderr).unwrap())
+    };
+
+    let (code, stderr) = check();
+    assert!(stderr.contains("cannot connect to"), "{stderr}");
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(dir.path().join("server.toml"))
+            .spawn()
+            .unwrap(),
+    );
+    // The server is listening some time after it is spawned, and until then nothing answers.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (code, stderr) = check();
+        if code == Some(0) {
+            assert!(stderr.contains("quic"), "{stderr}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no answer in 15 s: {stderr}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
 fn a_server_that_cannot_bind_its_listen_port_exits_1() {
     let pool = ServerConfig::default().dynamic_ports;
     // A listen port inside the pool is a config error, which is not what this is about.

@@ -278,6 +278,15 @@ impl Client {
         self.session(cancel, events, &mut None).await
     }
 
+    /// Dials the server as a session does and hangs up before the greeting: the address that
+    /// answered and the transport it answered on. The server reads no `Hello`, and a `Hello` is
+    /// what takes this key's session from a client that is running.
+    pub async fn probe(&self) -> Result<(SocketAddr, TransportKind), ClientError> {
+        let (remote, dialed) = self.dial().await?;
+        hang_up(&dialed.transport, &TaskTracker::new(), dialed.endpoint).await;
+        Ok((remote, dialed.kind))
+    }
+
     /// `run_once`, also recording in `welcomed` when the server accepted the session, which is
     /// what `run`'s backoff measures a session's life from.
     async fn session(
@@ -288,22 +297,11 @@ impl Client {
     ) -> Result<(), ClientError> {
         let buffer =
             usize::try_from(self.cfg.transport.buffer.0).map_err(|_| ClientError::Buffer)?;
-        let dial = async {
-            let (target, addrs) = self.resolve().await?;
-            let connect = |remote| async move {
-                let dialed = self.connect(remote).await;
-                if let Err(err) = &dialed {
-                    tracing::debug!(%remote, err = %chain(err), "this address did not connect");
-                }
-                dialed
-            };
-            dial_each(addrs, ClientError::NoAddress(target), connect).await
-        };
         // Left to itself a dial nobody answers runs on to the idle timeout, and a stop would wait
         // out all of it.
         let (remote, dialed) = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
-            dialed = dial => dialed?,
+            dialed = self.dial() => dialed?,
         };
         self.serve(remote, dialed, buffer, cancel, events, welcomed)
             .await
@@ -489,6 +487,19 @@ impl Client {
             Some(_) => Err(ClientError::Protocol("another message")),
             None => Err(ClientError::ControlClosed),
         }
+    }
+
+    /// The first of the server's addresses that connects, and the transport to it.
+    async fn dial(&self) -> Result<(SocketAddr, Dialed), ClientError> {
+        let (target, addrs) = self.resolve().await?;
+        let connect = |remote| async move {
+            let dialed = self.connect(remote).await;
+            if let Err(err) = &dialed {
+                tracing::debug!(%remote, err = %chain(err), "this address did not connect");
+            }
+            dialed
+        };
+        dial_each(addrs, ClientError::NoAddress(target), connect).await
     }
 
     async fn connect(&self, remote: SocketAddr) -> Result<Dialed, ClientError> {
