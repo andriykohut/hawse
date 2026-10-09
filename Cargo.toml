@@ -24,6 +24,7 @@ gethostname = "1"
 humantime = "2"
 ipnet = { version = "2", features = ["serde"] }
 miette = { version = "7", features = ["fancy"] }
+notify = "8"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 quinn = { version = "0.11", default-features = false, features = [
     "runtime-tokio",

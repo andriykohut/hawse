@@ -166,6 +166,100 @@ fn echo_round_trip_through_real_binaries() {
     assert_eq!(&buf, b"ping");
 }
 
+/// Whether a visitor to `port` gets its bytes back, tried until `open` is what it sees.
+fn wait_for_echo(port: u16, open: bool, what: &str) {
+    let echoed = || {
+        let mut visitor = TcpStream::connect(("127.0.0.1", port)).ok()?;
+        visitor
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .ok()?;
+        visitor.write_all(b"ping").ok()?;
+        let mut buf = [0u8; 4];
+        visitor.read_exact(&mut buf).ok()?;
+        (&buf == b"ping").then_some(())
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while echoed().is_some() != open {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_config_edited_under_running_binaries_takes_effect_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let client_key = keygen(&dir.path().join("client.key"));
+    let server_port = free_listen_port();
+    let first = free_public_port(Kind::Tcp);
+    let second = (first + 1..30000)
+        .find(|&port| TcpListener::bind(("::", port)).is_ok())
+        .unwrap();
+
+    let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_addr = echo.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for socket in echo.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut reader = socket.try_clone().unwrap();
+                let mut writer = socket;
+                let _ = std::io::copy(&mut reader, &mut writer);
+            });
+        }
+    });
+
+    let server_toml = dir.path().join("server.toml");
+    let client_toml = dir.path().join("client.toml");
+    let listen = format!("listen = \"127.0.0.1:{server_port}\"\n");
+    let granted = format!(
+        "{listen}\n[clients.e2e]\nkey = \"{client_key}\"\nports = [\"{first}\", \"{second}\"]\n"
+    );
+    let one = format!(
+        "server = \"127.0.0.1:{server_port}\"\nserver_key = \"{server_key}\"\n\n[expose.one]\nlocal = \"{echo_addr}\"\nport = {first}\n"
+    );
+    fs::write(&server_toml, &granted).unwrap();
+    fs::write(&client_toml, &one).unwrap();
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(&server_toml)
+            .spawn()
+            .unwrap(),
+    );
+    let _client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(&client_toml)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_echo(first, true, "the first service never opened");
+
+    let two = format!("{one}\n[expose.two]\nlocal = \"{echo_addr}\"\nport = {second}\n");
+    fs::write(&client_toml, two).unwrap();
+    wait_for_echo(
+        second,
+        true,
+        "the service added to client.toml never opened",
+    );
+
+    // A config that does not load changes nothing, however long it is left there.
+    fs::write(&server_toml, format!("{granted}key = 7\n")).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    wait_for_echo(
+        first,
+        true,
+        "a server.toml that does not load took the tunnel down",
+    );
+
+    fs::write(&server_toml, listen).unwrap();
+    wait_for_echo(
+        first,
+        false,
+        "a client removed from server.toml kept its port",
+    );
+}
+
 #[test]
 fn udp_echo_round_trip_through_real_binaries() {
     let dir = tempfile::tempdir().unwrap();

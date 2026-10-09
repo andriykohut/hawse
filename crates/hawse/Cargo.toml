@@ -30,6 +30,7 @@ hawse-proto.workspace = true
 clap.workspace = true
 etcetera.workspace = true
 miette.workspace = true
+notify.workspace = true
 rustix.workspace = true
 serde.workspace = true
 thiserror.workspace = true

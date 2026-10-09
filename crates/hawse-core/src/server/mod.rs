@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use hawse_proto::key::PublicKey;
 use quinn::{Endpoint, VarInt};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -54,7 +54,8 @@ const ENFILE: i32 = 23;
 const EMFILE: i32 = 24;
 
 pub struct Shared {
-    pub policy: Policy,
+    /// Replaced by a reload. Each session watches it for what became of its own grant.
+    pub policy: watch::Sender<Policy>,
     pub ports: Mutex<PortAllocator>,
     pub buffer: usize,
     pub udp_sessions: usize,
@@ -89,7 +90,7 @@ impl Shared {
 impl Shared {
     pub(crate) fn for_tests() -> Self {
         Self {
-            policy: Policy::default(),
+            policy: watch::Sender::new(Policy::default()),
             ports: Mutex::new(PortAllocator::new(hawse_proto::port::PortSpan {
                 first: 40000,
                 last: 41000,
@@ -176,7 +177,7 @@ impl Server {
         let mut ports = PortAllocator::new(cfg.dynamic_ports);
         ports.reserve(bound.port());
         let shared = Arc::new(Shared {
-            policy: Policy::from_config(cfg),
+            policy: watch::Sender::new(Policy::from_config(cfg)),
             ports: Mutex::new(ports),
             buffer,
             udp_sessions: usize::try_from(cfg.limits.udp_sessions_per_service)
@@ -203,6 +204,14 @@ impl Server {
         self.endpoint
             .local_addr()
             .expect("a bound endpoint has an address")
+    }
+
+    /// Where a reload sends the `[clients.*]` it read. A session whose key is gone from them ends
+    /// at once, and so does one whose `bind` or `allow` changed, for its client to bind afresh; one
+    /// whose `ports` changed loses the fixed ports it is no longer granted. Nothing else in a
+    /// config changes under a running server.
+    pub fn policy(&self) -> watch::Sender<Policy> {
+        self.shared.policy.clone()
     }
 
     /// Runs until `cancel` fires or the QUIC endpoint stops accepting. Cancelling reaches every

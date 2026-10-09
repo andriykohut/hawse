@@ -37,7 +37,8 @@ journalctl -u hawse-server -n 20 | grep 'server key'
 ```
 
 The same works for the client. Paste the client's key into the server's
-`server.toml` and restart the server; configuration is read at startup only.
+`server.toml`; the running server reads it within a second. `systemctl reload`
+sends either unit the SIGHUP that has it read its config again.
 
 ## Ports below 1024
 

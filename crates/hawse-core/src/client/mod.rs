@@ -3,7 +3,7 @@ mod race;
 mod udp;
 mod visitor;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
@@ -13,7 +13,7 @@ use hawse_proto::key::PublicKey;
 use hawse_proto::msg::{ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen, reset};
 use hawse_proto::port::{Kind, Port, PortRequest};
 use quinn::Endpoint;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -153,6 +153,18 @@ struct BindCtx<'a> {
     udp_cancel: &'a CancellationToken,
 }
 
+/// One session's services: what it has asked the server to bind, kept in step with `expose`, and
+/// what came of each.
+#[derive(Default)]
+struct Services {
+    exposed: BTreeMap<String, Expose>,
+    /// The id the server gave each one it bound.
+    ids: HashMap<String, u16>,
+    /// Refused by the server, and asked for again at the next reload: its grant may be what
+    /// changed.
+    failed: HashSet<String>,
+}
+
 async fn open_control(transport: &Arc<dyn Transport>) -> Result<Control, ClientError> {
     let (send, recv) = transport.open_bi().await?;
     Ok(Control::new(send, recv))
@@ -213,7 +225,9 @@ async fn serve_stream(
 }
 
 pub struct Client {
+    /// Without its `expose`, which is in the field of that name.
     cfg: ClientConfig,
+    expose: watch::Sender<BTreeMap<String, Expose>>,
     identity: Identity,
     targets: Targets,
     udp: Arc<udp::Registry>,
@@ -221,8 +235,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(cfg: ClientConfig, identity: Identity) -> Self {
+    pub fn new(mut cfg: ClientConfig, identity: Identity) -> Self {
         Self {
+            expose: watch::Sender::new(std::mem::take(&mut cfg.expose)),
             cfg,
             identity,
             targets: Arc::default(),
@@ -237,6 +252,14 @@ impl Client {
     pub fn with_fallback_after(mut self, after: Duration) -> Self {
         self.fallback_after = after;
         self
+    }
+
+    /// Where a reload sends the `[expose.*]` it read. A running session unbinds each service that
+    /// is gone or changed and binds each that is new or changed, and asks again for every bind
+    /// the server refused; the next session starts from them. Nothing else in a config changes
+    /// under a running client.
+    pub fn expose(&self) -> watch::Sender<BTreeMap<String, Expose>> {
+        self.expose.clone()
     }
 
     /// Reconnects after every failure, backing off from 1 s to 30 s, until `cancel` fires,
@@ -325,6 +348,11 @@ impl Client {
         } = dialed;
 
         let tasks = TaskTracker::new();
+        let mut wanted = self.expose.subscribe();
+        let mut services = Services {
+            exposed: wanted.borrow_and_update().clone(),
+            ..Services::default()
+        };
         let greeting = async {
             let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
             *welcomed = Some(Instant::now());
@@ -337,7 +365,10 @@ impl Client {
                     agent,
                 },
             );
-            self.send_binds(&mut control).await
+            for (service, expose) in &services.exposed {
+                send_msg(&mut control, &bind(service, expose)).await?;
+            }
+            Ok(())
         };
         if let Err(err) = greeting.await {
             hang_up(&transport, &tasks, endpoint).await;
@@ -356,10 +387,20 @@ impl Client {
         let mut ping = ping_interval();
         let mut last_heard = tokio::time::Instant::now();
         let mut nonce = 0u64;
+        // What a reload left to tell the server, one message a turn.
+        let mut pending = VecDeque::new();
 
         let outcome = loop {
             let reply = tokio::select! {
                 () = cancel.cancelled() => break Ok(()),
+                // Popped only when polled, so a turn another arm wins loses nothing.
+                reply = async { pending.pop_front() }, if !pending.is_empty() => reply,
+                // `self` holds the sender, so this never fails.
+                _ = wanted.changed() => {
+                    let next = wanted.borrow_and_update().clone();
+                    pending.extend(self.reexpose(&mut services, next));
+                    None
+                }
                 () = tokio::time::sleep_until(last_heard + PONG_DEADLINE) => {
                     break Err(ClientError::Unresponsive);
                 }
@@ -370,28 +411,9 @@ impl Client {
                 msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = tokio::time::Instant::now();
-                    match msg {
-                        ServerMessage::Bound { service, service_id, port, address } => {
-                            let Some(expose) = self.cfg.expose.get(&service) else {
-                                tracing::warn!(service, "server bound a service we never asked for");
-                                continue;
-                            };
-                            let kind = expose.port.kind();
-                            self.register_bound(service.clone(), service_id, expose, listener_addr(address, remote, port), &bind_ctx);
-                            let port = Port { number: port, kind };
-                            emit(events, Event::Bound { service, port });
-                            None
-                        }
-                        ServerMessage::BindFailed { service, reason } => {
-                            emit(events, Event::BindFailed { service, reason });
-                            None
-                        }
-                        ServerMessage::Ping { nonce } => Some(ClientMessage::Pong { nonce }),
-                        ServerMessage::Pong { .. } => None,
-                        ServerMessage::Shutdown { reason } => break Err(ClientError::Shutdown(reason)),
-                        ServerMessage::Welcome { .. } | ServerMessage::Denied { .. } => {
-                            break Err(ClientError::Protocol("a second greeting"));
-                        }
+                    match self.heard(msg, &mut services, remote, &bind_ctx, events) {
+                        Ok(reply) => reply,
+                        Err(err) => break Err(err),
                     }
                 }
                 incoming = transport.accept_bi() => {
@@ -423,6 +445,80 @@ impl Client {
         self.udp.clear();
         hang_up(&transport, &tasks, endpoint).await;
         outcome
+    }
+
+    /// Takes up the services a reload read, and returns what to tell the server.
+    fn reexpose(
+        &self,
+        services: &mut Services,
+        next: BTreeMap<String, Expose>,
+    ) -> Vec<ClientMessage> {
+        for service in services.failed.drain() {
+            services.exposed.remove(&service);
+        }
+        let msgs = rebind(&services.exposed, &next);
+        for msg in &msgs {
+            if let ClientMessage::Unbind { service } = msg {
+                self.forget(services.ids.remove(service));
+            }
+        }
+        services.exposed = next;
+        msgs
+    }
+
+    /// The reply a control message calls for, if any. An error is how the session ends.
+    fn heard(
+        &self,
+        msg: ServerMessage,
+        services: &mut Services,
+        remote: SocketAddr,
+        ctx: &BindCtx<'_>,
+        events: &mpsc::Sender<Event>,
+    ) -> Result<Option<ClientMessage>, ClientError> {
+        match msg {
+            ServerMessage::Bound {
+                service,
+                service_id,
+                port,
+                address,
+            } => {
+                let Some(expose) = services.exposed.get(&service) else {
+                    tracing::warn!(service, "server bound a service we never asked for");
+                    return Ok(None);
+                };
+                let kind = expose.port.kind();
+                services.failed.remove(&service);
+                // Bound twice when a reload asked again before the first answer came, and the
+                // first one's id is no longer the server's.
+                self.forget(services.ids.insert(service.clone(), service_id));
+                let listener = listener_addr(address, remote, port);
+                self.register_bound(service.clone(), service_id, expose, listener, ctx);
+                let port = Port { number: port, kind };
+                emit(events, Event::Bound { service, port });
+                Ok(None)
+            }
+            ServerMessage::BindFailed { service, reason } => {
+                // Also what a server's reload says of a port it no longer grants.
+                self.forget(services.ids.remove(&service));
+                services.failed.insert(service.clone());
+                emit(events, Event::BindFailed { service, reason });
+                Ok(None)
+            }
+            ServerMessage::Ping { nonce } => Ok(Some(ClientMessage::Pong { nonce })),
+            ServerMessage::Pong { .. } => Ok(None),
+            ServerMessage::Shutdown { reason } => Err(ClientError::Shutdown(reason)),
+            ServerMessage::Welcome { .. } | ServerMessage::Denied { .. } => {
+                Err(ClientError::Protocol("a second greeting"))
+            }
+        }
+    }
+
+    /// Drops what this end holds for a service the server has unbound, if it was bound.
+    fn forget(&self, id: Option<u16>) {
+        if let Some(id) = id {
+            self.targets.write().expect("targets lock").remove(&id);
+            self.udp.remove(id);
+        }
     }
 
     fn register_bound(
@@ -582,24 +678,6 @@ impl Client {
         Ok((tls, tuning))
     }
 
-    async fn send_binds(&self, control: &mut Control) -> Result<(), ClientError> {
-        for (service, expose) in &self.cfg.expose {
-            let (kind, port) = match expose.port {
-                PortRequest::Any(kind) => (kind, None),
-                PortRequest::Fixed(port) => (port.kind, Some(port.number)),
-            };
-            let bind = ClientMessage::Bind {
-                service: service.clone(),
-                kind,
-                port,
-                allow: expose.allow.clone(),
-                proxy_protocol: expose.proxy_protocol,
-            };
-            send_msg(control, &bind).await?;
-        }
-        Ok(())
-    }
-
     /// The `host:port` that was looked up, and its addresses in the resolver's order.
     async fn resolve(&self) -> Result<(String, Vec<SocketAddr>), ClientError> {
         let (host, port) = split_host_port(&self.cfg.server)
@@ -611,6 +689,41 @@ impl Client {
             .collect();
         Ok((target, addrs))
     }
+}
+
+fn bind(service: &str, expose: &Expose) -> ClientMessage {
+    let (kind, port) = match expose.port {
+        PortRequest::Any(kind) => (kind, None),
+        PortRequest::Fixed(port) => (port.kind, Some(port.number)),
+    };
+    ClientMessage::Bind {
+        service: service.to_owned(),
+        kind,
+        port,
+        allow: expose.allow.clone(),
+        proxy_protocol: expose.proxy_protocol,
+    }
+}
+
+/// What turns the services of `exposed` into those of `next`: an `Unbind` for each one gone or
+/// changed, then a `Bind` for each one new or changed.
+fn rebind(
+    exposed: &BTreeMap<String, Expose>,
+    next: &BTreeMap<String, Expose>,
+) -> Vec<ClientMessage> {
+    let differs =
+        |from: &BTreeMap<String, Expose>, service: &str, expose| from.get(service) != Some(expose);
+    let unbinds = exposed
+        .iter()
+        .filter(|(service, expose)| differs(next, service, expose))
+        .map(|(service, _)| ClientMessage::Unbind {
+            service: service.clone(),
+        });
+    let binds = next
+        .iter()
+        .filter(|(service, expose)| differs(exposed, service, expose))
+        .map(|(service, expose)| bind(service, expose));
+    unbinds.chain(binds).collect()
 }
 
 /// Dials each address in turn and returns the first that connects, with the address it connected
@@ -749,6 +862,37 @@ mod tests {
 
     fn addr(host: u8) -> SocketAddr {
         SocketAddr::from(([192, 0, 2, host], 4433))
+    }
+
+    #[test]
+    fn a_reload_unbinds_what_is_gone_or_changed_before_it_binds_what_is_new_or_changed() {
+        let services = |locals: &[(&str, &str)]| -> BTreeMap<String, Expose> {
+            let expose = |local: &str| Expose {
+                local: local.to_owned(),
+                port: PortRequest::default(),
+                allow: vec![],
+                proxy_protocol: false,
+            };
+            locals
+                .iter()
+                .map(|(service, local)| ((*service).to_owned(), expose(local)))
+                .collect()
+        };
+        let exposed = services(&[("gone", "a:1"), ("kept", "a:2"), ("moved", "a:3")]);
+        let next = services(&[("kept", "a:2"), ("moved", "a:4"), ("new", "a:5")]);
+        let sent: Vec<String> = rebind(&exposed, &next)
+            .into_iter()
+            .map(|msg| match msg {
+                ClientMessage::Unbind { service } => format!("unbind {service}"),
+                ClientMessage::Bind { service, .. } => format!("bind {service}"),
+                other => panic!("neither a bind nor an unbind: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            ["unbind gone", "unbind moved", "bind moved", "bind new"]
+        );
+        assert_eq!(rebind(&next, &next), []);
     }
 
     #[tokio::test]

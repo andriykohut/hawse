@@ -17,7 +17,7 @@ use crate::transport::quic::Tuning;
 
 pub const DEFAULT_PORT: u16 = 4433;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
@@ -48,7 +48,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ClientPolicy {
     pub key: PublicKey,
@@ -63,7 +63,7 @@ pub struct ClientPolicy {
     pub allow: Vec<IpNet>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
     pub auth_failures_per_minute: u32,
@@ -105,7 +105,7 @@ pub enum Congestion {
     Bbr,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerTransport {
     #[serde(with = "units::duration")]
@@ -131,7 +131,7 @@ impl Default for ServerTransport {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub server: String,
@@ -172,7 +172,7 @@ pub enum Prefer {
     Tcp,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct ClientTransport {
     pub prefer: Prefer,
@@ -305,6 +305,17 @@ fn validate_transport(
 }
 
 impl ServerConfig {
+    /// Whether `new` changes what only a start reads: anything but `[clients.*]` and the `bind`
+    /// their ports default to.
+    pub fn needs_restart(&self, new: &Self) -> bool {
+        let fixed = |cfg: &Self| Self {
+            clients: BTreeMap::new(),
+            bind: self.bind,
+            ..cfg.clone()
+        };
+        fixed(self) != fixed(new)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.listen.port() == 0 {
             return Err(ConfigError::ListenPort);
@@ -352,6 +363,15 @@ impl ServerConfig {
 }
 
 impl ClientConfig {
+    /// Whether `new` changes what only a new connection takes up: anything but `[expose.*]`.
+    pub fn needs_reconnect(&self, new: &Self) -> bool {
+        let fixed = |cfg: &Self| Self {
+            expose: BTreeMap::new(),
+            ..cfg.clone()
+        };
+        fixed(self) != fixed(new)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         match split_host_port(&self.server) {
             Some(_) => {}

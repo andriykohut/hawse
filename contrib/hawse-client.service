@@ -7,6 +7,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/hawse client --config /etc/hawse/client.toml --log pretty
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s
 
