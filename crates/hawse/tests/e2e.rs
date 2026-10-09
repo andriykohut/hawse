@@ -285,6 +285,35 @@ fn check_tells_the_roles_apart_and_creates_no_key() {
     }
 }
 
+/// `/etc/hawse` is the host's and cannot be emptied from here, so this asserts only what a config
+/// there would not change: a role's config in the user's directory is the one read.
+#[test]
+fn check_with_no_config_named_reads_each_role_it_finds() {
+    let dir = tempfile::tempdir().unwrap();
+    let configs = dir.path().join("hawse");
+    fs::create_dir(&configs).unwrap();
+    fs::write(configs.join("server.toml"), "").unwrap();
+    fs::write(
+        configs.join("client.toml"),
+        "server = \"tunnel.example.com\"\nserver_key = \"ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n",
+    )
+    .unwrap();
+    let out = hawse()
+        .arg("check")
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env_remove("HAWSE_CONFIG")
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    for role in ["server", "client"] {
+        let config = configs.join(format!("{role}.toml"));
+        assert!(stderr.contains(&format!("valid {role} config")), "{stderr}");
+        assert!(stderr.contains(config.to_str().unwrap()), "{stderr}");
+    }
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+}
+
 #[test]
 fn check_connect_reports_the_transport_a_server_answered_on() {
     let dir = tempfile::tempdir().unwrap();
