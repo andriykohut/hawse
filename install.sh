@@ -30,21 +30,23 @@ main() {
 
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
-    cd "$tmp"
-    curl -fsSL -O "$repo/releases/download/v$version/$name.tar.gz" \
-        -O "$repo/releases/download/v$version/SHA256SUMS"
+    # dash runs the EXIT trap on exit only, not when a signal ends it.
+    trap 'exit 1' INT TERM
+    curl -fsSL -o "$tmp/$name.tar.gz" "$repo/releases/download/v$version/$name.tar.gz" \
+        -o "$tmp/SHA256SUMS" "$repo/releases/download/v$version/SHA256SUMS"
 
-    want=$(grep "  $name.tar.gz\$" SHA256SUMS | cut -d' ' -f1)
-    if [ -z "$want" ] || [ "$want" != "$(sha256 "$name.tar.gz")" ]; then
+    want=$(grep "  $name.tar.gz\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+    if [ -z "$want" ] || [ "$want" != "$(sha256 "$tmp/$name.tar.gz")" ]; then
         echo "hawse: $name.tar.gz does not match SHA256SUMS" >&2
         exit 1
     fi
 
-    tar -xzf "$name.tar.gz"
+    tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
     dir=${HAWSE_INSTALL_DIR:-/usr/local/bin}
+    mkdir -p "$dir" 2>/dev/null || true
     if [ -w "$dir" ]; then sudo=; else sudo=sudo; fi
     $sudo mkdir -p "$dir"
-    $sudo install -m755 "$name/hawse" "$dir/hawse"
+    $sudo install -m755 "$tmp/$name/hawse" "$dir/hawse"
     echo "hawse $version installed to $dir/hawse"
 }
 
