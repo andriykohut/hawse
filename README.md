@@ -76,7 +76,18 @@ is planned or deliberately deferred.
 Each [release](https://github.com/andriykohut/hawse/releases) has a static binary
 for x86_64, aarch64 and armv7 Linux, and one for Apple Silicon macOS. The archive
 holds the binary, its licenses, `THIRD-PARTY-LICENSES.txt` for the crates
-compiled into it, and the systemd units from `contrib/`:
+compiled into it, and the systemd units from `contrib/`.
+
+`install.sh` picks the archive for the machine it runs on from the latest
+release, checks it against `SHA256SUMS` and installs the binary to
+`/usr/local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/andriykohut/hawse/main/install.sh | sh
+```
+
+`HAWSE_VERSION` picks another release and `HAWSE_INSTALL_DIR` another directory.
+The same by hand, for one version and one target:
 
 ```sh
 curl -LO https://github.com/andriykohut/hawse/releases/download/v0.6.0/hawse-0.6.0-x86_64-unknown-linux-musl.tar.gz
