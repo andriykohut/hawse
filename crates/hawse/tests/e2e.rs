@@ -652,3 +652,170 @@ fn a_client_whose_stderr_reader_went_away_stops_on_sigterm() {
     };
     assert_eq!(status.code(), Some(0));
 }
+
+/// What a child logs, line by line. A read of the pipe blocks for as long as the child says
+/// nothing, so the lines come through a channel, which can be waited on with a deadline.
+fn stderr_lines(child: &mut Child) -> mpsc::Receiver<String> {
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    lines
+}
+
+fn wait_for_line(lines: &mpsc::Receiver<String>, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(left)
+            .unwrap_or_else(|err| panic!("no line with `{needle}`, {err}: {seen:#?}"));
+        if line.contains(needle) {
+            return line;
+        }
+        seen.push(line);
+    }
+}
+
+#[test]
+fn join_writes_a_config_and_ends_once_the_server_authorizes_its_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let server_port = free_listen_port();
+    let server_config = dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        format!("listen = \"127.0.0.1:{server_port}\"\n"),
+    )
+    .unwrap();
+    let mut server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(&server_config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    // Held to the end: a server whose log has no reader left fails every write to it.
+    let server_log = stderr_lines(&mut server.0);
+    // The line an operator copies, and by then the server is listening.
+    let invitation = wait_for_line(&server_log, "hawse join");
+    assert!(invitation.contains(&server_key), "{invitation}");
+
+    // A directory that is not there yet, as on a machine that has never run hawse.
+    let config = dir.path().join("laptop").join("client.toml");
+    let mut join = Proc(
+        hawse()
+            .args(["join", &format!("127.0.0.1:{server_port}")])
+            .args(["--server-key", &server_key, "--config"])
+            .arg(&config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let join_log = stderr_lines(&mut join.0);
+    wait_for_line(&join_log, "not authorized yet");
+    assert!(config.is_file(), "no config after the server answered");
+    assert_eq!(join.0.try_wait().unwrap(), None, "join ended while denied");
+
+    // The key `join` created, read back the way `keygen` reads one that exists.
+    let client_key = keygen(&dir.path().join("laptop").join("client.key"));
+    fs::write(
+        &server_config,
+        format!(
+            "listen = \"127.0.0.1:{server_port}\"\n\n[clients.laptop]\nkey = \"{client_key}\"\n"
+        ),
+    )
+    .unwrap();
+    wait_for_line(&join_log, "joined as laptop");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = join.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "still running 5 s after joining");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+
+    let check = hawse()
+        .args(["check", "--connect", "--config"])
+        .arg(&config)
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(
+        check.code(),
+        Some(0),
+        "the config join wrote does not check"
+    );
+}
+
+#[test]
+fn join_leaves_a_config_that_is_there_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let config = dir.path().join("client.toml");
+    fs::write(&config, "mine").unwrap();
+    let out = hawse()
+        .args(["join", "tunnel.example.com", "--server-key", &server_key])
+        .arg("--config")
+        .arg(&config)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("already"), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), "mine");
+    assert!(!dir.path().join("client.key").exists(), "a key was created");
+}
+
+#[test]
+fn join_writes_no_config_when_the_server_has_another_key() {
+    let dir = tempfile::tempdir().unwrap();
+    keygen(&dir.path().join("server.key"));
+    let another_key = keygen(&dir.path().join("another.key"));
+    let server_port = free_listen_port();
+    let server_config = dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        format!("listen = \"127.0.0.1:{server_port}\"\n"),
+    )
+    .unwrap();
+    let mut server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(&server_config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    // Held to the end: a server whose log has no reader left fails every write to it.
+    let server_log = stderr_lines(&mut server.0);
+    wait_for_line(&server_log, "hawse join");
+
+    let config = dir.path().join("laptop").join("client.toml");
+    let out = hawse()
+        .args(["join", &format!("127.0.0.1:{server_port}")])
+        .args(["--server-key", &another_key, "--config"])
+        .arg(&config)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no config was written"), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        !config.exists(),
+        "a config naming a server that is not the one"
+    );
+    // The key is this machine's whichever server it joins, so it stays for the next try.
+    assert!(dir.path().join("laptop").join("client.key").is_file());
+}

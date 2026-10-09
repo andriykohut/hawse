@@ -154,14 +154,15 @@ On first run it generates `server.key` and prints the corresponding public key.
 Connections from unknown keys are refused, so until a client is authorized the
 server accepts nothing.
 
-Generate a key on the client:
+Join it from the client, with the server's address and the key it printed:
 
 ```sh
-hawse keygen
+hawse join tunnel.example.com:4433 --server-key ed25519:BBBB...
 ```
 
-Add the printed key to `server.toml` on the server, together with the ports
-that client may bind:
+This generates the client's key, writes a `client.toml` naming the server, and
+waits for the server to accept the key. Add the key it prints to `server.toml`
+on the server, together with the ports that client may bind:
 
 ```toml
 [clients.laptop]
@@ -170,9 +171,10 @@ ports = ["2222"]
 ```
 
 A running server reads the file again within a second of the change, so there
-is nothing to restart.
+is nothing to restart. `join` ends at its next retry after that, which is at
+most 30 s away.
 
-Write `client.toml` on the client:
+Add the services to the `client.toml` it wrote:
 
 ```toml
 server = "tunnel.example.com:4433"
