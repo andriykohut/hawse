@@ -66,8 +66,8 @@ TCP and UDP forwarding work, with fixed or dynamically assigned public ports.
 0.5.0 client says so when it meets one: upgrade the server and its clients
 together.
 
-Besides the features named above, the `expose`, `authorize` and `revoke`
-subcommands are not implemented either.
+Besides the features named above, the `expose` subcommand is not implemented
+either.
 The [issues](https://github.com/andriykohut/hawse/issues) list everything that
 is planned or deliberately deferred.
 
