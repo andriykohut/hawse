@@ -776,3 +776,46 @@ fn join_leaves_a_config_that_is_there_alone() {
     assert_eq!(fs::read_to_string(&config).unwrap(), "mine");
     assert!(!dir.path().join("client.key").exists(), "a key was created");
 }
+
+#[test]
+fn join_writes_no_config_when_the_server_has_another_key() {
+    let dir = tempfile::tempdir().unwrap();
+    keygen(&dir.path().join("server.key"));
+    let another_key = keygen(&dir.path().join("another.key"));
+    let server_port = free_listen_port();
+    let server_config = dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        format!("listen = \"127.0.0.1:{server_port}\"\n"),
+    )
+    .unwrap();
+    let mut server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(&server_config)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    // Held to the end: a server whose log has no reader left fails every write to it.
+    let server_log = stderr_lines(&mut server.0);
+    wait_for_line(&server_log, "hawse join");
+
+    let config = dir.path().join("laptop").join("client.toml");
+    let out = hawse()
+        .args(["join", &format!("127.0.0.1:{server_port}")])
+        .args(["--server-key", &another_key, "--config"])
+        .arg(&config)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no config was written"), "{stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        !config.exists(),
+        "a config naming a server that is not the one"
+    );
+    // The key is this machine's whichever server it joins, so it stays for the next try.
+    assert!(dir.path().join("laptop").join("client.key").is_file());
+}
