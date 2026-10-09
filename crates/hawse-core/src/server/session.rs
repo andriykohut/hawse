@@ -88,7 +88,7 @@ pub async fn run(
     let grant = policy.borrow_and_update().lookup(&key).cloned();
     let Some(grant) = grant else {
         shared.auth_failed(remote.ip());
-        tracing::info!(%key, %remote, "denied unknown key. authorize it with: hawse authorize {key} --name NAME");
+        tracing::info!(%key, %remote, "denied unknown key. to authorize it, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"");
         let _ = control
             .send(&ServerMessage::Denied {
                 reason: DenyReason::UnknownKey,
