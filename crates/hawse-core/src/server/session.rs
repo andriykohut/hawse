@@ -10,7 +10,6 @@ use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
 use tokio::sync::{Semaphore, watch};
-use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
@@ -35,7 +34,8 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
 /// How long an unbind waits for its service's port to come free before the next message is read.
-const UNBIND_WAIT: Duration = Duration::from_secs(1);
+/// Longer than `FINISH_WAIT`, which a UDP service gives its bulk stream before it lets go.
+const UNBIND_WAIT: Duration = Duration::from_secs(2);
 
 /// `remote` is the address the handshake proved, not the connection's current one: a QUIC path
 /// can migrate to a new, unproven source before it is validated, and a failure charged there would
@@ -244,8 +244,6 @@ struct BoundService {
     port: Port,
     /// Asked for by number, so held under the grant; a port from the dynamic pool needs none.
     fixed: bool,
-    /// Ends once the service has given its port back.
-    task: JoinHandle<()>,
     /// Stops the service when it drops, so a session that unwinds stops what it bound as well.
     cancel: DropGuard,
 }
@@ -330,9 +328,9 @@ impl Session {
                         }
                         ClientMessage::Unbind { service } => {
                             // A client that changes a service asks for the same port in its next
-                            // message, and the port is free only once the service's task has ended.
-                            if let Some(stopped) = self.unbind(&service) {
-                                let _ = tokio::time::timeout(UNBIND_WAIT, stopped).await;
+                            // message, and a service told to stop has not yet given it back.
+                            if let Some(port) = self.unbind(&service) {
+                                self.freed(port).await;
                             }
                             None
                         }
@@ -434,13 +432,13 @@ impl Session {
         };
         let cancel = CancellationToken::new();
         let fixed = port.is_some();
-        let (port, task) = match kind {
+        let port = match kind {
             Kind::Tcp => {
                 let (port, listener) = match self.open(service, kind, port, net::bind_tcp) {
                     Ok(opened) => opened,
                     Err(reason) => return failed(reason),
                 };
-                let task = self.tasks.spawn(listener::serve(
+                self.tasks.spawn(listener::serve(
                     Arc::clone(&self.transport),
                     listener,
                     listener::Public {
@@ -453,7 +451,7 @@ impl Session {
                     cancel.clone(),
                     self.tasks.clone(),
                 ));
-                (port, task)
+                port
             }
             Kind::Udp => {
                 let (port, socket) = match self.open(service, kind, port, net::bind_udp) {
@@ -473,13 +471,13 @@ impl Session {
                     .write()
                     .expect("udp services lock")
                     .insert(id, Arc::clone(&bound));
-                let task = self.tasks.spawn(udp::serve(
+                self.tasks.spawn(udp::serve(
                     bound,
                     Arc::clone(&self.transport),
                     Arc::clone(&self.streams),
                     cancel.clone(),
                 ));
-                (port, task)
+                port
             }
         };
         self.last_id = id;
@@ -489,7 +487,6 @@ impl Session {
                 id,
                 port,
                 fixed,
-                task,
                 cancel: cancel.drop_guard(),
             },
         );
@@ -590,9 +587,9 @@ impl Session {
     }
 
     /// Only stops the service: a TCP listener task releases its port once its socket is gone, and
-    /// a UDP service does the same when its last handle drops. Returns the service's task, for a
-    /// caller that has to wait for the port.
-    fn unbind(&mut self, service: &str) -> Option<JoinHandle<()>> {
+    /// a UDP service does the same when its last handle drops. Returns the port it had, for a
+    /// caller that has to wait for it.
+    fn unbind(&mut self, service: &str) -> Option<Port> {
         let bound = self.services.remove(service)?;
         self.udp
             .write()
@@ -600,7 +597,23 @@ impl Session {
             .remove(&bound.id);
         drop(bound.cancel);
         tracing::info!(service, port = %bound.port, "unbound");
-        Some(bound.task)
+        Some(bound.port)
+    }
+
+    /// Waits, for up to `UNBIND_WAIT`, for a service that was told to stop to give `port` back.
+    // ponytail: looks every millisecond. A `Notify` beside the allocator would wake this instead,
+    // if an unbind ever shows up in a profile.
+    async fn freed(&self, port: Port) {
+        let held = || {
+            let ports = self.shared.ports.lock().expect("port allocator lock");
+            ports.holds(port)
+        };
+        let free = async {
+            while held() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        let _ = tokio::time::timeout(UNBIND_WAIT, free).await;
     }
 
     fn release(&self, port: Port) {
@@ -819,7 +832,6 @@ mod tests {
                 id: 1,
                 port: "40000".parse().unwrap(),
                 fixed: false,
-                task: tokio::spawn(async {}),
                 cancel: stopped.clone().drop_guard(),
             },
         );

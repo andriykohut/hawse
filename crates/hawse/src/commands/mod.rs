@@ -72,8 +72,15 @@ impl Reloads {
         })
         .and_then(|mut watcher| {
             watcher.watch(dir, RecursiveMode::NonRecursive)?;
-            if let Some(target) = linked_dir(&path, dir) {
-                watcher.watch(&target, RecursiveMode::NonRecursive)?;
+            // Not a reason to give up the watch above, which still sees the link replaced.
+            if let Some(target) = linked_dir(&path, dir)
+                && let Err(err) = watcher.watch(&target, RecursiveMode::NonRecursive)
+            {
+                tracing::warn!(
+                    dir = %target.display(),
+                    %err,
+                    "cannot watch the directory the config links into, so an edit there is read on SIGHUP only"
+                );
             }
             Ok(watcher)
         });

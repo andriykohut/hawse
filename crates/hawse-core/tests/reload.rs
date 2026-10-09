@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use common::{
     client_config, echo_server, expect_bound, fixed_port, raw_client, raw_hello, server_config,
-    start, start_server,
+    start, start_server, udp_ask, udp_echo_server, udp_replier, udp_visitor,
 };
 use hawse_core::client::Client;
 use hawse_core::identity::Identity;
@@ -157,6 +157,34 @@ async fn a_service_a_reload_changes_is_bound_again_on_its_fixed_port() {
         .await
         .expect("the changed service reaches its new local address within 5 s")
         .unwrap();
+
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_udp_service_a_reload_changes_is_bound_again_on_its_fixed_port() {
+    let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let port = format!("{}/udp", fixed_port(Kind::Udp));
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[&port])]),
+        &server_id,
+    );
+    let echo = udp_echo_server().await.to_string();
+    let moved = udp_replier(3).await.to_string();
+    let before = client_config(server.addr, server.key, &[("dns", &echo, &port)]);
+    let after = client_config(server.addr, server.key, &[("dns", &moved, &port)]);
+
+    let client = Client::new(before, client_id);
+    let expose = client.expose();
+    let mut client = start(client);
+    let bound = expect_bound(&mut client.events, "dns").await.number;
+    let visitor = udp_visitor().await;
+    assert_eq!(udp_ask(&visitor, bound, b"hello").await, b"hello");
+
+    expose.send_replace(after.expose);
+    assert_eq!(expect_bound(&mut client.events, "dns").await.number, bound);
+    assert_eq!(udp_ask(&visitor, bound, b"hello").await, [0xAB; 3]);
 
     client.cancel.cancel();
     server.cancel.cancel();
