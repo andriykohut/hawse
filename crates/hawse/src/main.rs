@@ -53,6 +53,16 @@ enum Command {
         #[arg(long, env = "HAWSE_CONFIG")]
         config: Option<PathBuf>,
     },
+    /// Validate a config without starting anything, and report where its key is.
+    Check {
+        /// The config to check, of either role. Without one, every config `server` and `client`
+        /// would read.
+        #[arg(long, env = "HAWSE_CONFIG")]
+        config: Option<PathBuf>,
+        /// Also dial the server a client config names, and report the transport it answered on.
+        #[arg(long)]
+        connect: bool,
+    },
     /// Generate a key if one does not exist, and print its public key.
     Keygen {
         /// The client config whose key this is. Without one, the config `client` would read.
@@ -110,6 +120,9 @@ fn run(cli: Cli) -> miette::Result<ExitCode> {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             Command::Client { config } => commands::client::run(config).await,
+            Command::Check { config, connect } => commands::check::run(config, connect)
+                .await
+                .map(|()| ExitCode::SUCCESS),
             Command::Keygen { config, out } => {
                 commands::keygen::run(config, out).map(|()| ExitCode::SUCCESS)
             }

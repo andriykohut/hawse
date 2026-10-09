@@ -941,6 +941,46 @@ async fn a_second_session_for_the_same_key_supersedes_the_first_over_tcp() {
     a_second_session_for_the_same_key_supersedes_the_first(Prefer::Tcp).await;
 }
 
+/// The other half of the supersede tests above: a dial that sends no `Hello` is not a second
+/// session, so the first keeps its visitors and ends only when it is told to.
+async fn a_probe_leaves_the_session_for_its_key_running(prefer: Prefer, expected: TransportKind) {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let echo = echo_server().await.to_string();
+    let cfg = client_config_over(server.addr, server.key, &[("svc", &echo, "any")], prefer);
+    let twin = Identity::from_pem(&client_id.to_pem()).unwrap();
+    let mut first = start_client(cfg.clone(), twin);
+    let port = expect_bound(&mut first.events, "svc").await;
+    let mut visitor = TcpStream::connect(("127.0.0.1", port.number))
+        .await
+        .unwrap();
+
+    let probed = Client::new(cfg, client_id).probe().await.unwrap();
+    assert_eq!(probed, (server.addr, expected));
+
+    visitor.write_all(b"hello").await.unwrap();
+    let mut buf = [0u8; 5];
+    visitor.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"hello");
+    first.cancel.cancel();
+    let outcome = first.task.await.unwrap();
+    assert!(outcome.is_ok(), "{outcome:?}");
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_probe_leaves_the_session_for_its_key_running_over_quic() {
+    a_probe_leaves_the_session_for_its_key_running(Prefer::Auto, TransportKind::Quic).await;
+}
+
+#[tokio::test]
+async fn a_probe_leaves_the_session_for_its_key_running_over_tcp() {
+    a_probe_leaves_the_session_for_its_key_running(Prefer::Tcp, TransportKind::Tcp).await;
+}
+
 /// A server from before the wire changed: ours in every way but the protocol it offers.
 fn old_server_tls(identity: &Identity) -> rustls::ServerConfig {
     let (cert, key) = identity.certificate().unwrap();

@@ -33,6 +33,9 @@ pub enum LoadError {
         "create it with `server`, `server_key` and an `[expose.NAME]` table, or pass --config"
     ))]
     MissingClient(PathBuf),
+    #[error("no config at {server} or at {client}")]
+    #[diagnostic(help("pass --config"))]
+    Nothing { server: PathBuf, client: PathBuf },
 }
 
 pub fn parse<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T, LoadError> {
@@ -69,6 +72,31 @@ pub fn load_client(explicit: Option<PathBuf>) -> Result<(ClientConfig, Located),
     let cfg = parse::<ClientConfig>(&located.file, &read(&located.file)?)?;
     cfg.validate().map_err(LoadError::Invalid)?;
     Ok((cfg, located))
+}
+
+/// The roles `check` has a config for: the one the file at `explicit` is written for, and without
+/// that every role with a config where hawse looks for one.
+pub fn roles(explicit: Option<&Path>) -> Result<Vec<Role>, LoadError> {
+    if let Some(path) = explicit {
+        let table = parse::<toml::Table>(path, &read(path)?)?;
+        // The top-level keys a client's config has and a server's does not.
+        let client = ["server", "server_key", "expose"]
+            .iter()
+            .any(|key| table.contains_key(*key));
+        return Ok(vec![if client { Role::Client } else { Role::Server }]);
+    }
+    let [server, client] = [Role::Server, Role::Client].map(|role| paths::locate(role, None));
+    let found: Vec<Role> = [(Role::Server, &server), (Role::Client, &client)]
+        .into_iter()
+        .filter_map(|(role, located)| located.exists.then_some(role))
+        .collect();
+    if found.is_empty() {
+        return Err(LoadError::Nothing {
+            server: server.file,
+            client: client.file,
+        });
+    }
+    Ok(found)
 }
 
 /// Where the client's key is: the path `client` loads it from, for `keygen` to write it to. A
