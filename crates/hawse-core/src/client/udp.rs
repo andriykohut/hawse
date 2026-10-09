@@ -54,6 +54,18 @@ impl Registry {
         self.services.write().expect("udp registry lock").clear();
     }
 
+    /// Also ends the service's sessions toward `local`.
+    pub fn remove(&self, id: u16) {
+        let gone = self
+            .services
+            .write()
+            .expect("udp registry lock")
+            .remove(&id);
+        if let Some(local) = gone {
+            local.cancel.cancel();
+        }
+    }
+
     /// `Bulk` and `Bound` travel on different streams, so on QUIC either can arrive first.
     pub async fn wait_for(&self, id: u16, deadline: Duration) -> Option<Arc<UdpLocal>> {
         let found = async {
@@ -142,7 +154,7 @@ impl UdpLocal {
             no_socket_warned: AtomicBool::new(false),
             drops,
             tasks: ctx.tasks.clone(),
-            cancel: ctx.udp_cancel.clone(),
+            cancel: ctx.udp_cancel.child_token(),
         })
     }
 

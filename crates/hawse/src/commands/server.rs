@@ -1,18 +1,32 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use hawse_core::config::ServerConfig;
 use hawse_core::identity::Identity;
 use hawse_core::server::Server;
+use hawse_core::server::policy::Policy;
 use miette::{IntoDiagnostic as _, WrapErr as _};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::config_file;
+use super::Reloads;
+use crate::config_file::{self, LoadError};
+use crate::paths::{self, Located, Role};
 
-pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette::Result<()> {
-    let (mut cfg, located) = config_file::load_server(config)?;
+/// Reads `file` and no other: a reload that looked the config up again could find one that has
+/// since appeared somewhere the lookup tries first, which is not the one being watched.
+fn load(file: &Path, listen: Option<SocketAddr>) -> Result<(ServerConfig, Located), LoadError> {
+    let (mut cfg, located) = config_file::load_server(Some(file.to_owned()))?;
     if let Some(listen) = listen {
         cfg.listen = listen;
     }
+    Ok((cfg, located))
+}
+
+pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette::Result<()> {
+    let located = paths::locate(Role::Server, config);
+    let reloads = Reloads::new(located.file.clone());
+    let (cfg, _) = load(&located.file, listen)?;
     let streams = cfg.limits.streams_in_effect();
     if streams < cfg.limits.streams_per_client {
         tracing::warn!(
@@ -45,6 +59,45 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
     );
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
-    server.serve(cancel).await;
+    let policy = server.policy();
+    tokio::select! {
+        () = server.serve(cancel) => {}
+        () = reload(reloads, listen, &cfg, &located, &policy) => {}
+    }
     Ok(())
+}
+
+/// Reads the config again each time it changes and puts its `[clients.*]` in force. `started` is
+/// what the server is running on, and stays what every reload is compared with.
+async fn reload(
+    mut reloads: Reloads,
+    listen: Option<SocketAddr>,
+    started: &ServerConfig,
+    located: &Located,
+    policy: &watch::Sender<Policy>,
+) {
+    loop {
+        reloads.next().await;
+        let cfg = match load(&located.file, listen) {
+            // A server started from a file does not fall back to the defaults when the file goes:
+            // they authorize nobody.
+            Ok((_, found)) if located.exists && !found.exists => {
+                tracing::error!(config = %located.file.display(), "config is gone, and the running one stays in force");
+                continue;
+            }
+            Ok((cfg, _)) => cfg,
+            Err(err) => {
+                super::not_reloaded(&err.into());
+                continue;
+            }
+        };
+        if started.needs_restart(&cfg) {
+            tracing::warn!(
+                config = %located.file.display(),
+                "a setting outside [clients.*] and `bind` changed, and takes effect at the next start"
+            );
+        }
+        policy.send_replace(Policy::from_config(&cfg));
+        tracing::info!(clients = cfg.clients.len(), "config reloaded");
+    }
 }

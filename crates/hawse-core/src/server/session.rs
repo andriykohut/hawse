@@ -9,13 +9,13 @@ use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, re
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
 
-use super::policy::Grant;
+use super::policy::{Grant, Policy};
 use super::udp::{self, UdpService, UdpServices};
 use super::{AGENT, Live, Shared, listener};
 use crate::allow::AllowList;
@@ -33,6 +33,9 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 /// Under the server's own 5 s drain, so a session's close still lands inside it.
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
+/// How long an unbind waits for its service's port to come free before the next message is read.
+/// Longer than `FINISH_WAIT`, which a UDP service gives its bulk stream before it lets go.
+const UNBIND_WAIT: Duration = Duration::from_secs(2);
 
 /// `remote` is the address the handshake proved, not the connection's current one: a QUIC path
 /// can migrate to a new, unproven source before it is validated, and a failure charged there would
@@ -50,7 +53,7 @@ pub async fn run(
     };
     // TLS has proved the key by here, so a known one whose link drops before its Hello is a client
     // on a bad network rather than a stranger, and counting it could lock the client out.
-    let stranger = shared.policy.lookup(&key).is_none();
+    let stranger = shared.policy.borrow().lookup(&key).is_none();
     // Nothing here is authorized yet, so a peer that never speaks must not hold a task open or stall shutdown.
     let greeting = async {
         let (control_send, control_recv) = transport.accept_bi().await?;
@@ -80,7 +83,10 @@ pub async fn run(
         return;
     };
 
-    let Some(grant) = shared.policy.lookup(&key).cloned() else {
+    // Subscribed before the grant is looked up, so the session hears of every reload after it.
+    let mut policy = shared.policy.subscribe();
+    let grant = policy.borrow_and_update().lookup(&key).cloned();
+    let Some(grant) = grant else {
         shared.auth_failed(remote.ip());
         tracing::info!(%key, %remote, "denied unknown key. authorize it with: hawse authorize {key} --name NAME");
         let _ = control
@@ -133,6 +139,7 @@ pub async fn run(
             streams: Arc::new(Semaphore::new(shared.streams)),
             shared,
             grant,
+            policy,
             services: HashMap::new(),
             last_id: 0,
             tasks: TaskTracker::new(),
@@ -217,6 +224,8 @@ struct Session {
     streams: Arc<Semaphore>,
     shared: Arc<Shared>,
     grant: Grant,
+    /// Changes when a reload replaces the server's policy, for `regrant` to take up.
+    policy: watch::Receiver<Policy>,
     services: HashMap<String, BoundService>,
     /// The id of the last service bound, each one higher than the last and none given twice. An
     /// id given again would be one a datagram still on its way to the service that had it names,
@@ -233,6 +242,8 @@ struct Session {
 struct BoundService {
     id: u16,
     port: Port,
+    /// Asked for by number, so held under the grant; a port from the dynamic pool needs none.
+    fixed: bool,
     /// Stops the service when it drops, so a session that unwinds stops what it bound as well.
     cancel: DropGuard,
 }
@@ -260,10 +271,14 @@ impl Session {
         let mut nonce = 0u64;
         let mut told = None;
         let mut end = None;
+        // What a reload left to tell the client, one message a turn.
+        let mut pending = Vec::new();
 
         let mine = self.claim.live.cancel.clone();
         let reason = loop {
             let reply = tokio::select! {
+                // Popped only when polled, so a turn another arm wins loses nothing.
+                reply = async { pending.pop() }, if !pending.is_empty() => reply,
                 () = mine.cancelled() => {
                     let superseded = !server_cancel.is_cancelled();
                     let why = if superseded {
@@ -289,7 +304,15 @@ impl Session {
                     nonce += 1;
                     Some(ServerMessage::Ping { nonce })
                 }
-                msg = control.try_next::<ClientMessage>() => {
+                // `shared` holds the sender, so this never fails. Neither this arm nor the next runs
+                // until what the last reload left is sent: a second reload would replace it, and
+                // a `BindFailed` left waiting could follow the answer to a later bind for the
+                // same service, which the client would then take for unbound.
+                _ = self.policy.changed(), if pending.is_empty() => {
+                    pending = self.regrant();
+                    None
+                }
+                msg = control.try_next::<ClientMessage>(), if pending.is_empty() => {
                     let msg = match msg {
                         Ok(Some(msg)) => msg,
                         Ok(None) => break CloseReason::PeerLeft,
@@ -304,7 +327,11 @@ impl Session {
                             Some(self.bind(&service, kind, port, &allow, proxy_protocol))
                         }
                         ClientMessage::Unbind { service } => {
-                            self.unbind(&service);
+                            // A client that changes a service asks for the same port in its next
+                            // message, and a service told to stop has not yet given it back.
+                            if let Some(port) = self.unbind(&service) {
+                                self.freed(port).await;
+                            }
                             None
                         }
                         ClientMessage::Ping { nonce } => Some(ServerMessage::Pong { nonce }),
@@ -321,8 +348,9 @@ impl Session {
                     if sent.is_err() {
                         break CloseReason::ControlClosed;
                     }
-                    // What a bind answers when no service id is left: the client reconnects, and
-                    // the session it gets counts from the start.
+                    // What a bind answers when no service id is left, and a reload when the grant
+                    // is gone or changed: the client reconnects, and the session it gets starts
+                    // over.
                     if matches!(reply, ServerMessage::Shutdown { .. }) {
                         told = Some(Instant::now());
                         break CloseReason::Shutdown;
@@ -341,6 +369,18 @@ impl Session {
             self.unbind(&name);
         }
         drop(background);
+        self.leave(control, reason, end, told).await;
+    }
+
+    /// The end of a session whose services are stopped: `end` is when the drain is over, if the
+    /// session was told to stop, and `told` is when its client was sent the reason, if it was.
+    async fn leave(
+        self,
+        mut control: Control,
+        reason: CloseReason,
+        end: Option<Instant>,
+        told: Option<Instant>,
+    ) {
         // One deadline for the rest, from when the session was told to stop if it was: finishing
         // the stream can wait like a send.
         let end = end.unwrap_or_else(|| Instant::now() + DRAIN);
@@ -391,6 +431,7 @@ impl Session {
             };
         };
         let cancel = CancellationToken::new();
+        let fixed = port.is_some();
         let port = match kind {
             Kind::Tcp => {
                 let (port, listener) = match self.open(service, kind, port, net::bind_tcp) {
@@ -445,6 +486,7 @@ impl Session {
             BoundService {
                 id,
                 port,
+                fixed,
                 cancel: cancel.drop_guard(),
             },
         );
@@ -455,6 +497,48 @@ impl Session {
             port: port.number,
             address: self.grant.bind,
         }
+    }
+
+    /// Takes up what a reload left of this client's grant, and returns what to tell the client.
+    /// Without a grant the session ends. It ends as well when `bind` or `allow` changed, or the
+    /// client's name: every listener is on the old address and admits by the old ceiling, and the
+    /// session the client comes back with binds them afresh. Changed `ports` stop only the
+    /// services whose fixed port is no longer granted.
+    fn regrant(&mut self) -> Vec<ServerMessage> {
+        let grant = self
+            .policy
+            .borrow_and_update()
+            .lookup(&self.claim.key)
+            .cloned();
+        let end = |reason: &str| {
+            tracing::info!(reason, "ending the session after a reload");
+            vec![ServerMessage::Shutdown {
+                reason: reason.to_owned(),
+            }]
+        };
+        let Some(grant) = grant else {
+            return end("this key is no longer authorized on the server");
+        };
+        let held = &self.grant;
+        if (&grant.name, grant.bind, &grant.allow) != (&held.name, held.bind, &held.allow) {
+            return end("this client's grant changed on the server");
+        }
+        self.grant = grant;
+        let lost: Vec<String> = self
+            .services
+            .iter()
+            .filter(|(_, bound)| bound.fixed && !self.grant.allows(bound.port))
+            .map(|(service, _)| service.clone())
+            .collect();
+        lost.into_iter()
+            .map(|service| {
+                self.unbind(&service);
+                ServerMessage::BindFailed {
+                    service,
+                    reason: BindFailure::NotGranted,
+                }
+            })
+            .collect()
     }
 
     /// A dynamic request walks on past pool ports the host refuses; a fixed one is that port or
@@ -503,16 +587,33 @@ impl Session {
     }
 
     /// Only stops the service: a TCP listener task releases its port once its socket is gone, and
-    /// a UDP service does the same when its last handle drops.
-    fn unbind(&mut self, service: &str) {
-        if let Some(bound) = self.services.remove(service) {
-            self.udp
-                .write()
-                .expect("udp services lock")
-                .remove(&bound.id);
-            drop(bound.cancel);
-            tracing::info!(service, port = %bound.port, "unbound");
-        }
+    /// a UDP service does the same when its last handle drops. Returns the port it had, for a
+    /// caller that has to wait for it.
+    fn unbind(&mut self, service: &str) -> Option<Port> {
+        let bound = self.services.remove(service)?;
+        self.udp
+            .write()
+            .expect("udp services lock")
+            .remove(&bound.id);
+        drop(bound.cancel);
+        tracing::info!(service, port = %bound.port, "unbound");
+        Some(bound.port)
+    }
+
+    /// Waits, for up to `UNBIND_WAIT`, for a service that was told to stop to give `port` back.
+    // ponytail: looks every millisecond. A `Notify` beside the allocator would wake this instead,
+    // if an unbind ever shows up in a profile.
+    async fn freed(&self, port: Port) {
+        let held = || {
+            let ports = self.shared.ports.lock().expect("port allocator lock");
+            ports.holds(port)
+        };
+        let free = async {
+            while held() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        let _ = tokio::time::timeout(UNBIND_WAIT, free).await;
     }
 
     fn release(&self, port: Port) {
@@ -629,6 +730,7 @@ mod tests {
                 bind: Ipv4Addr::LOCALHOST.into(),
                 allow: vec![],
             },
+            policy: shared.policy.subscribe(),
             services: HashMap::new(),
             last_id: 0,
             tasks: TaskTracker::new(),
@@ -729,6 +831,7 @@ mod tests {
             BoundService {
                 id: 1,
                 port: "40000".parse().unwrap(),
+                fixed: false,
                 cancel: stopped.clone().drop_guard(),
             },
         );

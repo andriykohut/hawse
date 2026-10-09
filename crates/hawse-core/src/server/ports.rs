@@ -45,6 +45,10 @@ impl PortAllocator {
         None
     }
 
+    pub fn holds(&self, port: Port) -> bool {
+        self.in_use.contains(&port)
+    }
+
     pub fn release(&mut self, port: Port) -> bool {
         self.in_use.remove(&port)
     }

@@ -66,8 +66,8 @@ TCP and UDP forwarding work, with fixed or dynamically assigned public ports.
 0.5.0 client says so when it meets one: upgrade the server and its clients
 together.
 
-Besides the features named above, configuration hot reload and the `expose`,
-`authorize` and `revoke` subcommands are not implemented either.
+Besides the features named above, the `expose`, `authorize` and `revoke`
+subcommands are not implemented either.
 The [issues](https://github.com/andriykohut/hawse/issues) list everything that
 is planned or deliberately deferred.
 
@@ -169,7 +169,8 @@ key = "ed25519:AAAA..."
 ports = ["2222"]
 ```
 
-Restart the server. Configuration is read at startup only.
+A running server reads the file again within a second of the change, so there
+is nothing to restart.
 
 Write `client.toml` on the client:
 
@@ -209,6 +210,16 @@ it would not load, without starting anything or creating a key. `hawse check
 it answered on. It hangs up before the client would introduce itself, so a
 client already running with the same key keeps its session, and the server
 does not say whether the key is authorized.
+
+Both ends read their config again when the file changes, and on SIGHUP. The
+server takes up `[clients.*]` without touching the other sessions: a client
+whose table is gone is disconnected at once, one whose `bind` or `allow`
+changed reconnects, and a fixed port taken out of `ports` is unbound. The
+client takes up `[expose.*]` within its session, binding what was added and
+unbinding what was removed, and reconnects for any other change. A SIGHUP also
+has the client ask again for the services the server refused, which is how it
+picks up a port granted since. Every other server setting waits for a restart,
+and a file that does not load is logged and changes nothing.
 
 ## Configuration
 
