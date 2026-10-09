@@ -10,6 +10,7 @@ use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
 use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
@@ -33,6 +34,8 @@ const SHUTDOWN_LINGER: Duration = Duration::from_secs(2);
 /// Under the server's own 5 s drain, so a session's close still lands inside it.
 const DRAIN: Duration = Duration::from_secs(4);
 const SUPERSEDE_WAIT: Duration = Duration::from_secs(5);
+/// How long an unbind waits for its service's port to come free before the next message is read.
+const UNBIND_WAIT: Duration = Duration::from_secs(1);
 
 /// `remote` is the address the handshake proved, not the connection's current one: a QUIC path
 /// can migrate to a new, unproven source before it is validated, and a failure charged there would
@@ -241,6 +244,8 @@ struct BoundService {
     port: Port,
     /// Asked for by number, so held under the grant; a port from the dynamic pool needs none.
     fixed: bool,
+    /// Ends once the service has given its port back.
+    task: JoinHandle<()>,
     /// Stops the service when it drops, so a session that unwinds stops what it bound as well.
     cancel: DropGuard,
 }
@@ -301,12 +306,15 @@ impl Session {
                     nonce += 1;
                     Some(ServerMessage::Ping { nonce })
                 }
-                // `shared` holds the sender, so this never fails.
-                _ = self.policy.changed() => {
+                // `shared` holds the sender, so this never fails. Neither this arm nor the next runs
+                // until what the last reload left is sent: a second reload would replace it, and
+                // a `BindFailed` left waiting could follow the answer to a later bind for the
+                // same service, which the client would then take for unbound.
+                _ = self.policy.changed(), if pending.is_empty() => {
                     pending = self.regrant();
                     None
                 }
-                msg = control.try_next::<ClientMessage>() => {
+                msg = control.try_next::<ClientMessage>(), if pending.is_empty() => {
                     let msg = match msg {
                         Ok(Some(msg)) => msg,
                         Ok(None) => break CloseReason::PeerLeft,
@@ -321,7 +329,11 @@ impl Session {
                             Some(self.bind(&service, kind, port, &allow, proxy_protocol))
                         }
                         ClientMessage::Unbind { service } => {
-                            self.unbind(&service);
+                            // A client that changes a service asks for the same port in its next
+                            // message, and the port is free only once the service's task has ended.
+                            if let Some(stopped) = self.unbind(&service) {
+                                let _ = tokio::time::timeout(UNBIND_WAIT, stopped).await;
+                            }
                             None
                         }
                         ClientMessage::Ping { nonce } => Some(ServerMessage::Pong { nonce }),
@@ -422,13 +434,13 @@ impl Session {
         };
         let cancel = CancellationToken::new();
         let fixed = port.is_some();
-        let port = match kind {
+        let (port, task) = match kind {
             Kind::Tcp => {
                 let (port, listener) = match self.open(service, kind, port, net::bind_tcp) {
                     Ok(opened) => opened,
                     Err(reason) => return failed(reason),
                 };
-                self.tasks.spawn(listener::serve(
+                let task = self.tasks.spawn(listener::serve(
                     Arc::clone(&self.transport),
                     listener,
                     listener::Public {
@@ -441,7 +453,7 @@ impl Session {
                     cancel.clone(),
                     self.tasks.clone(),
                 ));
-                port
+                (port, task)
             }
             Kind::Udp => {
                 let (port, socket) = match self.open(service, kind, port, net::bind_udp) {
@@ -461,13 +473,13 @@ impl Session {
                     .write()
                     .expect("udp services lock")
                     .insert(id, Arc::clone(&bound));
-                self.tasks.spawn(udp::serve(
+                let task = self.tasks.spawn(udp::serve(
                     bound,
                     Arc::clone(&self.transport),
                     Arc::clone(&self.streams),
                     cancel.clone(),
                 ));
-                port
+                (port, task)
             }
         };
         self.last_id = id;
@@ -477,6 +489,7 @@ impl Session {
                 id,
                 port,
                 fixed,
+                task,
                 cancel: cancel.drop_guard(),
             },
         );
@@ -577,16 +590,17 @@ impl Session {
     }
 
     /// Only stops the service: a TCP listener task releases its port once its socket is gone, and
-    /// a UDP service does the same when its last handle drops.
-    fn unbind(&mut self, service: &str) {
-        if let Some(bound) = self.services.remove(service) {
-            self.udp
-                .write()
-                .expect("udp services lock")
-                .remove(&bound.id);
-            drop(bound.cancel);
-            tracing::info!(service, port = %bound.port, "unbound");
-        }
+    /// a UDP service does the same when its last handle drops. Returns the service's task, for a
+    /// caller that has to wait for the port.
+    fn unbind(&mut self, service: &str) -> Option<JoinHandle<()>> {
+        let bound = self.services.remove(service)?;
+        self.udp
+            .write()
+            .expect("udp services lock")
+            .remove(&bound.id);
+        drop(bound.cancel);
+        tracing::info!(service, port = %bound.port, "unbound");
+        Some(bound.task)
     }
 
     fn release(&self, port: Port) {
@@ -805,6 +819,7 @@ mod tests {
                 id: 1,
                 port: "40000".parse().unwrap(),
                 fixed: false,
+                task: tokio::spawn(async {}),
                 cancel: stopped.clone().drop_guard(),
             },
         );

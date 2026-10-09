@@ -163,6 +163,31 @@ struct Services {
     /// Refused by the server, and asked for again at the next reload: its grant may be what
     /// changed.
     failed: HashSet<String>,
+    /// How many binds for each service the server has yet to answer.
+    unanswered: HashMap<String, u32>,
+}
+
+impl Services {
+    fn new(exposed: BTreeMap<String, Expose>) -> Self {
+        Self {
+            unanswered: exposed.keys().map(|service| (service.clone(), 1)).collect(),
+            exposed,
+            ..Self::default()
+        }
+    }
+
+    /// Counts an answer to a bind for `service`, and says whether it is to the last one sent. An
+    /// answer to an earlier one is for settings a reload has since replaced: the server is about
+    /// to unbind the id it carries, and that id's visitors were admitted by the old `allow`.
+    // ponytail: a `BindFailed` the server sends unasked, for a port its own reload took away,
+    // is counted as an answer, as nothing on the wire tells the two apart. With a bind unanswered
+    // at that moment the count runs one short, and an answer to a replaced bind can pass for the
+    // last until the last arrives. A request id in `Bind` and its answers would end that.
+    fn answered(&mut self, service: &str) -> bool {
+        let left = self.unanswered.entry(service.to_owned()).or_default();
+        *left = left.saturating_sub(1);
+        *left == 0
+    }
 }
 
 async fn open_control(transport: &Arc<dyn Transport>) -> Result<Control, ClientError> {
@@ -349,10 +374,7 @@ impl Client {
 
         let tasks = TaskTracker::new();
         let mut wanted = self.expose.subscribe();
-        let mut services = Services {
-            exposed: wanted.borrow_and_update().clone(),
-            ..Services::default()
-        };
+        let mut services = Services::new(wanted.borrow_and_update().clone());
         let greeting = async {
             let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
             *welcomed = Some(Instant::now());
@@ -453,13 +475,15 @@ impl Client {
         services: &mut Services,
         next: BTreeMap<String, Expose>,
     ) -> Vec<ClientMessage> {
-        for service in services.failed.drain() {
-            services.exposed.remove(&service);
-        }
-        let msgs = rebind(&services.exposed, &next);
+        let msgs = rebind(&services.exposed, &next, &services.failed);
+        services.failed.clear();
         for msg in &msgs {
-            if let ClientMessage::Unbind { service } = msg {
-                self.forget(services.ids.remove(service));
+            match msg {
+                ClientMessage::Unbind { service } => self.forget(services.ids.remove(service)),
+                ClientMessage::Bind { service, .. } => {
+                    *services.unanswered.entry(service.clone()).or_default() += 1;
+                }
+                _ => {}
             }
         }
         services.exposed = next;
@@ -482,14 +506,16 @@ impl Client {
                 port,
                 address,
             } => {
-                let Some(expose) = services.exposed.get(&service) else {
-                    tracing::warn!(service, "server bound a service we never asked for");
+                let last = services.answered(&service);
+                let Some(expose) = services.exposed.get(&service).filter(|_| last) else {
+                    tracing::debug!(
+                        service,
+                        "bound a service a reload has since replaced or removed"
+                    );
                     return Ok(None);
                 };
                 let kind = expose.port.kind();
                 services.failed.remove(&service);
-                // Bound twice when a reload asked again before the first answer came, and the
-                // first one's id is no longer the server's.
                 self.forget(services.ids.insert(service.clone(), service_id));
                 let listener = listener_addr(address, remote, port);
                 self.register_bound(service.clone(), service_id, expose, listener, ctx);
@@ -499,6 +525,9 @@ impl Client {
             }
             ServerMessage::BindFailed { service, reason } => {
                 // Also what a server's reload says of a port it no longer grants.
+                if !services.answered(&service) {
+                    return Ok(None);
+                }
                 self.forget(services.ids.remove(&service));
                 services.failed.insert(service.clone());
                 emit(events, Event::BindFailed { service, reason });
@@ -706,13 +735,16 @@ fn bind(service: &str, expose: &Expose) -> ClientMessage {
 }
 
 /// What turns the services of `exposed` into those of `next`: an `Unbind` for each one gone or
-/// changed, then a `Bind` for each one new or changed.
+/// changed, then a `Bind` for each one new or changed. One in `retry` counts as changed, so its
+/// bind is asked again, behind an unbind that leaves nothing of an earlier try on the server.
 fn rebind(
     exposed: &BTreeMap<String, Expose>,
     next: &BTreeMap<String, Expose>,
+    retry: &HashSet<String>,
 ) -> Vec<ClientMessage> {
-    let differs =
-        |from: &BTreeMap<String, Expose>, service: &str, expose| from.get(service) != Some(expose);
+    let differs = |from: &BTreeMap<String, Expose>, service: &str, expose| {
+        retry.contains(service) || from.get(service) != Some(expose)
+    };
     let unbinds = exposed
         .iter()
         .filter(|(service, expose)| differs(next, service, expose))
@@ -880,19 +912,41 @@ mod tests {
         };
         let exposed = services(&[("gone", "a:1"), ("kept", "a:2"), ("moved", "a:3")]);
         let next = services(&[("kept", "a:2"), ("moved", "a:4"), ("new", "a:5")]);
-        let sent: Vec<String> = rebind(&exposed, &next)
-            .into_iter()
-            .map(|msg| match msg {
-                ClientMessage::Unbind { service } => format!("unbind {service}"),
-                ClientMessage::Bind { service, .. } => format!("bind {service}"),
-                other => panic!("neither a bind nor an unbind: {other:?}"),
-            })
-            .collect();
+        let sent = |from, to, retry: &[&str]| -> Vec<String> {
+            let retry = retry.iter().map(|service| (*service).to_owned()).collect();
+            rebind(from, to, &retry)
+                .into_iter()
+                .map(|msg| match msg {
+                    ClientMessage::Unbind { service } => format!("unbind {service}"),
+                    ClientMessage::Bind { service, .. } => format!("bind {service}"),
+                    other => panic!("neither a bind nor an unbind: {other:?}"),
+                })
+                .collect()
+        };
         assert_eq!(
-            sent,
+            sent(&exposed, &next, &[]),
             ["unbind gone", "unbind moved", "bind moved", "bind new"]
         );
-        assert_eq!(rebind(&next, &next), []);
+        assert_eq!(sent(&next, &next, &[]), [] as [&str; 0]);
+        // A bind the server refused is asked again, behind an unbind.
+        assert_eq!(sent(&next, &next, &["kept"]), ["unbind kept", "bind kept"]);
+    }
+
+    #[test]
+    fn only_the_answer_to_the_last_bind_sent_for_a_service_counts() {
+        let expose = Expose {
+            local: "a:1".to_owned(),
+            port: PortRequest::default(),
+            allow: vec![],
+            proxy_protocol: false,
+        };
+        let mut services = Services::new(BTreeMap::from([("web".to_owned(), expose)]));
+        // A reload sent a second bind before the first was answered.
+        *services.unanswered.get_mut("web").unwrap() += 1;
+        assert!(!services.answered("web"));
+        assert!(services.answered("web"));
+        // What the server says unasked finds nothing unanswered, and counts.
+        assert!(services.answered("web"));
     }
 
     #[tokio::test]
