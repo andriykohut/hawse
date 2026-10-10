@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use hawse_core::config::ServerConfig;
 use hawse_core::identity::Identity;
@@ -77,13 +78,13 @@ pub async fn run(
     // Before the line that says the server is up, which is what a script waits for to signal it.
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
-    if let Some(style) = terminal {
+    let rows = terminal.map(|style| {
         let (key, unused) = (identity.public_key(), cfg.clients.is_empty());
         let tcp = cfg.transport.tcp_fallback;
         terminal::print(&terminal::server_header(addr, tcp, key, unused, style));
         let names = cfg.clients.keys().map(String::len).max().unwrap_or(0);
-        tokio::spawn(show(server.events(), names, style));
-    }
+        tokio::spawn(show(server.events(), names, style))
+    });
     tracing::info!(%addr, transports = "quic/udp, tcp", "listening");
     tracing::info!(key = %identity.public_key(), "server key");
     if cfg.clients.is_empty() && terminal.is_none() {
@@ -98,6 +99,11 @@ pub async fn run(
     tokio::select! {
         () = server.serve(cancel) => {}
         () = reload(reloads, listen, &cfg, &located, &policy, terminal) => {}
+    }
+    // The sessions the stop ended have said so, and their rows may not be printed yet. The
+    // printer ends with the last session; one that did not drain is not waited for.
+    if let Some(rows) = rows {
+        let _ = tokio::time::timeout(Duration::from_secs(1), rows).await;
     }
     Ok(())
 }
