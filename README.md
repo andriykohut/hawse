@@ -50,6 +50,8 @@ Working today, with TCP and UDP forwarding and key-based authorization:
 - **Networks that block outbound UDP.** When QUIC does not connect, the client
   carries the tunnel over TLS instead, and `transport.prefer = "tcp"` asks for
   that outright.
+- **A client that changes network.** Over QUIC a session follows its client to
+  a new address, and the connections open through it carry on.
 - **WireGuard, DNS, and game servers.** `port = "51820/udp"` exposes a UDP
   service. Read the note on UDP under Configuration first: a payload too large
   for one QUIC datagram is carried differently.
