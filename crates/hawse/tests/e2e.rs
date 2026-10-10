@@ -819,3 +819,94 @@ fn join_writes_no_config_when_the_server_has_another_key() {
     // The key is this machine's whichever server it joins, so it stays for the next try.
     assert!(dir.path().join("laptop").join("client.key").is_file());
 }
+
+/// A terminal for a child to be run on: the side a terminal emulator holds, and the side the
+/// child is given.
+fn pty() -> (fs::File, fs::File) {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    let held = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    grantpt(&held).unwrap();
+    unlockpt(&held).unwrap();
+    let name = ptsname(&held, Vec::new()).unwrap();
+    // Opened any other way it could become the test runner's own terminal.
+    let given = rustix::fs::open(name, OFlags::RDWR | OFlags::NOCTTY, Mode::empty()).unwrap();
+    (held.into(), given.into())
+}
+
+/// What a child writes to `read`, as `stderr_lines` gives what it logs.
+fn lines_of(read: impl Read + Send + 'static) -> mpsc::Receiver<String> {
+    let (tx, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(read).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    lines
+}
+
+fn hang_up(child: &Child) {
+    let sent = Command::new("kill")
+        .args(["-HUP", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+}
+
+fn server_config(dir: &std::path::Path) -> std::path::PathBuf {
+    let config = dir.join("server.toml");
+    let listen = free_listen_port();
+    fs::write(&config, format!("listen = \"127.0.0.1:{listen}\"\n")).unwrap();
+    config
+}
+
+#[test]
+fn a_server_on_a_terminal_stops_on_sighup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (held, given) = pty();
+    let mut server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(server_config(dir.path()))
+            .stdin(given.try_clone().unwrap())
+            .stderr(given)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for_line(&lines_of(held), "listening");
+    hang_up(&server.0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "still running 5 s after SIGHUP");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // Its own stop, and not the signal's default, which leaves no exit code.
+    assert_eq!(status.code(), Some(0));
+}
+
+/// `nohup` leaves stdin on the terminal and moves stderr off it, and a server run under it is
+/// meant to outlive the terminal.
+#[test]
+fn a_server_whose_stderr_is_not_the_terminal_reloads_on_sighup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_held, given) = pty();
+    let mut server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(server_config(dir.path()))
+            .stdin(given)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let lines = stderr_lines(&mut server.0);
+    wait_for_line(&lines, "listening");
+    hang_up(&server.0);
+    wait_for_line(&lines, "config reloaded");
+    assert!(server.0.try_wait().unwrap().is_none(), "stopped on SIGHUP");
+}

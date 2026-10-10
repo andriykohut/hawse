@@ -234,7 +234,9 @@ client takes up `[expose.*]` within its session, binding what was added and
 unbinding what was removed, and reconnects for any other change. A SIGHUP also
 has the client ask again for the services the server refused, which is how it
 picks up a port granted since. Every other server setting waits for a restart,
-and a file that does not load is logged and changes nothing.
+and a file that does not load is logged and changes nothing. A hawse run on a
+terminal takes a SIGHUP as the terminal closing and stops, as anything run on
+one does; it reloads when the file changes.
 
 ## Configuration
 
