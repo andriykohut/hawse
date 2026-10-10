@@ -862,6 +862,20 @@ fn server_config(dir: &std::path::Path) -> std::path::PathBuf {
     config
 }
 
+/// Hangs `server` up and has it stop by itself: the signal's default leaves no exit code.
+fn stops_on_sighup(server: &mut Proc) {
+    hang_up(&server.0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "still running 5 s after SIGHUP");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+}
+
 #[test]
 fn a_server_on_a_terminal_stops_on_sighup() {
     let dir = tempfile::tempdir().unwrap();
@@ -876,17 +890,33 @@ fn a_server_on_a_terminal_stops_on_sighup() {
             .unwrap(),
     );
     wait_for_line(&lines_of(held), "listening");
-    hang_up(&server.0);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = server.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "still running 5 s after SIGHUP");
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    // Its own stop, and not the signal's default, which leaves no exit code.
-    assert_eq!(status.code(), Some(0));
+    stops_on_sighup(&mut server);
+}
+
+/// A first run has no config directory yet, so nothing can be watched, and on a terminal no
+/// SIGHUP reloads either. The server waits on neither and runs.
+#[test]
+fn a_server_on_a_terminal_runs_with_nothing_to_reload_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (held, given) = pty();
+    let mut server = Proc(
+        hawse()
+            .args(["server", "--listen"])
+            .arg(format!("127.0.0.1:{}", free_listen_port()))
+            .env("XDG_CONFIG_HOME", dir.path())
+            .env_remove("HAWSE_CONFIG")
+            .stdin(given.try_clone().unwrap())
+            .stderr(given)
+            .spawn()
+            .unwrap(),
+    );
+    let lines = lines_of(held);
+    wait_for_line(&lines, "cannot watch the config's directory");
+    wait_for_line(&lines, "a client joins with");
+    // Long enough for the wait on a reload to have started, which is where it went wrong.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(server.0.try_wait().unwrap().is_none(), "stopped by itself");
+    stops_on_sighup(&mut server);
 }
 
 /// `nohup` leaves stdin on the terminal and moves stderr off it, and a server run under it is
