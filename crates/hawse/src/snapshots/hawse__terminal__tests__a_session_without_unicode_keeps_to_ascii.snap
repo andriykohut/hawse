@@ -1,0 +1,19 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: out
+---
+
+  hawse client  |  tunnel.example.com:4433  |  QUIC
+
+  + ssh        tunnel.example.com:2222       <-  127.0.0.1:22
+  + dev        tunnel.example.com:40017      <-  127.0.0.1:3000
+  x wireguard  port is not granted to this client
+  ~ server stopped answering | retrying in 4.0 s
+  x not authorized. on the server, add to server.toml:
+
+      [clients.NAME]
+      key = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+    then wait for the next retry
+  x server `` must be host or host:port; the config cannot be retried
+  ~ config reloaded

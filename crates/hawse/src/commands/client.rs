@@ -11,10 +11,11 @@ use tokio_util::sync::CancellationToken;
 use super::Reloads;
 use crate::config_file;
 use crate::paths::{self, Role};
+use crate::terminal::{self, Style};
 
 /// Reads `file` and no other: a reload that looked the config up again could find one that has
 /// since appeared somewhere the lookup tries first, which is not the one being watched.
-fn load(file: &Path) -> miette::Result<(ClientConfig, Identity)> {
+fn load(file: &Path, terminal: Option<Style>) -> miette::Result<(ClientConfig, Identity)> {
     let (cfg, located) = config_file::load_client(Some(file.to_owned()))?;
     let inert = cfg.transport.inert();
     if !inert.is_empty() {
@@ -30,12 +31,16 @@ fn load(file: &Path) -> miette::Result<(ClientConfig, Identity)> {
         .wrap_err_with(|| format!("cannot load the client key at {}", key_path.display()))?;
     if created {
         tracing::info!(path = %key_path.display(), key = %identity.public_key(), "created client key");
+        if let Some(style) = terminal {
+            let made = format!("created client key at {}", key_path.display());
+            terminal::print(&terminal::note(&made, style));
+        }
     }
     Ok((cfg, identity))
 }
 
 /// Why a session ended, as the log says it.
-pub(super) fn reason(cause: DisconnectCause) -> String {
+pub(crate) fn reason(cause: DisconnectCause) -> String {
     match cause {
         DisconnectCause::Shutdown(why) => format!("server ended the session: {why}"),
         DisconnectCause::Unresponsive => "server stopped answering".to_owned(),
@@ -44,9 +49,13 @@ pub(super) fn reason(cause: DisconnectCause) -> String {
     }
 }
 
-/// Logs what the client reports, and says whether it has stopped for good. `cfg` is the config
-/// in force, which a service's addresses are named from.
-fn report(event: Event, cfg: &ClientConfig) -> bool {
+/// Logs what the client reports, or prints it in the terminal form, and says whether it has
+/// stopped for good. `cfg` is the config in force, which a service's addresses are named from.
+fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
+    if let Some(style) = terminal {
+        terminal::print(&terminal::event(&event, cfg, style));
+        return matches!(event, Event::Disconnected { retry_in: None, .. });
+    }
     let mut stopped = false;
     match event {
         Event::Connected {
@@ -88,10 +97,10 @@ fn report(event: Event, cfg: &ClientConfig) -> bool {
 
 /// 2 when a config error stopped the client, the exit of a config that does not load: starting
 /// it again will not fix either.
-pub async fn run(config: Option<PathBuf>) -> miette::Result<ExitCode> {
+pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Result<ExitCode> {
     let file = paths::locate(Role::Client, config).file;
     let mut reloads = Reloads::new(file.clone());
-    let (mut cfg, mut identity) = load(&file)?;
+    let (mut cfg, mut identity) = load(&file, terminal)?;
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
     // What the printer names a service's addresses from, replaced by each reload.
@@ -99,8 +108,12 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<ExitCode> {
     let (tx, mut events) = mpsc::channel(64);
     let printer = tokio::spawn(async move {
         let mut stopped = false;
+        let mut denied = false;
         while let Some(event) = events.recv().await {
-            stopped |= report(event, &showing.borrow());
+            if terminal.is_some() && terminal::repeats(&mut denied, &event) {
+                continue;
+            }
+            stopped |= report(event, &showing.borrow(), terminal);
         }
         stopped
     });
@@ -117,7 +130,7 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<ExitCode> {
                 () = &mut run => break None,
                 () = reloads.next() => {}
             }
-            let (new, identity) = match load(&file) {
+            let (new, identity) = match load(&file, terminal) {
                 Ok(loaded) => loaded,
                 Err(report) => {
                     super::not_reloaded(&report);
@@ -127,11 +140,17 @@ pub async fn run(config: Option<PathBuf>) -> miette::Result<ExitCode> {
             shown.send_replace(new.clone());
             if cfg.needs_reconnect(&new) {
                 tracing::info!("config reloaded; reconnecting, as more than [expose.*] changed");
+                if let Some(style) = terminal {
+                    terminal::print(&terminal::note("config reloaded; reconnecting", style));
+                }
                 session.cancel();
                 run.await;
                 break Some((new, identity));
             }
             tracing::info!(services = new.expose.len(), "config reloaded");
+            if let Some(style) = terminal {
+                terminal::print(&terminal::note("config reloaded", style));
+            }
             client.expose().send_replace(new.expose.clone());
             cfg = new;
         };

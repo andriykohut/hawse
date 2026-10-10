@@ -2,6 +2,7 @@ mod commands;
 mod config_file;
 mod logging;
 mod paths;
+mod terminal;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -26,7 +27,8 @@ struct Cli {
     /// Log warnings and errors only.
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
-    /// Log format. `auto` selects json when stderr is not a terminal.
+    /// Log format. `auto` selects json when stderr is not a terminal. On one, a client at the
+    /// default level prints a row per service in place of log lines, and `pretty` keeps the lines.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Auto)]
     log: LogFormat,
     /// Colored output. `auto` disables color when stderr is not a terminal.
@@ -103,8 +105,14 @@ pub enum ColorChoice {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    logging::init(cli.verbose, cli.quiet, cli.log, cli.color);
-    match run(cli) {
+    let terminal = logging::init(
+        cli.verbose,
+        cli.quiet,
+        cli.log,
+        cli.color,
+        matches!(cli.command, Command::Client { .. }),
+    );
+    match run(cli, terminal) {
         Ok(code) => code,
         Err(report) => {
             // What returning the report from `main` would print.
@@ -120,7 +128,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> miette::Result<ExitCode> {
+fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if let Some(threads) = cli.threads {
@@ -132,7 +140,7 @@ fn run(cli: Cli) -> miette::Result<ExitCode> {
             Command::Server { config, listen } => commands::server::run(config, listen)
                 .await
                 .map(|()| ExitCode::SUCCESS),
-            Command::Client { config } => commands::client::run(config).await,
+            Command::Client { config } => commands::client::run(config, terminal).await,
             Command::Join {
                 server,
                 server_key,
