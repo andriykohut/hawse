@@ -2,6 +2,7 @@ use std::io::IsTerminal as _;
 
 use tracing_subscriber::EnvFilter;
 
+use crate::terminal::Style;
 use crate::{ColorChoice, LogFormat};
 
 pub fn level(verbose: u8, quiet: bool) -> &'static str {
@@ -13,14 +14,34 @@ pub fn level(verbose: u8, quiet: bool) -> &'static str {
     }
 }
 
-pub fn init(verbose: u8, quiet: bool, format: LogFormat, color: ColorChoice) {
-    let level = level(verbose, quiet);
-    let filter = EnvFilter::try_from_env("HAWSE_LOG").unwrap_or_else(|_| {
+/// Returns the style of the terminal form when that is what the run prints: a client's, on a
+/// terminal, with nothing asking for more or fewer lines than the default. Its rows stand in for
+/// the lines at info level, so only warnings and errors are logged beside them.
+pub fn init(
+    verbose: u8,
+    quiet: bool,
+    format: LogFormat,
+    color: ColorChoice,
+    client: bool,
+) -> Option<Style> {
+    let tty = std::io::stderr().is_terminal();
+    let chosen = EnvFilter::try_from_env("HAWSE_LOG");
+    let terminal = client
+        && tty
+        && matches!(format, LogFormat::Auto)
+        && verbose == 0
+        && !quiet
+        && chosen.is_err();
+    let level = if terminal {
+        "warn"
+    } else {
+        level(verbose, quiet)
+    };
+    let filter = chosen.unwrap_or_else(|_| {
         EnvFilter::new(format!(
             "hawse={level},hawse_core={level},hawse_proto={level},warn"
         ))
     });
-    let tty = std::io::stderr().is_terminal();
     let json = match format {
         LogFormat::Json => true,
         LogFormat::Pretty => false,
@@ -44,6 +65,7 @@ pub fn init(verbose: u8, quiet: bool, format: LogFormat, color: ColorChoice) {
     } else {
         builder.with_ansi(ansi).compact().init();
     }
+    terminal.then(|| Style::detect(ansi))
 }
 
 #[cfg(test)]
