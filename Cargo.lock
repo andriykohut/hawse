@@ -607,7 +607,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hawse"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clap",
  "etcetera",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "hawse-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "hawse-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "bytes",
