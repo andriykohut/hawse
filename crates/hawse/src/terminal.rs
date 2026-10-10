@@ -4,6 +4,7 @@ use std::io::Write as _;
 
 use hawse_core::client::Event;
 use hawse_core::config::{ClientConfig, split_host_port};
+use hawse_proto::key::PublicKey;
 use hawse_proto::port::{Kind, PortRequest};
 
 use crate::commands::client::reason;
@@ -100,16 +101,18 @@ pub fn event(event: &Event, cfg: &ClientConfig, style: Style) -> String {
 }
 
 /// Whether `event` is a denial already on the screen: a denied key is retried for as long as the
-/// client runs, and the table to paste is the same each time. `denied` carries that from one
-/// event to the next.
-pub fn repeats(denied: &mut bool, event: &Event) -> bool {
-    let again = *denied && matches!(event, Event::Denied { .. });
-    *denied = match event {
-        Event::Denied { .. } => true,
-        Event::Connected { .. } => false,
-        _ => *denied,
-    };
-    again
+/// client runs, and the table to paste is the same each time. `shown` is the key the table was
+/// last printed for, carried from one event to the next, so a reload onto another key that is
+/// denied as well prints its own.
+pub fn repeats(shown: &mut Option<PublicKey>, event: &Event) -> bool {
+    match event {
+        Event::Denied { key } => shown.replace(*key) == Some(*key),
+        Event::Connected { .. } => {
+            *shown = None;
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Something that happened to the client which is not the server's doing, a reload for one.
@@ -128,6 +131,7 @@ mod tests {
     use std::time::Duration;
 
     use hawse_core::client::DisconnectCause;
+    use hawse_core::identity::Identity;
     use hawse_core::transport::TransportKind;
     use hawse_proto::msg::BindFailure;
     use hawse_proto::port::Port;
@@ -208,11 +212,11 @@ port = "51820/udp"
     }
 
     #[test]
-    fn a_denial_is_shown_once_until_the_server_lets_the_client_in() {
-        let key = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let denial = Event::Denied {
-            key: key.parse().unwrap(),
+    fn a_denial_is_shown_once_for_a_key_until_the_server_lets_the_client_in() {
+        let denial = |identity: &Identity| Event::Denied {
+            key: identity.public_key(),
         };
+        let (first, second) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let retry = Event::Disconnected {
             cause: DisconnectCause::Denied,
             retry_in: Some(Duration::from_secs(1)),
@@ -223,12 +227,20 @@ port = "51820/udp"
             name: "laptop".to_owned(),
             agent: "hawse/0.6.0".to_owned(),
         };
-        let mut denied = false;
-        let seen: Vec<bool> = [&denial, &retry, &denial, &connected, &denial]
-            .into_iter()
-            .map(|event| repeats(&mut denied, event))
-            .collect();
-        assert_eq!(seen, [false, false, true, false, false]);
+        let events = [
+            (denial(&first), false),
+            (retry, false),
+            (denial(&first), true),
+            // A reload onto another key, with no connect in between.
+            (denial(&second), false),
+            (denial(&second), true),
+            (connected, false),
+            (denial(&second), false),
+        ];
+        let mut shown = None;
+        for (n, (event, repeat)) in events.iter().enumerate() {
+            assert_eq!(repeats(&mut shown, event), *repeat, "event {n}: {event:?}");
+        }
     }
 
     #[test]

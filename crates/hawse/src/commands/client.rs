@@ -108,9 +108,9 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     let (tx, mut events) = mpsc::channel(64);
     let printer = tokio::spawn(async move {
         let mut stopped = false;
-        let mut denied = false;
+        let mut shown = None;
         while let Some(event) = events.recv().await {
-            if terminal.is_some() && terminal::repeats(&mut denied, &event) {
+            if terminal.is_some() && terminal::repeats(&mut shown, &event) {
                 continue;
             }
             stopped |= report(event, &showing.borrow(), terminal);
