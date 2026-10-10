@@ -903,8 +903,9 @@ fn a_server_on_a_terminal_runs_with_nothing_to_reload_it() {
         hawse()
             .args(["server", "--listen"])
             .arg(format!("127.0.0.1:{}", free_listen_port()))
-            .env("XDG_CONFIG_HOME", dir.path())
-            .env_remove("HAWSE_CONFIG")
+            // Named, so the lookup cannot land on a config or a directory the host has.
+            .arg("--config")
+            .arg(dir.path().join("missing").join("server.toml"))
             .stdin(given.try_clone().unwrap())
             .stderr(given)
             .spawn()
