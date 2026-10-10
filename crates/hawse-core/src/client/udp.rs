@@ -455,6 +455,9 @@ mod tests {
         fn peer_key(&self) -> Option<PublicKey> {
             None
         }
+        fn kind(&self) -> crate::transport::TransportKind {
+            crate::transport::TransportKind::Quic
+        }
     }
 
     const ID: u16 = 4;

@@ -13,7 +13,7 @@ use rustls::pki_types::CertificateDer;
 
 use crate::config::Congestion;
 use crate::tls;
-use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError};
+use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError, TransportKind};
 
 /// Both transports take one of these, though it lives here. `stream_window` and `congestion` are
 /// QUIC's alone — yamux guarantees every stream `DEFAULT_CREDIT` and grows it only into the
@@ -200,6 +200,10 @@ impl Transport for QuicTransport {
 
     fn peer_key(&self) -> Option<PublicKey> {
         peer_key(&self.0)
+    }
+
+    fn kind(&self) -> TransportKind {
+        TransportKind::Quic
     }
 }
 

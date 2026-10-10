@@ -27,7 +27,7 @@ Show
 
 Sleep 1s
 Type "hawse server" Sleep 400ms Enter
-Wait+Screen@10s /listening/
+Wait+Screen@10s /hawse join/
 Sleep 2s
 
 Ctrl+B
@@ -36,7 +36,7 @@ Sleep 500ms
 Type "cat client.toml" Sleep 400ms Enter
 Sleep 2500ms
 Type "hawse client" Sleep 400ms Enter
-Wait+Screen@10s /bound/
+Wait+Screen@10s /localhost:8080/
 Sleep 3s
 
 Ctrl+B

@@ -1,17 +1,20 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use hawse_core::config::ServerConfig;
 use hawse_core::identity::Identity;
-use hawse_core::server::Server;
 use hawse_core::server::policy::Policy;
+use hawse_core::server::{Event, Server};
 use miette::{IntoDiagnostic as _, WrapErr as _};
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::Reloads;
 use crate::config_file::{self, LoadError};
 use crate::paths::{self, Located, Role};
+use crate::terminal::{self, Style};
 
 /// Reads `file` and no other: a reload that looked the config up again could find one that has
 /// since appeared somewhere the lookup tries first, which is not the one being watched.
@@ -23,7 +26,32 @@ fn load(file: &Path, listen: Option<SocketAddr>) -> Result<(ServerConfig, Locate
     Ok((cfg, located))
 }
 
-pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette::Result<()> {
+/// Prints what the server tells of its sessions, in the terminal form. `names` is the width the
+/// clients' names are padded to, and grows with a name a reload brings.
+async fn show(mut events: broadcast::Receiver<Event>, mut names: usize, style: Style) {
+    let mut shown = None;
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            // The rows are for a person watching, who loses nothing they would have read.
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => return,
+        };
+        if terminal::knocks_again(&mut shown, &event) {
+            continue;
+        }
+        if let Event::Connected { client, .. } = &event {
+            names = names.max(client.len());
+        }
+        terminal::print(&terminal::served(&event, names, style));
+    }
+}
+
+pub async fn run(
+    config: Option<PathBuf>,
+    listen: Option<SocketAddr>,
+    terminal: Option<Style>,
+) -> miette::Result<()> {
     let located = paths::locate(Role::Server, config);
     let reloads = Reloads::new(located.file.clone());
     let (cfg, _) = load(&located.file, listen)?;
@@ -50,9 +78,16 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
     // Before the line that says the server is up, which is what a script waits for to signal it.
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
+    let rows = terminal.map(|style| {
+        let (key, unused) = (identity.public_key(), cfg.clients.is_empty());
+        let tcp = cfg.transport.tcp_fallback;
+        terminal::print(&terminal::server_header(addr, tcp, key, unused, style));
+        let names = cfg.clients.keys().map(String::len).max().unwrap_or(0);
+        tokio::spawn(show(server.events(), names, style))
+    });
     tracing::info!(%addr, transports = "quic/udp, tcp", "listening");
     tracing::info!(key = %identity.public_key(), "server key");
-    if cfg.clients.is_empty() {
+    if cfg.clients.is_empty() && terminal.is_none() {
         tracing::warn!(config = %located.file.display(), "no clients are authorized yet; add a [clients.NAME] table with the client's key");
     }
     tracing::info!(
@@ -63,7 +98,12 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
     let policy = server.policy();
     tokio::select! {
         () = server.serve(cancel) => {}
-        () = reload(reloads, listen, &cfg, &located, &policy) => {}
+        () = reload(reloads, listen, &cfg, &located, &policy, terminal) => {}
+    }
+    // The sessions the stop ended have said so, and their rows may not be printed yet. The
+    // printer ends with the last session; one that did not drain is not waited for.
+    if let Some(rows) = rows {
+        let _ = tokio::time::timeout(Duration::from_secs(1), rows).await;
     }
     Ok(())
 }
@@ -76,6 +116,7 @@ async fn reload(
     started: &ServerConfig,
     located: &Located,
     policy: &watch::Sender<Policy>,
+    terminal: Option<Style>,
 ) {
     loop {
         reloads.next().await;
@@ -100,5 +141,8 @@ async fn reload(
         }
         policy.send_replace(Policy::from_config(&cfg));
         tracing::info!(clients = cfg.clients.len(), "config reloaded");
+        if let Some(style) = terminal {
+            terminal::print(&terminal::note("config reloaded", style));
+        }
     }
 }

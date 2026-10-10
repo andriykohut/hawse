@@ -448,7 +448,8 @@ environment variable takes a `tracing` filter directive and overrides all of
 them.
 
 On a terminal the client prints a header when it connects and a row for each
-service in place of its log lines, with warnings and errors logged beside
+service in place of its log lines, and the server a header when it starts and
+a row for each client and service, with warnings and errors logged beside
 them. `--log pretty`, `-v`, `-q` and `HAWSE_LOG` each bring the log lines back.
 
 ## License

@@ -27,8 +27,8 @@ struct Cli {
     /// Log warnings and errors only.
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
-    /// Log format. `auto` selects json when stderr is not a terminal. On one, a client at the
-    /// default level prints a row per service in place of log lines, and `pretty` keeps the lines.
+    /// Log format. `auto` selects json when stderr is not a terminal. On one, a server or a client
+    /// at the default level prints rows in place of log lines, and `pretty` keeps the lines.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Auto)]
     log: LogFormat,
     /// Colored output. `auto` disables color when stderr is not a terminal.
@@ -110,7 +110,7 @@ fn main() -> ExitCode {
         cli.quiet,
         cli.log,
         cli.color,
-        matches!(cli.command, Command::Client { .. }),
+        matches!(cli.command, Command::Client { .. } | Command::Server { .. }),
     );
     match run(cli, terminal) {
         Ok(code) => code,
@@ -137,7 +137,7 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
     let runtime = runtime.build().into_diagnostic()?;
     runtime.block_on(async move {
         match cli.command {
-            Command::Server { config, listen } => commands::server::run(config, listen)
+            Command::Server { config, listen } => commands::server::run(config, listen, terminal)
                 .await
                 .map(|()| ExitCode::SUCCESS),
             Command::Client { config } => commands::client::run(config, terminal).await,

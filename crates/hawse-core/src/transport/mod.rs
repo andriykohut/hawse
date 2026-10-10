@@ -244,6 +244,7 @@ pub trait Transport: Send + Sync + 'static {
     fn closed(&self) -> BoxFuture<'_, ()>;
     fn remote_address(&self) -> SocketAddr;
     fn peer_key(&self) -> Option<PublicKey>;
+    fn kind(&self) -> TransportKind;
 }
 
 #[cfg(test)]

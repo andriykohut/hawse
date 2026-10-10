@@ -889,8 +889,51 @@ fn a_server_on_a_terminal_stops_on_sighup() {
             .spawn()
             .unwrap(),
     );
-    wait_for_line(&lines_of(held), "listening");
+    // The header of the terminal form, which the stop signals are in place before.
+    wait_for_line(&lines_of(held), "hawse server");
     stops_on_sighup(&mut server);
+}
+
+#[test]
+fn a_server_on_a_terminal_shows_a_client_that_connects() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let client_key = keygen(&dir.path().join("client.key"));
+    let listen = free_listen_port();
+    let server_config = dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        format!("listen = \"127.0.0.1:{listen}\"\n\n[clients.laptop]\nkey = \"{client_key}\"\n"),
+    )
+    .unwrap();
+    let client_config = dir.path().join("client.toml");
+    fs::write(
+        &client_config,
+        format!("server = \"127.0.0.1:{listen}\"\nserver_key = \"{server_key}\"\n"),
+    )
+    .unwrap();
+    let (held, given) = pty();
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(&server_config)
+            .stdin(given.try_clone().unwrap())
+            .stderr(given)
+            .spawn()
+            .unwrap(),
+    );
+    let lines = lines_of(held);
+    wait_for_line(&lines, "hawse server");
+    let _client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(&client_config)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let row = wait_for_line(&lines, "connected from");
+    assert!(row.contains("laptop"), "{row}");
 }
 
 /// A first run has no config directory yet, so nothing can be watched, and on a terminal no
@@ -903,8 +946,9 @@ fn a_server_on_a_terminal_runs_with_nothing_to_reload_it() {
         hawse()
             .args(["server", "--listen"])
             .arg(format!("127.0.0.1:{}", free_listen_port()))
-            .env("XDG_CONFIG_HOME", dir.path())
-            .env_remove("HAWSE_CONFIG")
+            // Named, so the lookup cannot land on a config or a directory the host has.
+            .arg("--config")
+            .arg(dir.path().join("missing").join("server.toml"))
             .stdin(given.try_clone().unwrap())
             .stderr(given)
             .spawn()
@@ -912,7 +956,7 @@ fn a_server_on_a_terminal_runs_with_nothing_to_reload_it() {
     );
     let lines = lines_of(held);
     wait_for_line(&lines, "cannot watch the config's directory");
-    wait_for_line(&lines, "a client joins with");
+    wait_for_line(&lines, "hawse join");
     // Long enough for the wait on a reload to have started, which is where it went wrong.
     std::thread::sleep(Duration::from_millis(500));
     assert!(server.0.try_wait().unwrap().is_none(), "stopped by itself");
