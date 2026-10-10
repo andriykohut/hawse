@@ -47,6 +47,9 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
         .into_diagnostic()
         .wrap_err("cannot start the server")?;
     let addr = server.local_addr();
+    // Before the line that says the server is up, which is what a script waits for to signal it.
+    let cancel = CancellationToken::new();
+    tokio::spawn(super::shutdown_signal(cancel.clone()));
     tracing::info!(%addr, transports = "quic/udp, tcp", "listening");
     tracing::info!(key = %identity.public_key(), "server key");
     if cfg.clients.is_empty() {
@@ -57,8 +60,6 @@ pub async fn run(config: Option<PathBuf>, listen: Option<SocketAddr>) -> miette:
         addr.port(),
         identity.public_key()
     );
-    let cancel = CancellationToken::new();
-    tokio::spawn(super::shutdown_signal(cancel.clone()));
     let policy = server.policy();
     tokio::select! {
         () = server.serve(cancel) => {}

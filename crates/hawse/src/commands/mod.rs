@@ -4,6 +4,7 @@ pub mod join;
 pub mod keygen;
 pub mod server;
 
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -13,15 +14,42 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// Resolves on SIGINT or SIGTERM and cancels the token.
-pub async fn shutdown_signal(cancel: CancellationToken) {
-    let mut term = signal(SignalKind::terminate()).expect("sigterm handler");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+/// Whether hawse runs on a terminal, where a SIGHUP says the terminal has gone and ends it, as it
+/// ends anything run on one. Elsewhere it is the request to reload that a unit sends.
+// ponytail: stdin and stderr both, since `nohup` leaves stdin on the terminal and moves stderr
+// off it. So `hawse client 2> log` reloads on a hangup and outlives its window. Asking whether
+// SIGHUP came in ignored would tell the two apart, and that is `sigaction`, which is unsafe.
+fn on_a_terminal() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The next SIGHUP for whichever of stopping and reloading listens for it, and never for the
+/// other, which has no listener: a `select!` whose every branch has ended panics.
+async fn hangup(hup: &mut Option<Signal>) {
+    match hup {
+        Some(hup) => {
+            hup.recv().await;
+        }
+        None => std::future::pending().await,
     }
-    tracing::info!("shutting down");
-    cancel.cancel();
+}
+
+/// Resolves on SIGINT or SIGTERM, and on a terminal on SIGHUP, and cancels the token. The
+/// handlers are in place when this returns and not when the future first runs, so a signal sent
+/// once the caller has gone on is one hawse answers.
+pub fn shutdown_signal(cancel: CancellationToken) -> impl Future<Output = ()> {
+    let mut int = signal(SignalKind::interrupt()).expect("sigint handler");
+    let mut term = signal(SignalKind::terminate()).expect("sigterm handler");
+    let mut hup = on_a_terminal().then(|| signal(SignalKind::hangup()).expect("sighup handler"));
+    async move {
+        tokio::select! {
+            _ = int.recv() => {}
+            _ = term.recv() => {}
+            () = hangup(&mut hup) => {}
+        }
+        tracing::info!("shutting down");
+        cancel.cancel();
+    }
 }
 
 /// How long a changed config has to hold still before it is read: a save is often several writes.
@@ -42,9 +70,10 @@ fn linked_dir(path: &Path, dir: &Path) -> Option<PathBuf> {
     (std::fs::canonicalize(dir).ok()? != target).then(|| target.to_owned())
 }
 
-/// When to read the config again: on SIGHUP, and when the file has changed.
+/// When to read the config again: when the file has changed, and off a terminal on SIGHUP.
 pub struct Reloads {
-    hup: Signal,
+    /// None on a terminal, where a SIGHUP stops hawse.
+    hup: Option<Signal>,
     path: PathBuf,
     read: Option<Stamp>,
     /// One for anything that happens in a watched directory, sent from the watcher's thread.
@@ -58,8 +87,14 @@ impl Reloads {
     ///
     /// The directory is watched and not the file: a save that writes a new file and renames it
     /// over the old one would leave a watch on the file behind with the old one. Where a
-    /// directory cannot be watched, SIGHUP still reloads.
+    /// directory cannot be watched, SIGHUP still reloads, and on a terminal nothing does.
     pub fn new(path: PathBuf) -> Self {
+        let terminal = on_a_terminal();
+        let unwatched = if terminal {
+            "is not read until hawse starts again"
+        } else {
+            "is read on SIGHUP only"
+        };
         let (tx, events) = mpsc::channel(1);
         let dir = match path.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir,
@@ -80,7 +115,7 @@ impl Reloads {
                 tracing::warn!(
                     dir = %target.display(),
                     %err,
-                    "cannot watch the directory the config links into, so an edit there is read on SIGHUP only"
+                    "cannot watch the directory the config links into, so an edit there {unwatched}"
                 );
             }
             Ok(watcher)
@@ -89,11 +124,11 @@ impl Reloads {
             tracing::warn!(
                 dir = %dir.display(),
                 %err,
-                "cannot watch the config's directory, so the config is read again on SIGHUP only"
+                "cannot watch the config's directory, so a change to the config {unwatched}"
             );
         }
         Self {
-            hup: signal(SignalKind::hangup()).expect("sighup handler"),
+            hup: (!terminal).then(|| signal(SignalKind::hangup()).expect("sighup handler")),
             read: stamp(&path),
             path,
             events,
@@ -112,7 +147,7 @@ impl Reloads {
         loop {
             let at = look.map_or_else(Instant::now, |(at, _)| at);
             tokio::select! {
-                _ = self.hup.recv() => break,
+                () = hangup(&mut self.hup) => break,
                 // Left waiting while a look is due: it would say nothing that look does not.
                 Some(()) = self.events.recv(), if look.is_none() => {
                     look = Some((Instant::now() + SETTLE, stamp(&self.path)));
