@@ -1,0 +1,21 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: out
+---
+
+  hawse server  |  [::]:4433  |  QUIC + TCP
+  key   ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  join  hawse join <this-host>:4433 --server-key ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+  no clients are authorized yet: one that joins is shown here with the table to add
+
+  x unknown key from 198.51.100.4:40122. to authorize it, add to server.toml:
+
+      [clients.NAME]
+      key = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+  + laptop  connected from 203.0.113.9:51808 | QUIC
+  + laptop  web  127.0.0.1:8080
+  + nas     wireguard  [::]:51820/udp
+  ~ laptop  web  unbound from port 8080
+  ~ laptop  session ended: peer left

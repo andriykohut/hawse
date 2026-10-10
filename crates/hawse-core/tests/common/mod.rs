@@ -18,7 +18,7 @@ use hawse_core::frame::read_frame;
 use hawse_core::identity::Identity;
 use hawse_core::net;
 use hawse_core::server::policy::Policy;
-use hawse_core::server::{Server, ServerError};
+use hawse_core::server::{self, Server, ServerError};
 use hawse_core::tls;
 use hawse_core::transport::quic::{self, QuicTransport, Tuning};
 use hawse_core::transport::tcp;
@@ -29,7 +29,7 @@ use hawse_proto::port::{Kind, Port, PortSpan};
 use quinn::{Connection, Endpoint};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -120,6 +120,7 @@ pub struct RunningServer {
     pub addr: SocketAddr,
     pub key: PublicKey,
     pub policy: watch::Sender<Policy>,
+    pub events: broadcast::Receiver<server::Event>,
     pub cancel: CancellationToken,
     pub task: JoinHandle<()>,
 }
@@ -170,12 +171,14 @@ pub fn start_server(cfg: &ServerConfig, identity: &Identity) -> RunningServer {
     let server = bind_retrying(cfg, identity);
     let addr = server.local_addr();
     let policy = server.policy();
+    let events = server.events();
     let cancel = CancellationToken::new();
     let task = tokio::spawn(server.serve(cancel.clone()));
     RunningServer {
         addr,
         key: identity.public_key(),
         policy,
+        events,
         cancel,
         task,
     }

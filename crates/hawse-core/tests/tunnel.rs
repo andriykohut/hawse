@@ -12,6 +12,7 @@ use hawse_core::client::{Client, ClientError, DisconnectCause, Event};
 use hawse_core::config::Prefer;
 use hawse_core::control::Control;
 use hawse_core::identity::Identity;
+use hawse_core::server::Event as Told;
 use hawse_core::tls;
 use hawse_core::transport::quic::{self, QuicError, Tuning};
 use hawse_core::transport::{RecvHalf, SendHalf, TransportKind};
@@ -411,6 +412,55 @@ async fn unknown_key_is_denied_with_its_own_key() {
         Event::Denied { key: expected }
     );
     assert!(matches!(client.task.await.unwrap(), Err(ClientError::Denied(k)) if k == expected));
+    server.cancel.cancel();
+}
+
+async fn told(server: &mut RunningServer) -> Told {
+    tokio::time::timeout(Duration::from_secs(5), server.events.recv())
+        .await
+        .expect("an event from the server within 5 s")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_server_tells_of_a_denied_key_and_of_a_session_from_connect_to_end() {
+    let (server_id, client_id) = ids();
+    let stranger = Identity::generate().unwrap();
+    let unknown = stranger.public_key();
+    let mut server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let knock = start_client(client_config(server.addr, server.key, &[]), stranger);
+    assert!(matches!(told(&mut server).await, Told::Denied { key, .. } if key == unknown));
+    assert!(knock.task.await.unwrap().is_err());
+
+    let echo = echo_server().await;
+    let mut client = start_client(
+        client_config_over(
+            server.addr,
+            server.key,
+            &[("echo", &echo.to_string(), "any")],
+            Prefer::Tcp,
+        ),
+        client_id,
+    );
+    let port = expect_bound(&mut client.events, "echo").await;
+    client.cancel.cancel();
+    client.task.await.unwrap().unwrap();
+
+    assert!(matches!(
+        told(&mut server).await,
+        Told::Connected { client, transport: TransportKind::Tcp, .. } if client == "test"
+    ));
+    assert!(matches!(
+        told(&mut server).await,
+        Told::Bound { client, service, port: bound, .. }
+            if client == "test" && service == "echo" && bound == port
+    ));
+    assert!(matches!(told(&mut server).await, Told::Ended { client, .. } if client == "test"));
+    // The end says it for the session's services: no `Unbound` follows for each.
+    assert!(server.events.try_recv().is_err());
     server.cancel.cancel();
 }
 

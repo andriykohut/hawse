@@ -1,9 +1,11 @@
-//! What a client run by hand prints on a terminal, in place of its log lines.
+//! What a server or a client run by hand prints on a terminal, in place of its log lines.
 
 use std::io::Write as _;
+use std::net::SocketAddr;
 
 use hawse_core::client::Event;
 use hawse_core::config::{ClientConfig, split_host_port};
+use hawse_core::server;
 use hawse_proto::key::PublicKey;
 use hawse_proto::port::{Kind, PortRequest};
 
@@ -108,6 +110,86 @@ pub fn repeats(shown: &mut Option<PublicKey>, event: &Event) -> bool {
     match event {
         Event::Denied { key } => shown.replace(*key) == Some(*key),
         Event::Connected { .. } => {
+            *shown = None;
+            false
+        }
+        _ => false,
+    }
+}
+
+/// What a server says once it is up: where it listens, its key, and the command a client joins
+/// with. `unused` is a server no client is authorized on yet.
+pub fn server_header(
+    addr: SocketAddr,
+    tcp: bool,
+    key: PublicKey,
+    unused: bool,
+    style: Style,
+) -> String {
+    let dot = style.dim(style.pick("·", "|"));
+    let transports = if tcp { "QUIC + TCP" } else { "QUIC" };
+    let (key_is, join_is) = (style.dim("key "), style.dim("join"));
+    let port = addr.port();
+    let mut out = format!(
+        "\n  hawse server  {dot}  {addr}  {dot}  {transports}\n  {key_is}  {key}\n  {join_is}  hawse join <this-host>:{port} --server-key {key}\n"
+    );
+    if unused {
+        out.push_str("\n  no clients are authorized yet: one that joins is shown here with the table to add\n");
+    }
+    out
+}
+
+/// What `event` reads as, with clients' names padded to `names`.
+pub fn served(event: &server::Event, names: usize, style: Style) -> String {
+    use server::Event;
+    let (ok, no, again) = (
+        style.pick("✓", "+"),
+        style.pick("✗", "x"),
+        style.pick("↻", "~"),
+    );
+    match event {
+        Event::Connected {
+            client,
+            remote,
+            transport,
+            ..
+        } => {
+            let dot = style.dim(style.pick("·", "|"));
+            let transport = transport.to_string().to_uppercase();
+            format!("  {ok} {client:names$}  connected from {remote} {dot} {transport}")
+        }
+        Event::Bound {
+            client,
+            service,
+            bind,
+            port,
+        } => {
+            let at = SocketAddr::new(*bind, port.number);
+            let udp = if port.kind == Kind::Udp { "/udp" } else { "" };
+            format!("  {ok} {client:names$}  {service}  {at}{udp}")
+        }
+        Event::Unbound {
+            client,
+            service,
+            port,
+        } => format!("  {again} {client:names$}  {service}  unbound from port {port}"),
+        Event::Ended { client, reason } => {
+            format!("  {again} {client:names$}  session ended: {reason}")
+        }
+        Event::Denied { key, remote } => format!(
+            "  {no} unknown key from {remote}. to authorize it, add to server.toml:\n\n      [clients.NAME]\n      key = \"{key}\"\n"
+        ),
+    }
+}
+
+/// Whether `event` is a denial already on the screen, as `repeats` says for a client: the client
+/// a server denies knocks again for as long as it runs.
+// ponytail: remembers one key, so two unknown keys knocking in turn each print every time. A set
+// of keys would stop that, and has to be bounded against strangers before it is kept.
+pub fn knocks_again(shown: &mut Option<PublicKey>, event: &server::Event) -> bool {
+    match event {
+        server::Event::Denied { key, .. } => shown.replace(*key) == Some(*key),
+        server::Event::Connected { .. } => {
             *shown = None;
             false
         }
@@ -240,6 +322,101 @@ port = "51820/udp"
         let mut shown = None;
         for (n, (event, repeat)) in events.iter().enumerate() {
             assert_eq!(repeats(&mut shown, event), *repeat, "event {n}: {event:?}");
+        }
+    }
+
+    fn server_session(style: Style) -> String {
+        use server::Event;
+        let key: PublicKey = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            .parse()
+            .unwrap();
+        let client = || "laptop".to_owned();
+        let port = |number, kind| Port { number, kind };
+        let events = [
+            Event::Denied {
+                key,
+                remote: "198.51.100.4:40122".parse().unwrap(),
+            },
+            Event::Connected {
+                client: client(),
+                remote: "203.0.113.9:51808".parse().unwrap(),
+                transport: TransportKind::Quic,
+                agent: "hawse/0.6.0".to_owned(),
+            },
+            Event::Bound {
+                client: client(),
+                service: "web".to_owned(),
+                bind: "127.0.0.1".parse().unwrap(),
+                port: port(8080, Kind::Tcp),
+            },
+            Event::Bound {
+                client: "nas".to_owned(),
+                service: "wireguard".to_owned(),
+                bind: "::".parse().unwrap(),
+                port: port(51820, Kind::Udp),
+            },
+            Event::Unbound {
+                client: client(),
+                service: "web".to_owned(),
+                port: port(8080, Kind::Tcp),
+            },
+            Event::Ended {
+                client: client(),
+                reason: "peer left",
+            },
+        ];
+        let addr = "[::]:4433".parse().unwrap();
+        let mut out = vec![server_header(addr, true, key, true, style)];
+        out.extend(events.iter().map(|e| served(e, "laptop".len(), style)));
+        out.join("\n")
+    }
+
+    #[test]
+    fn a_server_reads_as_rows_under_a_header() {
+        insta::assert_snapshot!(server_session(Style {
+            color: false,
+            unicode: true
+        }));
+    }
+
+    #[test]
+    fn a_server_without_unicode_keeps_to_ascii() {
+        let out = server_session(Style {
+            color: false,
+            unicode: false,
+        });
+        assert!(out.is_ascii(), "{out}");
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn an_unknown_key_is_shown_once_while_it_knocks() {
+        use server::Event;
+        let denial = |identity: &Identity| Event::Denied {
+            key: identity.public_key(),
+            remote: "198.51.100.4:40122".parse().unwrap(),
+        };
+        let (first, second) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let connected = Event::Connected {
+            client: "laptop".to_owned(),
+            remote: "203.0.113.9:51808".parse().unwrap(),
+            transport: TransportKind::Quic,
+            agent: "hawse/0.6.0".to_owned(),
+        };
+        let events = [
+            (denial(&first), false),
+            (denial(&first), true),
+            (denial(&second), false),
+            (connected, false),
+            (denial(&second), false),
+        ];
+        let mut shown = None;
+        for (n, (event, again)) in events.iter().enumerate() {
+            assert_eq!(
+                knocks_again(&mut shown, event),
+                *again,
+                "event {n}: {event:?}"
+            );
         }
     }
 

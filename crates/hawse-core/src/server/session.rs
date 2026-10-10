@@ -17,7 +17,7 @@ use tracing::Instrument as _;
 
 use super::policy::{Grant, Policy};
 use super::udp::{self, UdpService, UdpServices};
-use super::{AGENT, Live, Shared, listener};
+use super::{AGENT, Event, Live, Shared, listener};
 use crate::allow::AllowList;
 use crate::control::Control;
 use crate::error::chain;
@@ -88,7 +88,7 @@ pub async fn run(
     let grant = policy.borrow_and_update().lookup(&key).cloned();
     let Some(grant) = grant else {
         shared.auth_failed(remote.ip());
-        tracing::info!(%key, %remote, "denied unknown key. to authorize it, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"");
+        denied(&shared, key, remote);
         let _ = control
             .send(&ServerMessage::Denied {
                 reason: DenyReason::UnknownKey,
@@ -133,7 +133,7 @@ pub async fn run(
             transport.close(CloseReason::ControlClosed);
             return;
         }
-        tracing::info!(%agent, "client connected");
+        connected(&shared, &grant.name, transport.as_ref(), remote, agent);
         let session = Session {
             transport,
             streams: Arc::new(Semaphore::new(shared.streams)),
@@ -150,6 +150,28 @@ pub async fn run(
     }
     .instrument(span)
     .await;
+}
+
+/// Logged with the table to paste, since the key is not one a person can be asked to type.
+fn denied(shared: &Shared, key: PublicKey, remote: SocketAddr) {
+    tracing::info!(%key, %remote, "denied unknown key. to authorize it, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"");
+    let _ = shared.events.send(Event::Denied { key, remote });
+}
+
+fn connected(
+    shared: &Shared,
+    client: &str,
+    transport: &dyn Transport,
+    remote: SocketAddr,
+    agent: String,
+) {
+    tracing::info!(%agent, "client connected");
+    let _ = shared.events.send(Event::Connected {
+        client: client.to_owned(),
+        remote,
+        transport: transport.kind(),
+        agent,
+    });
 }
 
 /// A session's hold on its key. Dropping it signals that the session is done with its ports, then
@@ -249,6 +271,19 @@ struct BoundService {
 }
 
 impl Session {
+    /// Sent to nobody when nothing watches the server, which is the usual case.
+    fn tell(&self, event: Event) {
+        let _ = self.shared.events.send(event);
+    }
+
+    fn ended(&self, reason: CloseReason) {
+        tracing::info!(reason = reason.as_str(), "session ended");
+        self.tell(Event::Ended {
+            client: self.grant.name.clone(),
+            reason: reason.as_str(),
+        });
+    }
+
     async fn serve(mut self, mut control: Control, server_cancel: CancellationToken) {
         let background = CancellationToken::new();
         self.tasks.spawn(udp::demux(
@@ -363,10 +398,10 @@ impl Session {
             }
         };
 
-        tracing::info!(reason = reason.as_str(), "session ended");
+        self.ended(reason);
         let names: Vec<String> = self.services.keys().cloned().collect();
         for name in names {
-            self.unbind(&name);
+            self.unbind_quietly(&name);
         }
         drop(background);
         self.leave(control, reason, end, told).await;
@@ -491,6 +526,12 @@ impl Session {
             },
         );
         tracing::info!(service, %port, bind = %self.grant.bind, "bound");
+        self.tell(Event::Bound {
+            client: self.grant.name.clone(),
+            service: service.to_owned(),
+            bind: self.grant.bind,
+            port,
+        });
         ServerMessage::Bound {
             service: service.to_owned(),
             service_id: id,
@@ -590,6 +631,18 @@ impl Session {
     /// a UDP service does the same when its last handle drops. Returns the port it had, for a
     /// caller that has to wait for it.
     fn unbind(&mut self, service: &str) -> Option<Port> {
+        let port = self.unbind_quietly(service)?;
+        self.tell(Event::Unbound {
+            client: self.grant.name.clone(),
+            service: service.to_owned(),
+            port,
+        });
+        Some(port)
+    }
+
+    /// An unbind nobody is told of, for a session on its way out: `Event::Ended` says it for all
+    /// of its services.
+    fn unbind_quietly(&mut self, service: &str) -> Option<Port> {
         let bound = self.services.remove(service)?;
         self.udp
             .write()
@@ -993,6 +1046,9 @@ mod tests {
         }
         fn peer_key(&self) -> Option<PublicKey> {
             Some(PublicKey::from_bytes([1; 32]))
+        }
+        fn kind(&self) -> crate::transport::TransportKind {
+            crate::transport::TransportKind::Quic
         }
     }
 

@@ -14,19 +14,19 @@ pub fn level(verbose: u8, quiet: bool) -> &'static str {
     }
 }
 
-/// Returns the style of the terminal form when that is what the run prints: a client's, on a
-/// terminal, with nothing asking for more or fewer lines than the default. Its rows stand in for
+/// Returns the style of the terminal form when that is what the run prints: a server's or a
+/// client's, which `form` says this is, on a terminal, with nothing asking for more or fewer lines than the default. Its rows stand in for
 /// the lines at info level, so only warnings and errors are logged beside them.
 pub fn init(
     verbose: u8,
     quiet: bool,
     format: LogFormat,
     color: ColorChoice,
-    client: bool,
+    form: bool,
 ) -> Option<Style> {
     let tty = std::io::stderr().is_terminal();
     let chosen = EnvFilter::try_from_env("HAWSE_LOG");
-    let terminal = client
+    let terminal = form
         && tty
         && matches!(format, LogFormat::Auto)
         && verbose == 0

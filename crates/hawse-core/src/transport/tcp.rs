@@ -20,7 +20,7 @@ use crate::error::chain;
 use crate::tls;
 use crate::transport::quic::Tuning;
 use crate::transport::records::{RecordReader, RecordWriter};
-use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError};
+use crate::transport::{CloseReason, RecvHalf, SendHalf, Transport, TransportError, TransportKind};
 
 #[derive(Debug, thiserror::Error)]
 #[error("the multiplexer is closed")]
@@ -225,6 +225,10 @@ impl Transport for TcpTransport {
 
     fn peer_key(&self) -> Option<PublicKey> {
         self.peer_key
+    }
+
+    fn kind(&self) -> TransportKind {
+        TransportKind::Tcp
     }
 }
 

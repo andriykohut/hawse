@@ -11,9 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
+use hawse_proto::port::Port;
 use quinn::{Endpoint, VarInt};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -21,13 +22,15 @@ use crate::config::ServerConfig;
 use crate::error::chain;
 use crate::identity::{Identity, IdentityError};
 use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
-use crate::transport::{CloseReason, tcp};
+use crate::transport::{CloseReason, TransportKind, tcp};
 use crate::{net, tls};
 use limiter::Limiter;
 use policy::Policy;
 use ports::PortAllocator;
 
 pub const AGENT: &str = concat!("hawse/", env!("CARGO_PKG_VERSION"));
+/// Events held for a receiver that has not read them yet.
+const EVENTS: usize = 256;
 
 const DRAIN: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
@@ -53,6 +56,37 @@ fn out_of_descriptors(err: &std::io::Error) -> bool {
 const ENFILE: i32 = 23;
 const EMFILE: i32 = 24;
 
+/// What a server tells whoever watches it, beside what it logs: enough to show a person which
+/// clients are connected and what they have bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    Connected {
+        client: String,
+        remote: SocketAddr,
+        transport: TransportKind,
+        agent: String,
+    },
+    /// `bind` is the address the public port listens on.
+    Bound {
+        client: String,
+        service: String,
+        bind: IpAddr,
+        port: Port,
+    },
+    Unbound {
+        client: String,
+        service: String,
+        port: Port,
+    },
+    /// The session's services are unbound with it, and no `Unbound` says so for each.
+    Ended {
+        client: String,
+        reason: &'static str,
+    },
+    /// A key no `[clients.*]` table names.
+    Denied { key: PublicKey, remote: SocketAddr },
+}
+
 pub struct Shared {
     /// Replaced by a reload. Each session watches it for what became of its own grant.
     pub policy: watch::Sender<Policy>,
@@ -67,6 +101,9 @@ pub struct Shared {
     pub sessions: Mutex<HashMap<PublicKey, Arc<Live>>>,
     /// Failed authentications per address, checked before any handshake work.
     pub(crate) limiter: Mutex<Limiter>,
+    /// Nothing waits on a receiver: one that falls behind misses events, and none at all is the
+    /// usual case.
+    pub(crate) events: broadcast::Sender<Event>,
 }
 
 impl Shared {
@@ -100,6 +137,7 @@ impl Shared {
             streams: 16,
             sessions: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new(0)),
+            events: broadcast::Sender::new(EVENTS),
         }
     }
 }
@@ -188,6 +226,7 @@ impl Server {
                 .saturating_sub(1),
             sessions: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new(cfg.limits.auth_failures_per_minute)),
+            events: broadcast::Sender::new(EVENTS),
         });
         Ok(Self {
             endpoint,
@@ -212,6 +251,12 @@ impl Server {
     /// config changes under a running server.
     pub fn policy(&self) -> watch::Sender<Policy> {
         self.shared.policy.clone()
+    }
+
+    /// What happens to sessions from here on. A receiver that falls 256 events behind misses
+    /// the oldest, and a session never waits for one.
+    pub fn events(&self) -> broadcast::Receiver<Event> {
+        self.shared.events.subscribe()
     }
 
     /// Runs until `cancel` fires or the QUIC endpoint stops accepting. Cancelling reaches every
