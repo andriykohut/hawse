@@ -28,6 +28,7 @@ aws-lc-rs = ["hawse-core/aws-lc-rs"]
 hawse-core.workspace = true
 hawse-proto.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 etcetera.workspace = true
 miette.workspace = true
 notify.workspace = true

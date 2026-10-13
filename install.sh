@@ -48,6 +48,10 @@ main() {
     $sudo mkdir -p "$dir"
     $sudo install -m755 "$tmp/$name/hawse" "$dir/hawse"
     echo "hawse $version installed to $dir/hawse"
+    # HAWSE_VERSION can name a release from before the subcommand.
+    if "$dir/hawse" completions --help >/dev/null 2>&1; then
+        echo "for shell completions, see $repo#install"
+    fi
 }
 
 main
