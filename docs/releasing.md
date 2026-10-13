@@ -11,8 +11,8 @@ workflow without publishing, so a tag never runs a build for the first time.
 Set the new version on three lines in the root `Cargo.toml`: `version` under
 `[workspace.package]`, and the `version` of `hawse-proto` and `hawse-core` under
 `[workspace.dependencies]`, keeping the `=` in front of those two. Change the
-version in the README's Install examples as well. Merge that in a PR, then tag
-the merge commit:
+version in the examples in `site/src/content/docs/install.md` as well. Merge
+that in a PR, then tag the merge commit:
 
 ```sh
 git switch main && git pull
