@@ -1,4 +1,7 @@
-# Measurements
+---
+title: Measurements
+description: The numbers behind hawse's defaults and limits.
+---
 
 The numbers behind hawse's defaults and limits. Unless a section says
 otherwise, they were taken from a home connection through a Hetzner server

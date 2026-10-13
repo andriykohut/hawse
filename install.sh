@@ -50,7 +50,7 @@ main() {
     echo "hawse $version installed to $dir/hawse"
     # HAWSE_VERSION can name a release from before the subcommand.
     if "$dir/hawse" completions --help >/dev/null 2>&1; then
-        echo "for shell completions, see $repo#install"
+        echo "for shell completions, see https://andriykohut.github.io/hawse/install/"
     fi
 }
 

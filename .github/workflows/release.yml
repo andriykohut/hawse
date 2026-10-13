@@ -1,9 +1,12 @@
 name: release
 on:
   pull_request:
+    paths-ignore: ["site/**"]
   push:
     branches: [main]
     tags: ["v*"]
+    # Not applied to a tag push, so a release tag always runs.
+    paths-ignore: ["site/**"]
 permissions:
   contents: read
 env:

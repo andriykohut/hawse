@@ -1,6 +1,6 @@
 [Unit]
 Description=hawse tunnel server
-Documentation=https://github.com/andriykohut/hawse
+Documentation=https://andriykohut.github.io/hawse/
 After=network-online.target
 Wants=network-online.target
 

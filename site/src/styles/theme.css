@@ -1,0 +1,89 @@
+/* Ink #0f1b2d, paper #f4f1ea and orange #e8632b come from assets/README.md.
+   The greys are mixes of ink and paper. */
+:root,
+::backdrop {
+	--sl-color-white: #f4f1ea;
+	--sl-color-gray-1: #dddcd7;
+	--sl-color-gray-2: #bdbebd;
+	--sl-color-gray-3: #8f9397;
+	--sl-color-gray-4: #545b66;
+	--sl-color-gray-5: #2f3947;
+	--sl-color-gray-6: #1d2838;
+	--sl-color-black: #0f1b2d;
+
+	--sl-color-accent-low: #4c2f2c;
+	--sl-color-accent: #e8632b;
+	--sl-color-accent-high: #e8632b;
+
+	--sl-color-text-invert: var(--sl-color-black);
+	--sl-color-bg-nav: var(--sl-color-black);
+	--sl-color-bg-sidebar: var(--sl-color-black);
+	--sl-color-hairline: var(--sl-color-gray-5);
+	--sl-color-hairline-light: var(--sl-color-gray-5);
+}
+
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+	--sl-color-white: #0f1b2d;
+	--sl-color-gray-1: #1d2838;
+	--sl-color-gray-2: #2f3947;
+	--sl-color-gray-3: #545b66;
+	--sl-color-gray-4: #868a8f;
+	--sl-color-gray-5: #bdbebd;
+	--sl-color-gray-6: #dddcd7;
+	--sl-color-gray-7: #e9e6e1;
+	--sl-color-black: #f4f1ea;
+
+	/* The brand orange is 2.98:1 on paper. Link text uses the same hue at 4.60:1. */
+	--sl-color-accent-low: #f2d7c8;
+	--sl-color-accent: #bd4614;
+	--sl-color-accent-high: #66382c;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+	font-family: 'Archivo Variable', var(--__sl-font);
+}
+
+.sl-link-button.primary,
+.sl-link-button.primary:hover {
+	background: #e8632b;
+	border-color: #e8632b;
+	color: #0f1b2d;
+}
+
+/* Accent text is under 4.5:1 on the search dialog's grey ground. */
+site-search button[data-close-modal] {
+	color: var(--sl-color-white);
+}
+
+[data-has-hero] .sl-markdown-content h2 {
+	font-size: var(--sl-text-sm);
+	font-weight: 500;
+	letter-spacing: 0.2em;
+	text-transform: uppercase;
+	color: var(--sl-color-gray-3);
+}
+
+[data-has-hero] .sl-markdown-content > ul {
+	display: grid;
+	column-gap: 3rem;
+	padding: 0;
+	list-style: none;
+}
+
+[data-has-hero] .sl-markdown-content > ul > li {
+	margin: 0;
+	padding-block: 1rem;
+	border-top: 1px solid var(--sl-color-hairline);
+}
+
+@media (min-width: 50rem) {
+	[data-has-hero] .sl-markdown-content > ul {
+		grid-template-columns: 1fr 1fr;
+	}
+}

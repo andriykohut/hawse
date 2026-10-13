@@ -1,0 +1,9 @@
+---
+import Default from '@astrojs/starlight/components/Hero.astro';
+import HomeHero from './HomeHero.astro';
+
+// Starlight's built-in 404 page sets `hero` frontmatter too, so it renders through this override.
+const isHomepage = Astro.locals.starlightRoute.id === '';
+---
+
+{isHomepage ? <HomeHero /> : <Default />}

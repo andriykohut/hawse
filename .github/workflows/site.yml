@@ -1,0 +1,36 @@
+name: site
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', 'assets/**', '.github/workflows/site.yml']
+  pull_request:
+    paths: ['site/**', 'assets/**', '.github/workflows/site.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+# One run per ref at a time and in order, so an older build cannot deploy after a newer one. A
+# deployment in progress is left to finish.
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: withastro/action@v6
+        with:
+          path: site
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
