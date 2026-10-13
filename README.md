@@ -9,15 +9,15 @@
 [![crates.io](https://img.shields.io/crates/v/hawse.svg)](https://crates.io/crates/hawse)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-hawse publishes TCP services on a server's ports. The client opens one outbound
-QUIC connection to the server. The server listens on the configured ports and
-relays each incoming connection over that connection, to an address the client
-can reach.
+hawse publishes TCP and UDP services on a server's ports. The client opens one
+outbound QUIC connection to the server, so the network holding the services
+needs no inbound connectivity: no port forwarding, no public address, no
+firewall rules for incoming traffic.
 
-The client opens that connection, so the network holding the services needs no
-inbound connectivity: no port forwarding, no public address, no firewall rules
-for incoming traffic. The server needs an address that its clients and their
-visitors can reach, which is usually a public one but does not have to be.
+The server listens on the configured ports and relays what arrives on them over
+that connection, to an address the client can reach. It needs an address that
+its clients and their visitors can reach, which is usually a public one but does
+not have to be.
 
 Both ends authenticate with Ed25519 keys inside TLS 1.3. The client pins the
 server's public key. The server holds a list of client keys and the ports each
