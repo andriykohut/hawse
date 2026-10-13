@@ -108,16 +108,25 @@ async fn a_server_shutting_down_is_not_held_by_the_stream_refuser() {
         &server_config(&[("test", client_id.public_key(), &[])]),
         &server_id,
     );
-    let _raw = raw_client(&server, &client_id).await;
+    let raw = raw_client(&server, &client_id).await;
 
     server.cancel.cancel();
-    // The session's own drain is 4 s; a refuser that ignored the shutdown would hold it that long.
-    // The bound tells the two apart because a stalled refuser costs that whole drain plus the 2 s
-    // shutdown linger, while a cancelled one costs only the linger.
-    tokio::time::timeout(Duration::from_secs(4), server.task)
+    // The session's own drain is 4 s; a refuser that ignored the shutdown would hold it that long,
+    // while a cancelled one costs only the 2 s shutdown linger. Timed to the session's close and
+    // not to the server's task: past the close the endpoint waits three probe timeouts, and a
+    // handshake on a stalled machine leaves a round-trip estimate that makes those outlast the
+    // 2 s between the two.
+    let closed = tokio::time::timeout(Duration::from_secs(4), raw.conn.closed())
         .await
-        .expect("the server stops within 4 s")
-        .unwrap();
+        .expect("the session closes within 4 s");
+    assert!(
+        matches!(
+            &closed,
+            quinn::ConnectionError::ApplicationClosed(end)
+                if end.error_code == VarInt::from_u32(close::SHUTDOWN)
+        ),
+        "{closed:?}"
+    );
 }
 
 #[tokio::test]
