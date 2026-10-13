@@ -56,6 +56,11 @@ h6 {
 	color: #0f1b2d;
 }
 
+/* Accent text is under 4.5:1 on the search dialog's grey ground. */
+site-search button[data-close-modal] {
+	color: var(--sl-color-white);
+}
+
 [data-has-hero] .sl-markdown-content h2 {
 	font-size: var(--sl-text-sm);
 	font-weight: 500;

@@ -1,0 +1,171 @@
+---
+import { Code, LinkButton } from '@astrojs/starlight/components';
+
+const { data } = Astro.locals.starlightRoute.entry;
+const { title = data.title, tagline, actions = [] } = data.hero ?? {};
+const install =
+	'curl -fsSL https://raw.githubusercontent.com/andriykohut/hawse/main/install.sh | sh';
+---
+
+<div class="hero">
+	<div class="copy">
+		<h1 id="_top" data-page-title set:html={title} />
+		{tagline && <p class="tagline" set:html={tagline} />}
+		<Code code={install} lang="sh" wrap />
+		<div class="actions">
+			{
+				actions.map(({ attrs = {}, icon, link: href, text, variant }) => (
+					<LinkButton {href} {variant} icon={icon?.name} {...attrs}>
+						{text}
+					</LinkButton>
+				))
+			}
+		</div>
+	</div>
+
+	<svg class="tunnel" viewBox="0 0 440 330" role="img" aria-labelledby="tunnel-title tunnel-desc">
+		<title id="tunnel-title">How a connection travels through hawse</title>
+		<desc id="tunnel-desc">
+			A visitor connects to port 2222 on the server. The server relays the connection over one
+			outbound QUIC connection, which the client opened from inside a private network, to
+			127.0.0.1:22 beside the client.
+		</desc>
+		<defs>
+			<marker id="tunnel-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto">
+				<path class="arrowhead" d="M0 0 8 4 0 8Z"></path>
+			</marker>
+		</defs>
+
+		<rect class="outline" x="10" y="30" width="130" height="60" rx="6"></rect>
+		<text class="label" x="75" y="65" text-anchor="middle">Visitor</text>
+		<path class="wire" d="M140 60H276" marker-end="url(#tunnel-arrow)"></path>
+		<text class="mono" x="210" y="50" text-anchor="middle">:2222</text>
+
+		<rect class="solid" x="280" y="30" width="140" height="60" rx="6"></rect>
+		<text class="label on-solid" x="350" y="65" text-anchor="middle">Server</text>
+
+		<rect class="boundary" x="10" y="216" width="420" height="104" rx="10"></rect>
+		<text class="label quiet" x="26" y="242">Private network</text>
+
+		<path class="chain-line" d="M350 90V254"></path>
+		<rect class="chain-link" x="343" y="102" width="14" height="22" rx="7"></rect>
+		<rect class="chain-link" x="343" y="134" width="14" height="22" rx="7"></rect>
+		<rect class="chain-link" x="343" y="166" width="14" height="22" rx="7"></rect>
+		<rect class="chain-link" x="343" y="198" width="14" height="22" rx="7"></rect>
+		<text class="label" x="326" y="150" text-anchor="end">One outbound</text>
+		<text class="label" x="326" y="170" text-anchor="end">QUIC connection</text>
+
+		<rect class="outline" x="280" y="254" width="140" height="50" rx="6"></rect>
+		<text class="label" x="350" y="284" text-anchor="middle">Client</text>
+		<path class="wire" d="M280 279H184" marker-end="url(#tunnel-arrow)"></path>
+		<rect class="outline" x="26" y="254" width="154" height="50" rx="6"></rect>
+		<text class="mono" x="103" y="283" text-anchor="middle">127.0.0.1:22</text>
+	</svg>
+</div>
+
+<style>
+	.hero {
+		display: grid;
+		gap: 2.5rem;
+		align-items: center;
+		padding-block: clamp(1.5rem, 6vmin, 5rem);
+	}
+
+	/* Without min-width the install command widens the grid instead of wrapping in its frame. */
+	.copy {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1.25rem;
+	}
+
+	h1 {
+		font-size: clamp(var(--sl-text-3xl), calc(0.5rem + 3vw), var(--sl-text-5xl));
+		line-height: 1.1;
+		font-weight: 600;
+		color: var(--sl-color-white);
+	}
+
+	.tagline {
+		max-width: 52ch;
+		font-size: var(--sl-text-lg);
+		color: var(--sl-color-gray-2);
+	}
+
+	.actions {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 1rem 1.5rem;
+	}
+
+	.tunnel {
+		width: 100%;
+		max-width: 30rem;
+		height: auto;
+		margin-inline: auto;
+		color: var(--sl-color-white);
+	}
+
+	.tunnel text {
+		font-family: 'Archivo Variable', var(--__sl-font);
+		font-size: 13px;
+		fill: currentColor;
+	}
+
+	.tunnel .label {
+		font-weight: 500;
+		letter-spacing: 0.2em;
+		text-transform: uppercase;
+	}
+
+	.tunnel .quiet {
+		fill: var(--sl-color-gray-3);
+	}
+
+	.tunnel .mono {
+		font-family: var(--__sl-font-mono);
+	}
+
+	.tunnel .outline,
+	.tunnel .wire {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+	}
+
+	.tunnel .solid,
+	.tunnel .arrowhead {
+		fill: currentColor;
+	}
+
+	.tunnel .on-solid {
+		fill: var(--sl-color-black);
+	}
+
+	.tunnel .boundary {
+		fill: none;
+		stroke: var(--sl-color-gray-3);
+		stroke-width: 1.5;
+		stroke-dasharray: 6 6;
+	}
+
+	.tunnel .chain-line {
+		stroke: #e8632b;
+		stroke-width: 3;
+	}
+
+	/* Filled with the page's background so the line does not show through a link. */
+	.tunnel .chain-link {
+		fill: var(--sl-color-black);
+		stroke: #e8632b;
+		stroke-width: 3;
+	}
+
+	@media (min-width: 50rem) {
+		.hero {
+			grid-template-columns: 7fr 5fr;
+			gap: 4%;
+		}
+	}
+</style>
