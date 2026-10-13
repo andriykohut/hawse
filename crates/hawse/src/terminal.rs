@@ -2,6 +2,7 @@
 
 use std::io::Write as _;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use hawse_core::client::Event;
 use hawse_core::config::{ClientConfig, split_host_port};
@@ -54,6 +55,15 @@ fn port_width(request: PortRequest) -> usize {
     }
 }
 
+/// `round_trip` in whole milliseconds, with anything shorter than one said as that rather than
+/// as none.
+fn millis(round_trip: Duration) -> String {
+    match round_trip.as_millis() {
+        0 => "<1 ms".to_owned(),
+        ms => format!("{ms} ms"),
+    }
+}
+
 /// What `event` reads as. The columns are sized from `cfg`, so a row lines up with the ones
 /// before it whatever order the server answers in.
 pub fn event(event: &Event, cfg: &ClientConfig, style: Style) -> String {
@@ -65,11 +75,16 @@ pub fn event(event: &Event, cfg: &ClientConfig, style: Style) -> String {
     let dot = style.dim(style.pick("·", "|"));
     let names = cfg.expose.keys().map(String::len).max().unwrap_or(0);
     match event {
-        Event::Connected { transport, .. } => {
+        Event::Connected {
+            transport,
+            round_trip,
+            ..
+        } => {
             let transport = transport.to_string().to_uppercase();
             format!(
-                "\n  hawse client  {dot}  {}  {dot}  {transport}\n",
-                cfg.server
+                "\n  hawse client  {dot}  {}  {dot}  {transport}  {dot}  {}\n",
+                cfg.server,
+                millis(*round_trip)
             )
         }
         Event::Bound { service, port } => {
@@ -210,8 +225,6 @@ pub fn print(line: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use hawse_core::client::DisconnectCause;
     use hawse_core::identity::Identity;
     use hawse_core::transport::TransportKind;
@@ -251,6 +264,7 @@ port = "51820/udp"
                 transport: TransportKind::Quic,
                 name: "laptop".to_owned(),
                 agent: "hawse/0.6.0".to_owned(),
+                round_trip: Duration::from_millis(24),
             },
             bound("ssh", 2222, Kind::Tcp),
             bound("dev", 40017, Kind::Tcp),
@@ -294,6 +308,12 @@ port = "51820/udp"
     }
 
     #[test]
+    fn a_round_trip_under_a_millisecond_is_not_shown_as_none() {
+        assert_eq!(millis(Duration::from_micros(999)), "<1 ms");
+        assert_eq!(millis(Duration::from_micros(1999)), "1 ms");
+    }
+
+    #[test]
     fn a_denial_is_shown_once_for_a_key_until_the_server_lets_the_client_in() {
         let denial = |identity: &Identity| Event::Denied {
             key: identity.public_key(),
@@ -308,6 +328,7 @@ port = "51820/udp"
             transport: TransportKind::Tcp,
             name: "laptop".to_owned(),
             agent: "hawse/0.6.0".to_owned(),
+            round_trip: Duration::from_millis(24),
         };
         let events = [
             (denial(&first), false),

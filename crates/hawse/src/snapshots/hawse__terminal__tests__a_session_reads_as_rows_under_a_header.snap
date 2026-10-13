@@ -3,7 +3,7 @@ source: crates/hawse/src/terminal.rs
 expression: "session(Style { color: false, unicode: true })"
 ---
 
-  hawse client  ·  tunnel.example.com:4433  ·  QUIC
+  hawse client  ·  tunnel.example.com:4433  ·  QUIC  ·  24 ms
 
   ✓ ssh        tunnel.example.com:2222       ←  127.0.0.1:22
   ✓ dev        tunnel.example.com:40017      ←  127.0.0.1:3000

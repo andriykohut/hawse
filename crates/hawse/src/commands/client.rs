@@ -63,8 +63,11 @@ fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
             transport,
             name,
             agent,
+            round_trip,
         } => {
-            tracing::info!(%remote, %transport, name = %name, server = %agent, "connected");
+            // A `u128` is written to JSON as a string.
+            let round_trip_ms = u64::try_from(round_trip.as_millis()).unwrap_or(u64::MAX);
+            tracing::info!(%remote, %transport, name = %name, server = %agent, round_trip_ms, "connected");
         }
         Event::Bound { service, port } => {
             let host = split_host_port(&cfg.server)
