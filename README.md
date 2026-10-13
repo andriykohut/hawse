@@ -14,11 +14,10 @@ QUIC connection to the server. The server listens on the configured ports and
 relays each incoming connection over that connection, to an address the client
 can reach.
 
-The client opens one outbound QUIC connection to the server, so the network
-holding the services needs no inbound connectivity: no port forwarding, no
-public address, no firewall rules for incoming traffic. The server needs an
-address that its clients and their visitors can reach, which is usually a public
-one but does not have to be.
+The client opens that connection, so the network holding the services needs no
+inbound connectivity: no port forwarding, no public address, no firewall rules
+for incoming traffic. The server needs an address that its clients and their
+visitors can reach, which is usually a public one but does not have to be.
 
 Both ends authenticate with Ed25519 keys inside TLS 1.3. The client pins the
 server's public key. The server holds a list of client keys and the ports each
