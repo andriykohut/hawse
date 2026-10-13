@@ -3,9 +3,12 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
 
+const site = 'https://andriykohut.github.io';
+const base = '/hawse';
+
 export default defineConfig({
-	site: 'https://andriykohut.github.io',
-	base: '/hawse',
+	site,
+	base,
 	integrations: [
 		starlight({
 			title: 'hawse',
@@ -16,6 +19,14 @@ export default defineConfig({
 				replacesTitle: true,
 			},
 			favicon: '/favicon.svg',
+			head: [
+				// A link preview takes its image from an absolute URL, and Starlight names none.
+				{
+					tag: 'meta',
+					attrs: { property: 'og:image', content: `${site}${base}/social-preview.png` },
+				},
+				{ tag: 'meta', attrs: { property: 'og:image:alt', content: 'The hawse mark' } },
+			],
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/andriykohut/hawse' }],
 			customCss: ['@fontsource-variable/archivo', './src/styles/theme.css'],
 			components: { Hero: './src/components/Hero.astro' },
