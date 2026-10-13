@@ -491,7 +491,7 @@ fn keygen_under(config: &std::path::Path) {
 #[test]
 fn keygen_writes_beside_the_config_the_environment_names() {
     let dir = tempfile::tempdir().unwrap();
-    // The config is not written yet, which is the order the README gives.
+    // The config is not written yet, which is the order the documentation gives.
     keygen_under(&dir.path().join("client.toml"));
     assert!(dir.path().join("client.key").is_file());
 }

@@ -1,6 +1,7 @@
 ---
 title: Usage
 description: Start a server, join it from a client and expose a service.
+tableOfContents: false
 ---
 
 Start the server:

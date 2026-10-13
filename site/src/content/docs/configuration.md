@@ -1,6 +1,7 @@
 ---
 title: Configuration
 description: The server and client configuration files and their defaults.
+tableOfContents: false
 ---
 
 Configuration is read from `$XDG_CONFIG_HOME/hawse/` (`~/.config/hawse/` by

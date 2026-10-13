@@ -1,6 +1,7 @@
 ---
 title: Logging
 description: Where the logs go, and how to change their format and level.
+tableOfContents: false
 ---
 
 Logs go to stderr, formatted for a terminal when stderr is one and as JSON
