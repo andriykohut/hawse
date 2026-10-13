@@ -511,6 +511,18 @@ fn keygen_writes_the_key_the_config_names() {
 }
 
 #[test]
+fn completions_prints_a_script_for_each_shell() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = hawse().args(["completions", shell]).output().unwrap();
+        assert!(out.status.success(), "{shell}");
+        let script = String::from_utf8(out.stdout).unwrap();
+        // A subcommand and a flag of another one, which no shell's boilerplate would hold.
+        assert!(script.contains("keygen"), "{shell}: {script}");
+        assert!(script.contains("server-key"), "{shell}: {script}");
+    }
+}
+
+#[test]
 fn a_client_that_stops_on_a_config_error_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     let server_key = keygen(&dir.path().join("server.key"));

@@ -104,6 +104,16 @@ built by this repository's release workflow.
 With a Rust toolchain, `cargo install --locked hawse` builds from source and
 `cargo binstall hawse` downloads the release binary.
 
+`hawse completions SHELL` prints the completion script for bash, zsh, fish,
+elvish or PowerShell. A shell that asks the installed binary as it starts has
+the script of the version it runs:
+
+```sh
+eval "$(hawse completions bash)"    # ~/.bashrc
+eval "$(hawse completions zsh)"     # ~/.zshrc, after compinit
+hawse completions fish | source     # ~/.config/fish/config.fish
+```
+
 ### Docker
 
 Images for `linux/amd64`, `linux/arm64` and `linux/arm/v7` are published to

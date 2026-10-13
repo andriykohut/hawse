@@ -4,11 +4,12 @@ mod logging;
 mod paths;
 mod terminal;
 
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use hawse_proto::key::PublicKey;
 use miette::IntoDiagnostic as _;
 
@@ -87,6 +88,8 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Print the completion script for a shell.
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -151,6 +154,14 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
                 .map(|()| ExitCode::SUCCESS),
             Command::Keygen { config, out } => {
                 commands::keygen::run(config, out).map(|()| ExitCode::SUCCESS)
+            }
+            Command::Completions { shell } => {
+                // `generate` panics on a write that fails, which a reader that has gone away
+                // makes of a write to stdout.
+                let mut script = Vec::new();
+                clap_complete::generate(shell, &mut Cli::command(), "hawse", &mut script);
+                std::io::stdout().write_all(&script).into_diagnostic()?;
+                Ok(ExitCode::SUCCESS)
             }
         }
     })

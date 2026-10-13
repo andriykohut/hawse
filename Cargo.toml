@@ -16,6 +16,7 @@ hawse-core = { path = "crates/hawse-core", version = "=0.7.0", default-features 
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 futures-util = { version = "0.3", default-features = false, features = [
     "sink",
     "std",
