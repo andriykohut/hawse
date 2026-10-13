@@ -3,8 +3,9 @@
 A release is a version tag. Pushing `vX.Y.Z` runs
 `.github/workflows/release.yml`, which publishes the three crates to crates.io,
 creates a GitHub Release with the archives, and pushes the image to
-`ghcr.io/andriykohut/hawse`. Pull requests and pushes to `main` run the same
-workflow without publishing, so a tag never runs a build for the first time.
+`ghcr.io/andriykohut/hawse`. Pull requests and pushes to `main` that change
+anything outside `site/` run the same workflow without publishing, so a tag
+never runs a build for the first time.
 
 ## Cutting a release
 
