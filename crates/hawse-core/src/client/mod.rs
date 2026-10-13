@@ -45,11 +45,14 @@ const DRAIN: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    /// `round_trip` is the time from sending the hello to reading the server's welcome, so it
+    /// includes the server's handling of the hello.
     Connected {
         remote: SocketAddr,
         transport: TransportKind,
         name: String,
         agent: String,
+        round_trip: Duration,
     },
     Bound {
         service: String,
@@ -376,7 +379,9 @@ impl Client {
         let mut wanted = self.expose.subscribe();
         let mut services = Services::new(wanted.borrow_and_update().clone());
         let greeting = async {
+            let asked = Instant::now();
             let (agent, client_name) = self.greet(&mut control, &transport, events).await?;
+            let round_trip = asked.elapsed();
             *welcomed = Some(Instant::now());
             emit(
                 events,
@@ -385,6 +390,7 @@ impl Client {
                     transport: kind,
                     name: client_name,
                     agent,
+                    round_trip,
                 },
             );
             for (service, expose) in &services.exposed {
