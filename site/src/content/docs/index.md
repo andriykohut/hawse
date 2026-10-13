@@ -2,7 +2,7 @@
 title: Reverse TCP and UDP tunnel over QUIC with Ed25519 authentication
 template: splash
 hero:
-  tagline: "Only the client dials out, so the network holding the services needs no inbound connectivity: no port forwarding, no public address, no firewall rules for incoming traffic."
+  tagline: "The client opens one outbound QUIC connection to the server, so the network holding the services needs no inbound connectivity: no port forwarding, no public address, no firewall rules for incoming traffic."
   actions:
     - text: Install
       link: /hawse/install/
