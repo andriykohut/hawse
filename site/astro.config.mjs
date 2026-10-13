@@ -17,6 +17,8 @@ export default defineConfig({
 			},
 			favicon: '/favicon.svg',
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/andriykohut/hawse' }],
+			customCss: ['@fontsource-variable/archivo', './src/styles/theme.css'],
+			components: { Hero: './src/components/Hero.astro' },
 			sidebar: [
 				{ label: 'Install', slug: 'install' },
 				{ label: 'Usage', slug: 'usage' },
