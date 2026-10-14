@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_core::client::{Client, DisconnectCause, Event};
@@ -11,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::Reloads;
 use crate::config_file;
+use crate::panel::{self, Shown};
 use crate::paths::{self, Role};
+use crate::screen;
 use crate::terminal::{self, Style};
 
 /// Reads `file` and no other: a reload that looked the config up again could find one that has
@@ -55,15 +58,9 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Logs what the client reports, or prints it in the terminal form, and says whether it has
-/// stopped for good. `cfg` is the config in force, which a service's addresses are named from.
-fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
-    if let Some(style) = terminal {
-        if let Some(line) = terminal::event(&event, style) {
-            terminal::print(&line);
-        }
-        return matches!(event, Event::Disconnected { retry_in: None, .. });
-    }
+/// Logs what the client reports, and says whether it has stopped for good. `cfg` is the config in
+/// force, which a service's addresses are named from.
+fn report(event: Event, cfg: &ClientConfig) -> bool {
     let mut stopped = false;
     match event {
         Event::Connected {
@@ -116,25 +113,29 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     let (mut cfg, mut identity) = load(&file, terminal)?;
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
-    // What the printer names a service's addresses from, replaced by each reload.
-    let (shown, showing) = watch::channel(cfg.clone());
-    let (tx, mut events) = mpsc::channel(64);
-    let printer = tokio::spawn(async move {
-        let mut stopped = false;
-        let mut shown = None;
-        while let Some(event) = events.recv().await {
-            if terminal.is_some() && terminal::repeats(&mut shown, &event) {
-                continue;
-            }
-            stopped |= report(event, &showing.borrow(), terminal);
-        }
-        stopped
+    // What the printer names a service's addresses from and reads its figures from, replaced by
+    // each reload and each new client.
+    let (shown, showing) = watch::channel(Shown {
+        cfg: cfg.clone(),
+        traffic: Arc::default(),
     });
+    let (tx, mut events) = mpsc::channel(64);
+    let printer = match terminal {
+        Some(style) => tokio::spawn(panel::show(events, showing, style, screen::draw)),
+        None => tokio::spawn(async move {
+            let mut stopped = false;
+            while let Some(event) = events.recv().await {
+                stopped |= report(event, &showing.borrow().cfg);
+            }
+            stopped
+        }),
+    };
     // One turn per connection: a reload that changes more than `[expose.*]` ends the client it
     // found and starts another on what it read.
     loop {
         tracing::info!(key = %identity.public_key(), "client key");
         let client = Client::new(cfg.clone(), identity);
+        shown.send_modify(|shown| shown.traffic = client.traffic());
         let session = cancel.child_token();
         let run = client.run(session.clone(), tx.clone());
         tokio::pin!(run);
@@ -150,7 +151,7 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
                     continue;
                 }
             };
-            shown.send_replace(new.clone());
+            shown.send_modify(|shown| shown.cfg = new.clone());
             if cfg.needs_reconnect(&new) {
                 tracing::info!("config reloaded; reconnecting, as more than [expose.*] changed");
                 if let Some(style) = terminal {
@@ -173,6 +174,9 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     // The printer ends when the last sender does.
     drop(tx);
     let stopped = printer.await.into_diagnostic()?;
+    if terminal.is_some() {
+        screen::release();
+    }
     Ok(if stopped {
         ExitCode::from(2)
     } else {

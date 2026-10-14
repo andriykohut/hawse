@@ -46,6 +46,7 @@ tracing-subscriber.workspace = true
 insta.workspace = true
 rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
