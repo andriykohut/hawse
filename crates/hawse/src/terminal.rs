@@ -12,6 +12,7 @@ use hawse_proto::key::PublicKey;
 use hawse_proto::msg::BindFailure;
 use hawse_proto::port::{Kind, Port, PortRequest};
 use tokio::time::Instant;
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::commands::client::reason;
 
@@ -101,7 +102,8 @@ pub fn span(elapsed: Duration) -> String {
     }
 }
 
-/// How many columns `text` takes on a terminal, leaving out the escapes `Style::dim` adds.
+/// How many columns `text` takes on a terminal, a wide character two of them, leaving out the
+/// escapes `Style::dim` adds.
 pub fn columns(text: &str) -> usize {
     let mut escape = false;
     text.chars()
@@ -114,7 +116,8 @@ pub fn columns(text: &str) -> usize {
                 !escape
             }
         })
-        .count()
+        .map(|c| c.width().unwrap_or(0))
+        .sum()
 }
 
 /// `fields` joined, dropping whole fields from the right until the line fits in `room` columns,
@@ -130,7 +133,14 @@ pub fn fit(fields: &[String], room: usize) -> String {
     }
     if room > 0 && columns(&line) > room {
         let plain: String = line.replace("\x1b[2m", "").replace("\x1b[0m", "");
-        return plain.chars().take(room).collect();
+        let mut taken = 0;
+        return plain
+            .chars()
+            .take_while(|c| {
+                taken += c.width().unwrap_or(0);
+                taken <= room
+            })
+            .collect();
     }
     line
 }
@@ -746,6 +756,14 @@ port = "51820/udp"
         let dim = ["\x1b[2mab\x1b[0m".to_owned(), "cd".to_owned()];
         assert_eq!(columns(&dim[0]), 2);
         assert_eq!(fit(&dim, 4), "\x1b[2mab\x1b[0mcd");
+    }
+
+    #[test]
+    fn a_wide_character_takes_two_columns_and_is_never_cut_in_half() {
+        assert_eq!(columns("例え.jp"), 7);
+        let cut = fit(&["  例え例え".to_owned()], 5);
+        assert_eq!(cut, "  例");
+        assert!(columns(&cut) <= 5);
     }
 
     #[test]

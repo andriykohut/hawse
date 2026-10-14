@@ -230,9 +230,12 @@ pub async fn show(
             }
             _ = tick.tick(), if ticking || counting_down => {
                 if ticking {
+                    // Cleared before the totals are read: bytes that land between the two are
+                    // in this sample and set the flag again, so the last sample drawn is never
+                    // one that still has bytes in it.
+                    ticking = traffic.take_moved();
                     state.sample(traffic.snapshot(), sampled.elapsed());
                     sampled = Instant::now();
-                    ticking = traffic.take_moved();
                 }
             }
         }
