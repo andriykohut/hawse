@@ -64,6 +64,74 @@ fn millis(round_trip: Duration) -> String {
     }
 }
 
+/// A rate in at most 6 columns: bytes under 1000, then K, M and G (binary), with one decimal
+/// under 10. A figure that would round to 1000 of a unit reads as 1.0 of the next.
+pub fn rate(per_second: u64) -> String {
+    const UNITS: [&str; 3] = ["K", "M", "G"];
+    if per_second < 1000 {
+        return format!("{per_second}B/s");
+    }
+    // `per_second` in units of `scale`, to the nearest whole one and the nearest tenth.
+    let whole = |scale: u128| (u128::from(per_second) * 2 + scale) / (scale * 2);
+    let tenths = |scale: u128| (u128::from(per_second) * 20 + scale) / (scale * 2);
+    let (mut scale, mut unit) = (1024u128, 0);
+    while unit + 1 < UNITS.len() && whole(scale) >= 1000 {
+        scale *= 1024;
+        unit += 1;
+    }
+    let tenths = tenths(scale);
+    if tenths < 100 {
+        format!("{}.{}{}/s", tenths / 10, tenths % 10, UNITS[unit])
+    } else {
+        format!("{}{}/s", whole(scale), UNITS[unit])
+    }
+}
+
+/// `elapsed` to the minute: `<1 min`, `14 min`, `2 h 14 m`, `3 d 2 h`.
+pub fn span(elapsed: Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    match minutes {
+        0 => "<1 min".to_owned(),
+        1..60 => format!("{minutes} min"),
+        60..1440 => format!("{} h {} m", minutes / 60, minutes % 60),
+        _ => format!("{} d {} h", minutes / 1440, minutes % 1440 / 60),
+    }
+}
+
+/// How many columns `text` takes on a terminal, leaving out the escapes `Style::dim` adds.
+pub fn columns(text: &str) -> usize {
+    let mut escape = false;
+    text.chars()
+        .filter(|&c| {
+            if escape {
+                escape = c != 'm';
+                false
+            } else {
+                escape = c == '\x1b';
+                !escape
+            }
+        })
+        .count()
+}
+
+/// `fields` joined, dropping whole fields from the right until the line fits in `room` columns,
+/// and cutting the first by characters when it does not fit alone, its dimming dropped with the
+/// cut. A `room` of 0 is a terminal that does not say how wide it is, and cuts nothing.
+pub fn fit(fields: &[String], room: usize) -> String {
+    let mut line = String::new();
+    for field in fields {
+        if room > 0 && !line.is_empty() && columns(&line) + columns(field) > room {
+            break;
+        }
+        line.push_str(field);
+    }
+    if room > 0 && columns(&line) > room {
+        let plain: String = line.replace("\x1b[2m", "").replace("\x1b[0m", "");
+        return plain.chars().take(room).collect();
+    }
+    line
+}
+
 /// What `event` reads as. The columns are sized from `cfg`, so a row lines up with the ones
 /// before it whatever order the server answers in.
 pub fn event(event: &Event, cfg: &ClientConfig, style: Style) -> String {
@@ -456,5 +524,57 @@ port = "51820/udp"
             !plain.contains('\x1b'),
             "an escape other than dim: {plain:?}"
         );
+    }
+
+    #[test]
+    fn a_rate_reads_in_at_most_six_columns() {
+        let cases = [
+            (0, "0B/s"),
+            (999, "999B/s"),
+            (1000, "1.0K/s"),
+            (1023, "1.0K/s"),
+            (2457, "2.4K/s"),
+            (10_188, "9.9K/s"),
+            (10_189, "10K/s"),
+            (315_392, "308K/s"),
+            // 999.5 K, the first figure that rounds to 1000 of a unit, and the one below it.
+            (1_023_487, "999K/s"),
+            (1_023_488, "1.0M/s"),
+            (1_258_291, "1.2M/s"),
+        ];
+        for (per_second, want) in cases {
+            assert_eq!(rate(per_second), want, "{per_second}");
+        }
+        for shift in 0..40 {
+            for per_second in [(1u64 << shift) - 1, 1 << shift, (1 << shift) * 3 / 2] {
+                let text = rate(per_second);
+                assert!(text.len() <= 6, "{per_second}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_span_reads_to_the_minute() {
+        let mins = |m: u64| Duration::from_secs(m * 60);
+        assert_eq!(span(Duration::from_secs(59)), "<1 min");
+        assert_eq!(span(mins(14)), "14 min");
+        assert_eq!(span(mins(2 * 60 + 14)), "2 h 14 m");
+        assert_eq!(span(mins(3 * 1440 + 2 * 60 + 5)), "3 d 2 h");
+    }
+
+    #[test]
+    fn a_line_drops_whole_fields_from_the_right_to_fit() {
+        let fields = [
+            "  head".to_owned(),
+            "  ·  one".to_owned(),
+            "  ·  two".to_owned(),
+        ];
+        assert_eq!(fit(&fields, 0), "  head  ·  one  ·  two");
+        assert_eq!(fit(&fields, 15), "  head  ·  one");
+        assert_eq!(fit(&fields, 4), "  he");
+        // What `Style::dim` adds takes no columns.
+        let dim = ["\x1b[2mab\x1b[0m".to_owned(), "cd".to_owned()];
+        assert_eq!(columns(&dim[0]), 2);
+        assert_eq!(fit(&dim, 4), "\x1b[2mab\x1b[0mcd");
     }
 }
