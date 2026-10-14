@@ -24,6 +24,7 @@ use crate::error::chain;
 use crate::frame::{StreamFrameError, read_frame};
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
+use crate::traffic::{Meter, Traffic};
 use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
 use crate::transport::{
     CloseReason, RecvHalf, SendHalf, Transport, TransportError, TransportKind, tcp,
@@ -136,6 +137,7 @@ pub struct Target {
     pub service: String,
     pub local: String,
     pub proxy_protocol: bool,
+    pub meter: Arc<Meter>,
 }
 
 type Targets = Arc<RwLock<HashMap<u16, Target>>>;
@@ -261,6 +263,7 @@ pub struct Client {
     targets: Targets,
     udp: Arc<udp::Registry>,
     fallback_after: Duration,
+    traffic: Arc<Traffic>,
 }
 
 impl Client {
@@ -272,6 +275,7 @@ impl Client {
             targets: Arc::default(),
             udp: Arc::default(),
             fallback_after: FALLBACK_AFTER,
+            traffic: Arc::default(),
         }
     }
 
@@ -289,6 +293,12 @@ impl Client {
     /// under a running client.
     pub fn expose(&self) -> watch::Sender<BTreeMap<String, Expose>> {
         self.expose.clone()
+    }
+
+    /// The running figures of this client's services, kept across its reconnects. A reload that
+    /// makes a new `Client` starts them again.
+    pub fn traffic(&self) -> Arc<Traffic> {
+        Arc::clone(&self.traffic)
     }
 
     /// Reconnects after every failure, backing off from 1 s to 30 s, until `cancel` fires,
@@ -580,6 +590,7 @@ impl Client {
             self.targets.write().expect("targets lock").insert(
                 service_id,
                 Target {
+                    meter: self.traffic.meter(&service),
                     service,
                     local,
                     proxy_protocol: expose.proxy_protocol,

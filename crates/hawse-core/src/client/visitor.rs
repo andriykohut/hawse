@@ -72,8 +72,10 @@ pub async fn serve(
             return;
         }
     }
+    // Only a visitor `local` accepted is counted, so a refusal leaves nothing behind.
+    let _open = target.meter.open();
     tracing::debug!(service = target.service, visitor = %header.visitor, "visitor connected");
-    match pump(socket, send, recv, buffer, Arc::default()).await {
+    match pump(socket, send, recv, buffer, Arc::clone(&target.meter)).await {
         Ok(stats) => tracing::debug!(
             service = target.service,
             up = stats.to_socket,
