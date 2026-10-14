@@ -1,0 +1,61 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "frames(Style { color: false, unicode: true })"
+---
+busy:
+
+  hawse client  ·  tunnel.example.com:4433  ·  QUIC  ·  24 ms  ·  up 2 h 14 m
+
+  ● dev        tunnel.example.com:40017      ←  127.0.0.1:3000   2  ↓ 308K/s  ↑ 1.2M/s
+  ● ssh        tunnel.example.com:2222       ←  127.0.0.1:22     1  ↓ 2.0K/s  ↑ 9.0K/s
+  ○ wireguard  tunnel.example.com:51820/udp  ←  127.0.0.1:51820  idle
+
+open with nothing moving:
+
+  hawse client  ·  tunnel.example.com:4433  ·  QUIC  ·  24 ms  ·  up 2 h 14 m
+
+  ● dev        tunnel.example.com:40017      ←  127.0.0.1:3000   2  ↓ 308K/s  ↑ 1.2M/s
+  ○ ssh        tunnel.example.com:2222       ←  127.0.0.1:22     1
+  ○ wireguard  tunnel.example.com:51820/udp  ←  127.0.0.1:51820  idle
+
+a refused bind:
+
+  hawse client  ·  tunnel.example.com:4433  ·  QUIC  ·  24 ms  ·  up 2 h 14 m
+
+  ● dev        tunnel.example.com:40017      ←  127.0.0.1:3000   2  ↓ 308K/s  ↑ 1.2M/s
+  ● ssh        tunnel.example.com:2222       ←  127.0.0.1:22     1  ↓ 2.0K/s  ↑ 9.0K/s
+  ✗ wireguard  port is not granted to this client
+
+down:
+
+  hawse client  ·  tunnel.example.com:4433  ·  down 3 min  ·  retrying in 4 s
+
+  ↻ dev        tunnel.example.com:40017      ←  127.0.0.1:3000
+  ↻ ssh        tunnel.example.com:2222       ←  127.0.0.1:22
+  ↻ wireguard  tunnel.example.com:51820/udp  ←  127.0.0.1:51820
+
+connecting:
+
+  hawse client  ·  tunnel.example.com:4433  ·  connecting
+
+stopped:
+
+  hawse client  ·  tunnel.example.com:4433  ·  stopped
+
+  ✗ dev        tunnel.example.com:40017      ←  127.0.0.1:3000
+  ✗ ssh        tunnel.example.com:2222       ←  127.0.0.1:22
+  ✗ wireguard  tunnel.example.com:51820/udp  ←  127.0.0.1:51820
+
+cut at 60 columns:
+
+  hawse client  ·  tunnel.example.com:4433  ·  QUIC
+
+  ● dev        tunnel.example.com:40017      2  ↓ 308K/s
+  ● ssh        tunnel.example.com:2222       1  ↓ 2.0K/s
+  ○ wireguard  tunnel.example.com:51820/udp  idle
+
+folded to 4 lines:
+  hawse client  ·  tunnel.example.com:4433  ·  QUIC  ·  24 ms  ·  up 2 h 14 m
+
+  ● dev        tunnel.example.com:40017      ←  127.0.0.1:3000   2  ↓ 308K/s  ↑ 1.2M/s
+  … 2 more

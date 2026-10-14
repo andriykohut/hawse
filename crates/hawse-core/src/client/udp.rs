@@ -19,6 +19,7 @@ use super::BindCtx;
 use super::visitor::refuse;
 use crate::error::chain;
 use crate::frame::read_body;
+use crate::traffic::{Meter, Open};
 use crate::transport::{RecvHalf, SendHalf, Transport};
 use crate::udp::{Drops, FINISH_WAIT, MAX_PAYLOAD, Sender, drain, report_drops};
 
@@ -108,6 +109,7 @@ pub struct UdpLocal {
     drops: Arc<Drops>,
     tasks: TaskTracker,
     cancel: CancellationToken,
+    meter: Arc<Meter>,
 }
 
 struct LocalSession {
@@ -115,6 +117,9 @@ struct LocalSession {
     used: Mutex<Instant>,
     /// A child of the service's, so eviction ends one reader and unbinding ends them all.
     cancel: CancellationToken,
+    /// Counts the session open in its service's meter until its last handle drops, whichever
+    /// way it leaves the table: idle, evicted, or with its service.
+    _open: Open,
 }
 
 impl LocalSession {
@@ -139,6 +144,7 @@ impl UdpLocal {
     ) -> Arc<Self> {
         let drops = Arc::new(Drops::default());
         let (sender, queue) = Sender::new(Arc::clone(ctx.transport), Arc::clone(&drops));
+        let meter = ctx.traffic.meter(&service);
         Arc::new(Self {
             service,
             id,
@@ -155,6 +161,7 @@ impl UdpLocal {
             drops,
             tasks: ctx.tasks.clone(),
             cancel: ctx.udp_cancel.child_token(),
+            meter,
         })
     }
 
@@ -186,9 +193,12 @@ impl UdpLocal {
             }
             None => session.socket.send(payload).await,
         };
-        if let Err(err) = sent {
-            self.note(&err);
-            self.drops.socket();
+        match sent {
+            Ok(_) => self.meter.toward_local(payload.len()),
+            Err(err) => {
+                self.note(&err);
+                self.drops.socket();
+            }
         }
     }
 
@@ -236,6 +246,7 @@ impl UdpLocal {
             socket,
             used: Mutex::new(Instant::now()),
             cancel: self.cancel.child_token(),
+            _open: self.meter.open(),
         });
         let session = {
             let mut sessions = self.sessions.lock().expect("udp sessions lock");
@@ -308,6 +319,7 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
                     local.heard_from_local();
                     // Synchronous, so the shared buffer is never held across an await.
                     local.sender.send(header, &buf[..len]);
+                    local.meter.from_local(len);
                     Ok(())
                 });
                 if let Err(err) = received {
@@ -482,10 +494,12 @@ mod tests {
         let transport: Arc<dyn Transport> = Arc::new(NoTransport);
         let tasks = TaskTracker::new();
         let udp_cancel = CancellationToken::new();
+        let traffic = crate::traffic::Traffic::default();
         let ctx = BindCtx {
             transport: &transport,
             tasks: &tasks,
             udp_cancel: &udp_cancel,
+            traffic: &traffic,
         };
         let service = UdpLocal::new("svc".to_owned(), ID, local, idle, cap, None, &ctx);
         let replies = service.queue.lock().unwrap().take().unwrap();
@@ -684,5 +698,50 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    /// Waits for `service`'s open count to read `want`: a session is counted closed when its
+    /// reader lets go of it, a moment after it leaves the table.
+    async fn open_settles(service: &UdpLocal, want: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while service.meter.counts().open != want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "open: {}, not {want}",
+                service.meter.counts().open
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_is_counted_open_until_it_idles_out_with_its_bytes_each_way() {
+        let (service, mut replies) = service(port_teller().await, Duration::from_millis(50));
+        service.deliver(&packet_for(5, b"?")).await;
+        let (_, port) = reply(&mut replies).await;
+        let counts = service.meter.counts();
+        assert_eq!(counts.open, 1);
+        assert_eq!(counts.down, 1);
+        assert_eq!(counts.up, u64::try_from(port.len()).unwrap());
+        open_settles(&service, 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_session_evicted_at_the_cap_is_counted_closed() {
+        let (service, _replies) = capped(port_teller().await, IDLE, 1);
+        service.deliver(&packet_for(5, b"?")).await;
+        service.deliver(&packet_for(6, b"?")).await;
+        open_settles(&service, 1).await;
+    }
+
+    #[tokio::test]
+    async fn an_unbound_service_counts_its_sessions_closed() {
+        let (service, _replies) = service(port_teller().await, IDLE);
+        service.deliver(&packet_for(5, b"?")).await;
+        service.deliver(&packet_for(6, b"?")).await;
+        open_settles(&service, 2).await;
+        // What `Registry::remove` does to a service a reload unbinds.
+        service.cancel.cancel();
+        open_settles(&service, 0).await;
     }
 }

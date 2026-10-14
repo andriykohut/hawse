@@ -24,6 +24,7 @@ use crate::error::chain;
 use crate::frame::{StreamFrameError, read_frame};
 use crate::identity::{Identity, IdentityError};
 use crate::tls;
+use crate::traffic::{Meter, Traffic};
 use crate::transport::quic::{self, QuicError, QuicTransport, Tuning};
 use crate::transport::{
     CloseReason, RecvHalf, SendHalf, Transport, TransportError, TransportKind, tcp,
@@ -70,6 +71,10 @@ pub enum Event {
     Disconnected {
         cause: DisconnectCause,
         retry_in: Option<Duration>,
+    },
+    /// How long the last ping took to be answered, about every 15 s while connected.
+    RoundTrip {
+        round_trip: Duration,
     },
 }
 
@@ -136,6 +141,7 @@ pub struct Target {
     pub service: String,
     pub local: String,
     pub proxy_protocol: bool,
+    pub meter: Arc<Meter>,
 }
 
 type Targets = Arc<RwLock<HashMap<u16, Target>>>;
@@ -155,6 +161,7 @@ struct BindCtx<'a> {
     transport: &'a Arc<dyn Transport>,
     tasks: &'a TaskTracker,
     udp_cancel: &'a CancellationToken,
+    traffic: &'a Traffic,
 }
 
 /// One session's services: what it has asked the server to bind, kept in step with `expose`, and
@@ -228,10 +235,18 @@ async fn send_or_end(
     }
 }
 
-fn ping_interval() -> tokio::time::Interval {
-    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+fn ping_interval(every: Duration) -> tokio::time::Interval {
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping
+}
+
+/// How long the ping `pinged` names took, when `msg` is its answer.
+fn answered(msg: &ServerMessage, pinged: Option<(u64, Instant)>) -> Option<Duration> {
+    match (msg, pinged) {
+        (ServerMessage::Pong { nonce }, Some((sent, at))) if *nonce == sent => Some(at.elapsed()),
+        _ => None,
+    }
 }
 
 async fn serve_stream(
@@ -261,6 +276,8 @@ pub struct Client {
     targets: Targets,
     udp: Arc<udp::Registry>,
     fallback_after: Duration,
+    traffic: Arc<Traffic>,
+    ping_every: Duration,
 }
 
 impl Client {
@@ -272,6 +289,8 @@ impl Client {
             targets: Arc::default(),
             udp: Arc::default(),
             fallback_after: FALLBACK_AFTER,
+            traffic: Arc::default(),
+            ping_every: PING_EVERY,
         }
     }
 
@@ -283,12 +302,26 @@ impl Client {
         self
     }
 
+    /// Replaces `PING_EVERY`. No config file reaches this: it is here so tests do not wait 15 s
+    /// for a round trip.
+    #[must_use]
+    pub fn with_ping_every(mut self, every: Duration) -> Self {
+        self.ping_every = every;
+        self
+    }
+
     /// Where a reload sends the `[expose.*]` it read. A running session unbinds each service that
     /// is gone or changed and binds each that is new or changed, and asks again for every bind
     /// the server refused; the next session starts from them. Nothing else in a config changes
     /// under a running client.
     pub fn expose(&self) -> watch::Sender<BTreeMap<String, Expose>> {
         self.expose.clone()
+    }
+
+    /// The running figures of this client's services, kept across its reconnects. A reload that
+    /// makes a new `Client` starts them again.
+    pub fn traffic(&self) -> Arc<Traffic> {
+        Arc::clone(&self.traffic)
     }
 
     /// Reconnects after every failure, backing off from 1 s to 30 s, until `cancel` fires,
@@ -411,11 +444,13 @@ impl Client {
             transport: &transport,
             tasks: &tasks,
             udp_cancel: &udp_cancel,
+            traffic: &self.traffic,
         };
         tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
-        let mut ping = ping_interval();
+        let mut ping = ping_interval(self.ping_every);
         let mut last_heard = tokio::time::Instant::now();
         let mut nonce = 0u64;
+        let mut pinged = None;
         // What a reload left to tell the server, one message a turn.
         let mut pending = VecDeque::new();
 
@@ -435,12 +470,13 @@ impl Client {
                 }
                 _ = ping.tick() => {
                     nonce += 1;
+                    pinged = Some((nonce, Instant::now()));
                     Some(ClientMessage::Ping { nonce })
                 }
                 msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = tokio::time::Instant::now();
-                    match self.heard(msg, &mut services, remote, &bind_ctx, events) {
+                    match self.heard(msg, &mut services, remote, &bind_ctx, events, pinged) {
                         Ok(reply) => reply,
                         Err(err) => break Err(err),
                     }
@@ -498,6 +534,7 @@ impl Client {
     }
 
     /// The reply a control message calls for, if any. An error is how the session ends.
+    /// `pinged` is the last ping sent and when, which a `Pong` answering it is timed from.
     fn heard(
         &self,
         msg: ServerMessage,
@@ -505,7 +542,11 @@ impl Client {
         remote: SocketAddr,
         ctx: &BindCtx<'_>,
         events: &mpsc::Sender<Event>,
+        pinged: Option<(u64, Instant)>,
     ) -> Result<Option<ClientMessage>, ClientError> {
+        if let Some(round_trip) = answered(&msg, pinged) {
+            emit(events, Event::RoundTrip { round_trip });
+        }
         match msg {
             ServerMessage::Bound {
                 service,
@@ -580,6 +621,7 @@ impl Client {
             self.targets.write().expect("targets lock").insert(
                 service_id,
                 Target {
+                    meter: self.traffic.meter(&service),
                     service,
                     local,
                     proxy_protocol: expose.proxy_protocol,
@@ -1086,5 +1128,18 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_answer_to_the_last_ping_is_a_round_trip() {
+        let at = Instant::now();
+        let pong = |nonce| ServerMessage::Pong { nonce };
+        assert!(answered(&pong(3), Some((3, at))).is_some());
+        assert_eq!(answered(&pong(2), Some((3, at))), None);
+        assert_eq!(answered(&pong(3), None), None);
+        assert_eq!(
+            answered(&ServerMessage::Ping { nonce: 3 }, Some((3, at))),
+            None
+        );
     }
 }

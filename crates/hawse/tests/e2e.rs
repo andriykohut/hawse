@@ -948,6 +948,49 @@ fn a_server_on_a_terminal_shows_a_client_that_connects() {
     assert!(row.contains("laptop"), "{row}");
 }
 
+/// A pty opened as `pty` gives no size, so this also runs the panel on a terminal that does
+/// not say how wide it is.
+#[test]
+fn a_client_on_a_terminal_draws_its_panel() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let client_key = keygen(&dir.path().join("client.key"));
+    let listen = free_listen_port();
+    let server_config = dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        format!("listen = \"127.0.0.1:{listen}\"\n\n[clients.laptop]\nkey = \"{client_key}\"\n"),
+    )
+    .unwrap();
+    let client_config = dir.path().join("client.toml");
+    fs::write(
+        &client_config,
+        // A service, so a row follows the header and ends its line.
+        format!("server = \"127.0.0.1:{listen}\"\nserver_key = \"{server_key}\"\n\n[expose.web]\nlocal = \"127.0.0.1:3000\"\n"),
+    )
+    .unwrap();
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(&server_config)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (held, given) = pty();
+    let _client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(&client_config)
+            .stdin(given.try_clone().unwrap())
+            .stderr(given)
+            .spawn()
+            .unwrap(),
+    );
+    let header = wait_for_line(&lines_of(held), "up <1 min");
+    assert!(header.contains("hawse client"), "{header}");
+}
+
 /// A first run has no config directory yet, so nothing can be watched, and on a terminal no
 /// SIGHUP reloads either. The server waits on neither and runs.
 #[test]

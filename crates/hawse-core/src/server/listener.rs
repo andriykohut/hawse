@@ -117,7 +117,8 @@ pub async fn serve(
                 return;
             }
             tracing::debug!(service_id, %visitor, "visitor connected");
-            match pump(socket, send, recv, buffer).await {
+            // The server shows no figures; its meter is read by nothing.
+            match pump(socket, send, recv, buffer, Arc::default()).await {
                 Ok(stats) => {
                     tracing::debug!(%visitor, up = stats.to_stream, down = stats.to_socket, "visitor done");
                 }

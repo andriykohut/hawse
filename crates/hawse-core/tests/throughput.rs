@@ -1,5 +1,6 @@
 mod common;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use hawse_core::pump::pump;
@@ -50,6 +51,7 @@ async fn socket_to_stream() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -98,6 +100,7 @@ async fn stream_to_socket() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -142,7 +145,7 @@ async fn stream_to_socket() {
 async fn tcp_socket_to_stream(client: &dyn Transport, server: &dyn Transport) -> f64 {
     let (send, recv) = client.open_bi().await.unwrap();
     let (near, far) = tokio::io::duplex(4 * 1024 * 1024);
-    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024));
+    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024, Arc::default()));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
     // Started before accept_bi: yamux carries the SYN on a stream's first frame, so accept_bi
@@ -188,7 +191,7 @@ async fn tcp_socket_to_stream(client: &dyn Transport, server: &dyn Transport) ->
 async fn tcp_stream_to_socket(client: &dyn Transport, server: &dyn Transport) -> f64 {
     let (send, recv) = client.open_bi().await.unwrap();
     let (near, far) = tokio::io::duplex(4 * 1024 * 1024);
-    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024));
+    let pumped = tokio::spawn(pump(near, send, recv, 16 * 1024, Arc::default()));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
     // yamux carries the SYN on a stream's first frame, and here the peer is the one with a payload
