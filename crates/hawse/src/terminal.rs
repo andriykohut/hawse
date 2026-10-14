@@ -318,11 +318,15 @@ pub fn frame(
         // The blank line above the header goes before any row does.
         lines.remove(0);
     }
-    if height > 0 && lines.len() > height {
-        let kept = height.saturating_sub(1).max(1);
-        let more = lines.len() - kept;
+    if height == 1 {
+        // A line taller would scroll the header off, and the next redraw could not erase it.
+        lines.truncate(1);
+    } else if height > 0 && lines.len() > height {
+        let kept = height - 1;
+        let more = lines[kept..].iter().filter(|line| !line.is_empty()).count();
         lines.truncate(kept);
-        lines.push(format!("  {} {more} more", style.pick("…", "...")));
+        let summary = format!("  {} {more} more", style.pick("…", "..."));
+        lines.push(fit(&[summary], room));
     }
     lines
 }
@@ -742,6 +746,45 @@ port = "51820/udp"
         let dim = ["\x1b[2mab\x1b[0m".to_owned(), "cd".to_owned()];
         assert_eq!(columns(&dim[0]), 2);
         assert_eq!(fit(&dim, 4), "\x1b[2mab\x1b[0mcd");
+    }
+
+    #[test]
+    fn a_folded_panel_fits_its_terminal() {
+        let now = Instant::now();
+        let up = Link::Up {
+            transport: TransportKind::Quic,
+            round_trip: Duration::from_millis(24),
+            since: now,
+        };
+        let row = |number| Row::Bound {
+            port: Port {
+                number,
+                kind: Kind::Tcp,
+            },
+            open: 1,
+            down: 1024,
+            up: 1024,
+        };
+        let rows = BTreeMap::from([
+            ("dev".to_owned(), row(40017)),
+            ("ssh".to_owned(), row(2222)),
+            ("wireguard".to_owned(), row(51820)),
+        ]);
+        let style = Style {
+            color: false,
+            unicode: true,
+        };
+        for (width, height) in [(0, 1), (0, 2), (12, 2), (12, 3), (12, 4)] {
+            let lines = frame(up, &rows, &cfg(), style, now, (width, height));
+            assert!(lines.len() <= height, "{width}x{height}: {lines:?}");
+            if width > 0 {
+                let wide = lines.iter().find(|line| columns(line) >= width);
+                assert_eq!(wide, None, "{width}x{height}: {lines:?}");
+            }
+        }
+        // The header, then a summary that counts rows and not the blank line between.
+        let lines = frame(up, &rows, &cfg(), style, now, (0, 2));
+        assert_eq!(lines[1], "  … 3 more");
     }
 
     #[test]

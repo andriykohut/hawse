@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_core::client::{DisconnectCause, Event};
-use hawse_core::config::ClientConfig;
+use hawse_core::config::{ClientConfig, Expose};
 use hawse_core::traffic::{Counts, Traffic};
 use hawse_proto::key::PublicKey;
 use tokio::signal::unix::{SignalKind, signal};
@@ -31,7 +31,8 @@ pub struct Shown {
 #[derive(Default)]
 struct State {
     link: Link,
-    answers: BTreeMap<String, Answer>,
+    /// The server's answer to each service's bind, with the settings it was asked for.
+    answers: BTreeMap<String, (Expose, Answer)>,
     /// Each service's open count and its bytes per second over the last sample.
     figures: BTreeMap<String, Counts>,
     /// The totals the last sample read, which the next one's rates count from.
@@ -49,8 +50,21 @@ enum Answer {
 }
 
 impl State {
-    /// Takes in `event`, and returns what to print above the panel for it, if anything.
-    fn apply(&mut self, event: &Event, now: Instant, style: Style) -> Option<String> {
+    /// Takes in `event`, and returns what to print above the panel for it, if anything. `cfg` is
+    /// the config in force, whose settings a bind's answer is recorded against.
+    fn apply(
+        &mut self,
+        event: &Event,
+        now: Instant,
+        style: Style,
+        cfg: &ClientConfig,
+    ) -> Option<String> {
+        let mut answer = |service: &String, answer| {
+            if let Some(expose) = cfg.expose.get(service) {
+                self.answers
+                    .insert(service.clone(), (expose.clone(), answer));
+            }
+        };
         let repeat = terminal::repeats(&mut self.denied, event);
         match event {
             Event::Connected {
@@ -64,19 +78,16 @@ impl State {
                     since: now,
                 };
                 self.outage = None;
+                // A new session binds afresh, and the last one's ports may be gone.
+                self.answers.clear();
             }
             Event::RoundTrip { round_trip: latest } => {
                 if let Link::Up { round_trip, .. } = &mut self.link {
                     *round_trip = *latest;
                 }
             }
-            Event::Bound { service, port } => {
-                self.answers.insert(service.clone(), Answer::Bound(*port));
-            }
-            Event::BindFailed { service, reason } => {
-                self.answers
-                    .insert(service.clone(), Answer::Refused(*reason));
-            }
+            Event::Bound { service, port } => answer(service, Answer::Bound(*port)),
+            Event::BindFailed { service, reason } => answer(service, Answer::Refused(*reason)),
             Event::Denied { .. } if repeat => return None,
             Event::Denied { .. } => {}
             Event::Disconnected { cause, retry_in } => {
@@ -128,10 +139,13 @@ impl State {
         }
     }
 
-    fn rows(&self) -> BTreeMap<String, Row> {
+    /// Each service's row, leaving out a service whose settings in `cfg` differ from those its
+    /// answer was for: a reload has asked again, and the old answer no longer holds.
+    fn rows(&self, cfg: &ClientConfig) -> BTreeMap<String, Row> {
         self.answers
             .iter()
-            .map(|(service, answer)| {
+            .filter(|(service, (expose, _))| cfg.expose.get(*service) == Some(expose))
+            .map(|(service, (_, answer))| {
                 let row = match *answer {
                     Answer::Refused(reason) => Row::Refused(reason),
                     Answer::Bound(port) => {
@@ -180,7 +194,7 @@ pub async fn show(
             state.figures.clear();
         }
         let (width, height) = screen::size();
-        let rows = state.rows();
+        let rows = state.rows(&shown.borrow().cfg);
         let frame = terminal::frame(
             state.link,
             &rows,
@@ -200,7 +214,8 @@ pub async fn show(
             event = events.recv() => {
                 let Some(event) = event else { break };
                 stopped |= matches!(event, Event::Disconnected { retry_in: None, .. });
-                if let Some(line) = state.apply(&event, Instant::now(), style) {
+                let line = state.apply(&event, Instant::now(), style, &shown.borrow().cfg);
+                if let Some(line) = line {
                     screen::print(&line);
                 }
             }
@@ -272,6 +287,44 @@ mod tests {
                 up: 0
             }
         );
+    }
+
+    fn bound(number: u16) -> Event {
+        Event::Bound {
+            service: "web".to_owned(),
+            port: Port {
+                number,
+                kind: Kind::Tcp,
+            },
+        }
+    }
+
+    #[test]
+    fn a_service_a_reload_changed_has_no_row_until_its_new_bind_is_answered() {
+        let mut state = State::default();
+        let before = cfg();
+        let mut after = cfg();
+        after.expose.get_mut("web").unwrap().local = "127.0.0.1:4000".to_owned();
+        state.apply(&bound(8080), Instant::now(), STYLE, &before);
+        assert!(state.rows(&before).contains_key("web"));
+        assert!(!state.rows(&after).contains_key("web"));
+        state.apply(&bound(8081), Instant::now(), STYLE, &after);
+        assert!(state.rows(&after).contains_key("web"));
+    }
+
+    #[test]
+    fn a_new_session_shows_no_answer_from_the_last() {
+        let mut state = State::default();
+        state.apply(&bound(8080), Instant::now(), STYLE, &cfg());
+        let connected = Event::Connected {
+            remote: "203.0.113.7:4433".parse().unwrap(),
+            transport: TransportKind::Quic,
+            name: "laptop".to_owned(),
+            agent: "hawse/0.8.0".to_owned(),
+            round_trip: Duration::from_millis(24),
+        };
+        state.apply(&connected, Instant::now(), STYLE, &cfg());
+        assert!(state.rows(&cfg()).is_empty());
     }
 
     #[tokio::test(start_paused = true)]
