@@ -157,6 +157,7 @@ struct BindCtx<'a> {
     transport: &'a Arc<dyn Transport>,
     tasks: &'a TaskTracker,
     udp_cancel: &'a CancellationToken,
+    traffic: &'a Traffic,
 }
 
 /// One session's services: what it has asked the server to bind, kept in step with `expose`, and
@@ -421,6 +422,7 @@ impl Client {
             transport: &transport,
             tasks: &tasks,
             udp_cancel: &udp_cancel,
+            traffic: &self.traffic,
         };
         tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
         let mut ping = ping_interval();

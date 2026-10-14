@@ -1,8 +1,12 @@
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use common::{client_config, echo_server, expect_bound, server_config, start, start_server};
+use common::{
+    client_config, echo_server, expect_bound, server_config, start, start_server, udp_ask,
+    udp_echo_server, udp_visitor,
+};
 use hawse_core::client::Client;
 use hawse_core::identity::Identity;
 use hawse_core::traffic::{Counts, Traffic};
@@ -97,6 +101,37 @@ async fn a_visitor_local_refuses_is_never_counted_open() {
         .expect("the visitor is let go within 5 s");
     assert!(!traffic.take_moved(), "a refused dial was counted");
     assert_eq!(traffic.snapshot()["dead"], Counts::default());
+
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_udp_visitor_is_counted_open_until_its_service_is_unbound() {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let echo = udp_echo_server().await.to_string();
+    let client = Client::new(
+        client_config(server.addr, server.key, &[("echo", &echo, "any/udp")]),
+        client_id,
+    );
+    let (traffic, expose) = (client.traffic(), client.expose());
+    let mut client = start(client);
+    let port = expect_bound(&mut client.events, "echo").await;
+
+    let visitor = udp_visitor().await;
+    assert_eq!(udp_ask(&visitor, port.number, b"hello").await, b"hello");
+    let open = Counts {
+        open: 1,
+        down: 5,
+        up: 5,
+    };
+    settles(&traffic, "echo", open).await;
+    expose.send_replace(BTreeMap::new());
+    settles(&traffic, "echo", Counts { open: 0, ..open }).await;
 
     client.cancel.cancel();
     server.cancel.cancel();
