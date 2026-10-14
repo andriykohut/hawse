@@ -199,6 +199,25 @@ fn header(link: Link, cfg: &ClientConfig, style: Style, now: Instant) -> Vec<Str
     header
 }
 
+/// Each row's fields as one line in `room` columns, as [`fit`] makes them, but with a bound
+/// row's second field, its local column, dropped from every row when any row is too wide.
+fn fit_rows(rows: Vec<Vec<String>>, room: usize) -> Vec<String> {
+    // The local column says nothing a redraw changes, so it goes before any figure does.
+    let too_wide = room > 0
+        && rows
+            .iter()
+            .any(|fields| fields.iter().map(|field| columns(field)).sum::<usize>() > room);
+    rows.into_iter()
+        .map(|mut fields| {
+            if too_wide && fields.len() > 1 {
+                fields.remove(1);
+            }
+            // The padding of a column with nothing after it.
+            fit(&fields, room).trim_end().to_owned()
+        })
+        .collect()
+}
+
 /// The client's panel: a blank line, a header for the connection, then a row for each service in
 /// `rows` that `cfg` still exposes, in its order. Each line is cut to one column less than `width`, and the
 /// panel folded to `height` lines; a `width` or `height` of 0 is a terminal that does not say.
@@ -241,7 +260,7 @@ pub fn frame(
         .max()
         .unwrap_or(1);
 
-    let mut body = Vec::new();
+    let mut rows_fields = Vec::new();
     for (service, expose) in &cfg.expose {
         let Some(row) = rows.get(service) else {
             continue;
@@ -261,8 +280,7 @@ pub fn frame(
                     Link::Stopped => no,
                     Link::Connecting | Link::Down { .. } => again,
                 };
-                // Every row's local column is as wide, so a narrow terminal drops it from all of
-                // them or none.
+                // Every row's local column is as wide, so the figures after it line up.
                 let pad = locals - expose.local.len();
                 let local = style.dim(&format!("  {}  {}", style.pick("←", "<-"), expose.local));
                 let mut fields = vec![
@@ -286,9 +304,9 @@ pub fn frame(
                 fields
             }
         };
-        // The padding of a column with nothing after it.
-        body.push(fit(&fields, room).trim_end().to_owned());
+        rows_fields.push(fields);
     }
+    let body = fit_rows(rows_fields, room);
 
     // Set off from the command that started the client, as the server's header is.
     let mut lines = vec![String::new(), fit(&header(link, cfg, style, now), room)];
@@ -724,6 +742,36 @@ port = "51820/udp"
         let dim = ["\x1b[2mab\x1b[0m".to_owned(), "cd".to_owned()];
         assert_eq!(columns(&dim[0]), 2);
         assert_eq!(fit(&dim, 4), "\x1b[2mab\x1b[0mcd");
+    }
+
+    #[test]
+    fn a_busy_row_gives_up_the_local_column_before_a_rate() {
+        let now = Instant::now();
+        let up = Link::Up {
+            transport: TransportKind::Quic,
+            round_trip: Duration::from_millis(24),
+            since: now,
+        };
+        let rows = BTreeMap::from([(
+            "dev".to_owned(),
+            Row::Bound {
+                port: Port {
+                    number: 40017,
+                    kind: Kind::Tcp,
+                },
+                open: 2,
+                down: 308 * 1024,
+                up: 1_258_291,
+            },
+        )]);
+        let style = Style {
+            color: false,
+            unicode: true,
+        };
+        let lines = frame(up, &rows, &cfg(), style, now, (80, 0));
+        let row = lines.last().unwrap();
+        assert!(row.ends_with("↑ 1.2M/s"), "{row}");
+        assert!(!row.contains('←'), "{row}");
     }
 
     fn frames(style: Style) -> String {

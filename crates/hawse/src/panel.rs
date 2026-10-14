@@ -156,7 +156,7 @@ impl State {
 /// good.
 pub async fn show(
     mut events: mpsc::Receiver<Event>,
-    shown: watch::Receiver<Shown>,
+    mut shown: watch::Receiver<Shown>,
     style: Style,
     mut draw: impl FnMut(Vec<String>, usize),
 ) -> bool {
@@ -172,9 +172,12 @@ pub async fn show(
     // it is drawn before the next wait.
     loop {
         let latest = Arc::clone(&shown.borrow().traffic);
+        // A new client, which has yet to connect, and whose totals start again.
         if !Arc::ptr_eq(&latest, &traffic) {
             traffic = latest;
+            state.link = Link::Connecting;
             state.counted.clear();
+            state.figures.clear();
         }
         let (width, height) = screen::size();
         let rows = state.rows();
@@ -190,6 +193,10 @@ pub async fn show(
         let counting_down =
             matches!(state.link, Link::Down { retry_at, .. } if retry_at > Instant::now());
         tokio::select! {
+            // First, so a new client is taken in before any event it sends: the client sends
+            // its first event only after the reload that made it.
+            biased;
+            Ok(()) = shown.changed() => {}
             event = events.recv() => {
                 let Some(event) = event else { break };
                 stopped |= matches!(event, Event::Disconnected { retry_in: None, .. });
@@ -265,6 +272,60 @@ mod tests {
                 up: 0
             }
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reload_is_drawn_without_waiting_for_an_event() {
+        let (tx, events) = mpsc::channel(8);
+        let mut two = cfg();
+        let web = two.expose["web"].clone();
+        two.expose.insert("other".to_owned(), web);
+        let (shown, showing) = watch::channel(Shown {
+            cfg: two,
+            traffic: Arc::default(),
+        });
+        let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&frames);
+        let panel = tokio::spawn(show(events, showing, STYLE, move |rows, _| {
+            kept.lock().unwrap().push(rows.join("\n"));
+        }));
+        tx.send(Event::Connected {
+            remote: "203.0.113.7:4433".parse().unwrap(),
+            transport: TransportKind::Quic,
+            name: "laptop".to_owned(),
+            agent: "hawse/0.8.0".to_owned(),
+            round_trip: Duration::from_millis(24),
+        })
+        .await
+        .unwrap();
+        for (service, number) in [("web", 8080), ("other", 8081)] {
+            tx.send(Event::Bound {
+                service: service.to_owned(),
+                port: Port {
+                    number,
+                    kind: Kind::Tcp,
+                },
+            })
+            .await
+            .unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let last = || frames.lock().unwrap().last().cloned().unwrap();
+        assert!(last().contains("other"), "{}", last());
+
+        shown.send_modify(|shown| {
+            shown.cfg.expose.remove("other");
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!last().contains("other"), "{}", last());
+
+        // A reload that reconnects: a new client, which has yet to connect.
+        shown.send_modify(|shown| shown.traffic = Arc::default());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(last().contains("connecting"), "{}", last());
+
+        drop(tx);
+        panel.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
