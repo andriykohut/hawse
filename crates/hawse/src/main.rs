@@ -2,6 +2,7 @@ mod commands;
 mod config_file;
 mod logging;
 mod paths;
+mod screen;
 mod terminal;
 
 use std::io::Write as _;

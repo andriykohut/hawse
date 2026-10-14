@@ -33,7 +33,7 @@ clap_complete.workspace = true
 etcetera.workspace = true
 miette.workspace = true
 notify.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["termios"] }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

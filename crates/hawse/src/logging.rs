@@ -1,6 +1,7 @@
 use std::io::IsTerminal as _;
 
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 use crate::terminal::Style;
 use crate::{ColorChoice, LogFormat};
@@ -52,9 +53,15 @@ pub fn init(
         ColorChoice::Never => false,
         ColorChoice::Auto => tty && std::env::var_os("NO_COLOR").is_none(),
     };
+    // A log line has to land above the client's panel, and only the screen knows where it is.
+    let writer = if terminal {
+        BoxMakeWriter::new(crate::screen::Stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stderr)
+    };
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
         // Left on, a log line that cannot be written is reported with `eprintln!`, which panics
         // when stderr is what failed: whatever was logging dies with its reader, the task that
         // answers SIGTERM included.

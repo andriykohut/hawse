@@ -1,6 +1,5 @@
 //! What a server or a client run by hand prints on a terminal, in place of its log lines.
 
-use std::io::Write as _;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -288,10 +287,10 @@ pub fn note(text: &str, style: Style) -> String {
     format!("  {} {text}", style.pick("↻", "~"))
 }
 
-/// A line that cannot be written is dropped: `eprintln!` would panic on a stderr whose reader has
-/// gone, and take the task that answers SIGTERM with it.
+/// Writes `line` to stderr through [`crate::screen::print`], above the client's panel when it is
+/// up.
 pub fn print(line: &str) {
-    let _ = writeln!(std::io::stderr(), "{line}");
+    crate::screen::print(line);
 }
 
 #[cfg(test)]
