@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::BytesMut;
 use hawse_proto::msg::reset::ABORTED;
 use tokio::io::{
@@ -6,6 +8,7 @@ use tokio::io::{
 use tokio::net::TcpStream;
 
 use crate::error::chain;
+use crate::traffic::Meter;
 use crate::transport::{RecvHalf, SendHalf, reset_code};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -98,12 +101,14 @@ impl Drop for ResetOnDrop {
 /// Ends when both directions have delivered EOF. Any other ending aborts both sides: the stream is
 /// reset, so the peer's read fails on either transport, and the socket is closed with a reset, so
 /// the application behind it does not read a truncated transfer as a whole one. A pump dropped
-/// before it ends counts as any other ending.
+/// before it ends counts as any other ending. `meter` gets each direction's bytes as they are
+/// copied: from the socket as `from_local`, to it as `toward_local`.
 pub async fn pump<S: Edge>(
     socket: S,
     send: SendHalf,
     mut recv: RecvHalf,
     buffer: usize,
+    meter: Arc<Meter>,
 ) -> Result<Stats, PumpError> {
     let mut edge = AbortOnDrop {
         halves: Some(tokio::io::split(socket)),
@@ -111,6 +116,7 @@ pub async fn pump<S: Edge>(
     };
     let (reader, writer) = edge.halves.as_mut().expect("set just above");
 
+    let upward = Arc::clone(&meter);
     let to_stream = async move {
         let mut total = 0u64;
         let mut buf = BytesMut::with_capacity(buffer);
@@ -122,6 +128,7 @@ pub async fn pump<S: Edge>(
                 break;
             }
             total += u64::try_from(n).expect("usize fits u64");
+            upward.from_local(n);
             send.stream()
                 .write_bytes(buf.split().freeze())
                 .await
@@ -141,6 +148,7 @@ pub async fn pump<S: Edge>(
                 break;
             }
             total += u64::try_from(n).expect("usize fits u64");
+            meter.toward_local(n);
             writer
                 .write_all(&buf[..n])
                 .await

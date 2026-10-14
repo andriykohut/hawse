@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use hawse_core::pump::{Edge, PumpError, pump};
+use hawse_core::traffic::{Counts, Traffic};
 use hawse_core::transport::{RecvHalf, SendHalf};
 use hawse_proto::msg::reset;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
@@ -94,6 +95,7 @@ async fn half_close_lets_the_other_direction_finish() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -124,6 +126,7 @@ async fn moves_large_payloads_intact_both_ways() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -245,6 +248,7 @@ async fn abort_resets_the_stream_for_the_peer() {
         send,
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     )
     .await;
     assert!(result.is_err());
@@ -271,6 +275,7 @@ async fn a_transfer_finished_both_ways_leaves_the_socket_alone() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (mut far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -299,6 +304,7 @@ async fn a_stream_the_peer_resets_aborts_the_socket() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (_far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -332,6 +338,7 @@ async fn a_stream_the_peer_stops_aborts_the_socket() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (_far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -369,6 +376,7 @@ async fn a_pump_dropped_mid_transfer_aborts_the_socket() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
     let (_far_rd, mut far_wr) = tokio::io::split(far);
 
@@ -398,6 +406,7 @@ async fn a_tcp_socket_is_reset_when_its_stream_is() {
         SendHalf::Quic(send),
         RecvHalf::Quic(recv),
         16 * 1024,
+        Arc::default(),
     ));
 
     far.write_all(b"x").await.unwrap();
@@ -413,4 +422,40 @@ async fn a_tcp_socket_is_reset_when_its_stream_is() {
     let err = read.expect_err("a reset stream must not close the socket cleanly");
     assert_eq!(err.kind(), io::ErrorKind::ConnectionReset, "{err:?}");
     assert!(pumped.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn a_pump_meters_each_direction_as_it_copies() {
+    let pair = common::quic_pair().await;
+    let (send, recv) = pair.client.open_bi().await.unwrap();
+    let (near, far) = tokio::io::duplex(64 * 1024);
+    let traffic = Traffic::default();
+    let pumped = tokio::spawn(pump(
+        near,
+        SendHalf::Quic(send),
+        RecvHalf::Quic(recv),
+        16 * 1024,
+        traffic.meter("svc"),
+    ));
+    let (mut far_rd, mut far_wr) = tokio::io::split(far);
+
+    far_wr.write_all(b"hello").await.unwrap();
+    far_wr.shutdown().await.unwrap();
+    let (mut peer_send, mut peer_recv) = pair.server.accept_bi().await.unwrap();
+    assert_eq!(peer_recv.read_to_end(64).await.unwrap(), b"hello");
+    peer_send.write_all(b"hey").await.unwrap();
+    peer_send.finish().unwrap();
+    let mut got = Vec::new();
+    far_rd.read_to_end(&mut got).await.unwrap();
+
+    let stats = pumped.await.unwrap().unwrap();
+    assert_eq!((stats.to_stream, stats.to_socket), (5, 3));
+    assert_eq!(
+        traffic.snapshot()["svc"],
+        Counts {
+            open: 0,
+            down: 3,
+            up: 5
+        }
+    );
 }

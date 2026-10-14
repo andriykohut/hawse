@@ -73,7 +73,7 @@ pub async fn serve(
         }
     }
     tracing::debug!(service = target.service, visitor = %header.visitor, "visitor connected");
-    match pump(socket, send, recv, buffer).await {
+    match pump(socket, send, recv, buffer, Arc::default()).await {
         Ok(stats) => tracing::debug!(
             service = target.service,
             up = stats.to_socket,
