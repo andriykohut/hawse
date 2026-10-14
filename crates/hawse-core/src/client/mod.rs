@@ -72,6 +72,10 @@ pub enum Event {
         cause: DisconnectCause,
         retry_in: Option<Duration>,
     },
+    /// How long the last ping took to be answered, about every 15 s while connected.
+    RoundTrip {
+        round_trip: Duration,
+    },
 }
 
 /// `Config` came from an error retrying cannot fix; every other variant is worth retrying.
@@ -231,10 +235,18 @@ async fn send_or_end(
     }
 }
 
-fn ping_interval() -> tokio::time::Interval {
-    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+fn ping_interval(every: Duration) -> tokio::time::Interval {
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping
+}
+
+/// How long the ping `pinged` names took, when `msg` is its answer.
+fn answered(msg: &ServerMessage, pinged: Option<(u64, Instant)>) -> Option<Duration> {
+    match (msg, pinged) {
+        (ServerMessage::Pong { nonce }, Some((sent, at))) if *nonce == sent => Some(at.elapsed()),
+        _ => None,
+    }
 }
 
 async fn serve_stream(
@@ -265,6 +277,7 @@ pub struct Client {
     udp: Arc<udp::Registry>,
     fallback_after: Duration,
     traffic: Arc<Traffic>,
+    ping_every: Duration,
 }
 
 impl Client {
@@ -277,6 +290,7 @@ impl Client {
             udp: Arc::default(),
             fallback_after: FALLBACK_AFTER,
             traffic: Arc::default(),
+            ping_every: PING_EVERY,
         }
     }
 
@@ -285,6 +299,14 @@ impl Client {
     #[must_use]
     pub fn with_fallback_after(mut self, after: Duration) -> Self {
         self.fallback_after = after;
+        self
+    }
+
+    /// Replaces `PING_EVERY`. No config file reaches this: it is here so tests do not wait 15 s
+    /// for a round trip.
+    #[must_use]
+    pub fn with_ping_every(mut self, every: Duration) -> Self {
+        self.ping_every = every;
         self
     }
 
@@ -425,9 +447,10 @@ impl Client {
             traffic: &self.traffic,
         };
         tasks.spawn(udp::demux(Arc::clone(&transport), Arc::clone(&self.udp)));
-        let mut ping = ping_interval();
+        let mut ping = ping_interval(self.ping_every);
         let mut last_heard = tokio::time::Instant::now();
         let mut nonce = 0u64;
+        let mut pinged = None;
         // What a reload left to tell the server, one message a turn.
         let mut pending = VecDeque::new();
 
@@ -447,12 +470,13 @@ impl Client {
                 }
                 _ = ping.tick() => {
                     nonce += 1;
+                    pinged = Some((nonce, Instant::now()));
                     Some(ClientMessage::Ping { nonce })
                 }
                 msg = control.next::<ServerMessage>() => {
                     let Some(msg) = msg else { break Err(ClientError::ControlClosed) };
                     last_heard = tokio::time::Instant::now();
-                    match self.heard(msg, &mut services, remote, &bind_ctx, events) {
+                    match self.heard(msg, &mut services, remote, &bind_ctx, events, pinged) {
                         Ok(reply) => reply,
                         Err(err) => break Err(err),
                     }
@@ -510,6 +534,7 @@ impl Client {
     }
 
     /// The reply a control message calls for, if any. An error is how the session ends.
+    /// `pinged` is the last ping sent and when, which a `Pong` answering it is timed from.
     fn heard(
         &self,
         msg: ServerMessage,
@@ -517,7 +542,11 @@ impl Client {
         remote: SocketAddr,
         ctx: &BindCtx<'_>,
         events: &mpsc::Sender<Event>,
+        pinged: Option<(u64, Instant)>,
     ) -> Result<Option<ClientMessage>, ClientError> {
+        if let Some(round_trip) = answered(&msg, pinged) {
+            emit(events, Event::RoundTrip { round_trip });
+        }
         match msg {
             ServerMessage::Bound {
                 service,
@@ -1099,5 +1128,18 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_answer_to_the_last_ping_is_a_round_trip() {
+        let at = Instant::now();
+        let pong = |nonce| ServerMessage::Pong { nonce };
+        assert!(answered(&pong(3), Some((3, at))).is_some());
+        assert_eq!(answered(&pong(2), Some((3, at))), None);
+        assert_eq!(answered(&pong(3), None), None);
+        assert_eq!(
+            answered(&ServerMessage::Ping { nonce: 3 }, Some((3, at))),
+            None
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use hawse_core::client::{Client, DisconnectCause, Event};
 use hawse_core::config::{ClientConfig, split_host_port};
@@ -49,11 +50,19 @@ pub(crate) fn reason(cause: DisconnectCause) -> String {
     }
 }
 
+/// `duration` in whole milliseconds as a number: a `u128` is written to JSON as a string.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Logs what the client reports, or prints it in the terminal form, and says whether it has
 /// stopped for good. `cfg` is the config in force, which a service's addresses are named from.
 fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
     if let Some(style) = terminal {
-        terminal::print(&terminal::event(&event, cfg, style));
+        // A terminal shows the round trip in its header alone.
+        if !matches!(event, Event::RoundTrip { .. }) {
+            terminal::print(&terminal::event(&event, cfg, style));
+        }
         return matches!(event, Event::Disconnected { retry_in: None, .. });
     }
     let mut stopped = false;
@@ -65,8 +74,7 @@ fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
             agent,
             round_trip,
         } => {
-            // A `u128` is written to JSON as a string.
-            let round_trip_ms = u64::try_from(round_trip.as_millis()).unwrap_or(u64::MAX);
+            let round_trip_ms = millis(round_trip);
             tracing::info!(%remote, %transport, name = %name, server = %agent, round_trip_ms, "connected");
         }
         Event::Bound { service, port } => {
@@ -77,6 +85,9 @@ fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
             tracing::info!("{service}  {host}:{port} <- {local}");
         }
         Event::BindFailed { service, reason } => tracing::warn!("{service}  {reason}"),
+        Event::RoundTrip { round_trip } => {
+            tracing::debug!(round_trip_ms = millis(round_trip), "round trip");
+        }
         Event::Denied { key } => tracing::warn!(
             "not authorized. on the server, add to server.toml:\n[clients.NAME]\nkey = \"{key}\"\nthen wait for the next retry"
         ),

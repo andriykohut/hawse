@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use common::{
-    client_config, echo_server, expect_bound, server_config, start, start_server, udp_ask,
-    udp_echo_server, udp_visitor,
+    client_config, echo_server, expect_bound, next_event, server_config, start, start_server,
+    udp_ask, udp_echo_server, udp_visitor,
 };
-use hawse_core::client::Client;
+use hawse_core::client::{Client, Event};
 use hawse_core::identity::Identity;
 use hawse_core::traffic::{Counts, Traffic};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -133,6 +133,26 @@ async fn a_udp_visitor_is_counted_open_until_its_service_is_unbound() {
     expose.send_replace(BTreeMap::new());
     settles(&traffic, "echo", Counts { open: 0, ..open }).await;
 
+    client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn an_answered_ping_reports_the_round_trip() {
+    let (server_id, client_id) = ids();
+    let server = start_server(
+        &server_config(&[("test", client_id.public_key(), &[])]),
+        &server_id,
+    );
+    let client = Client::new(client_config(server.addr, server.key, &[]), client_id)
+        .with_ping_every(Duration::from_millis(100));
+    let mut client = start(client);
+    loop {
+        if let Event::RoundTrip { round_trip } = next_event(&mut client.events).await {
+            assert!(round_trip < Duration::from_secs(1), "{round_trip:?}");
+            break;
+        }
+    }
     client.cancel.cancel();
     server.cancel.cancel();
 }

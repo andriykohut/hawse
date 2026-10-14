@@ -114,6 +114,9 @@ pub fn event(event: &Event, cfg: &ClientConfig, style: Style) -> String {
                 None => format!("  {no} {reason}; the config cannot be retried"),
             }
         }
+        Event::RoundTrip { .. } => {
+            unreachable!("`report` prints nothing for a round trip")
+        }
     }
 }
 
