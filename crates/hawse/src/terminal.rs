@@ -199,8 +199,8 @@ fn header(link: Link, cfg: &ClientConfig, style: Style, now: Instant) -> Vec<Str
     header
 }
 
-/// The client's panel: a header for the connection, then a row for each service in `rows` that
-/// `cfg` still exposes, in its order. Each line is cut to one column less than `width`, and the
+/// The client's panel: a blank line, a header for the connection, then a row for each service in
+/// `rows` that `cfg` still exposes, in its order. Each line is cut to one column less than `width`, and the
 /// panel folded to `height` lines; a `width` or `height` of 0 is a terminal that does not say.
 pub fn frame(
     link: Link,
@@ -290,10 +290,15 @@ pub fn frame(
         body.push(fit(&fields, room).trim_end().to_owned());
     }
 
-    let mut lines = vec![fit(&header(link, cfg, style, now), room)];
+    // Set off from the command that started the client, as the server's header is.
+    let mut lines = vec![String::new(), fit(&header(link, cfg, style, now), room)];
     if !body.is_empty() {
         lines.push(String::new());
         lines.extend(body);
+    }
+    if height > 0 && lines.len() > height {
+        // The blank line above the header goes before any row does.
+        lines.remove(0);
     }
     if height > 0 && lines.len() > height {
         let kept = height.saturating_sub(1).max(1);
@@ -843,6 +848,7 @@ port = "51820/udp"
             now,
             (0, 0),
         );
-        assert_eq!(lines.len(), 1, "{lines:?}");
+        // A blank line, then the header, with no row under it.
+        assert_eq!(lines.len(), 2, "{lines:?}");
     }
 }

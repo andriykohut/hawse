@@ -3,6 +3,7 @@ source: crates/hawse/src/terminal.rs
 expression: out
 ---
 busy:
+
   hawse client  |  tunnel.example.com:4433  |  QUIC  |  24 ms  |  up 2 h 14 m
 
   * dev        tunnel.example.com:40017      <-  127.0.0.1:3000   2  v 308K/s  ^ 1.2M/s
@@ -10,6 +11,7 @@ busy:
   o wireguard  tunnel.example.com:51820/udp  <-  127.0.0.1:51820  idle
 
 open with nothing moving:
+
   hawse client  |  tunnel.example.com:4433  |  QUIC  |  24 ms  |  up 2 h 14 m
 
   * dev        tunnel.example.com:40017      <-  127.0.0.1:3000   2  v 308K/s  ^ 1.2M/s
@@ -17,6 +19,7 @@ open with nothing moving:
   o wireguard  tunnel.example.com:51820/udp  <-  127.0.0.1:51820  idle
 
 a refused bind:
+
   hawse client  |  tunnel.example.com:4433  |  QUIC  |  24 ms  |  up 2 h 14 m
 
   * dev        tunnel.example.com:40017      <-  127.0.0.1:3000   2  v 308K/s  ^ 1.2M/s
@@ -24,6 +27,7 @@ a refused bind:
   x wireguard  port is not granted to this client
 
 down:
+
   hawse client  |  tunnel.example.com:4433  |  down 3 min  |  retrying in 4 s
 
   ~ dev        tunnel.example.com:40017      <-  127.0.0.1:3000
@@ -31,9 +35,11 @@ down:
   ~ wireguard  tunnel.example.com:51820/udp  <-  127.0.0.1:51820
 
 connecting:
+
   hawse client  |  tunnel.example.com:4433  |  connecting
 
 stopped:
+
   hawse client  |  tunnel.example.com:4433  |  stopped
 
   x dev        tunnel.example.com:40017      <-  127.0.0.1:3000
@@ -41,6 +47,7 @@ stopped:
   x wireguard  tunnel.example.com:51820/udp  <-  127.0.0.1:51820
 
 cut at 60 columns:
+
   hawse client  |  tunnel.example.com:4433  |  QUIC
 
   * dev        tunnel.example.com:40017
