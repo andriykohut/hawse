@@ -59,9 +59,8 @@ fn millis(duration: Duration) -> u64 {
 /// stopped for good. `cfg` is the config in force, which a service's addresses are named from.
 fn report(event: Event, cfg: &ClientConfig, terminal: Option<Style>) -> bool {
     if let Some(style) = terminal {
-        // A terminal shows the round trip in its header alone.
-        if !matches!(event, Event::RoundTrip { .. }) {
-            terminal::print(&terminal::event(&event, cfg, style));
+        if let Some(line) = terminal::event(&event, style) {
+            terminal::print(&line);
         }
         return matches!(event, Event::Disconnected { retry_in: None, .. });
     }

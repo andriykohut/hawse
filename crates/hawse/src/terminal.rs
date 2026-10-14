@@ -1,13 +1,17 @@
 //! What a server or a client run by hand prints on a terminal, in place of its log lines.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use hawse_core::client::Event;
 use hawse_core::config::{ClientConfig, split_host_port};
 use hawse_core::server;
+use hawse_core::transport::TransportKind;
 use hawse_proto::key::PublicKey;
-use hawse_proto::port::{Kind, PortRequest};
+use hawse_proto::msg::BindFailure;
+use hawse_proto::port::{Kind, Port, PortRequest};
+use tokio::time::Instant;
 
 use crate::commands::client::reason;
 
@@ -131,59 +135,193 @@ pub fn fit(fields: &[String], room: usize) -> String {
     line
 }
 
-/// What `event` reads as. The columns are sized from `cfg`, so a row lines up with the ones
-/// before it whatever order the server answers in.
-pub fn event(event: &Event, cfg: &ClientConfig, style: Style) -> String {
-    let (ok, no, again) = (
-        style.pick("✓", "+"),
-        style.pick("✗", "x"),
-        style.pick("↻", "~"),
-    );
-    let dot = style.dim(style.pick("·", "|"));
-    let names = cfg.expose.keys().map(String::len).max().unwrap_or(0);
-    match event {
-        Event::Connected {
+/// Where the client's connection stands, as the panel's header says it.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Link {
+    #[default]
+    Connecting,
+    Up {
+        transport: TransportKind,
+        round_trip: Duration,
+        since: Instant,
+    },
+    Down {
+        since: Instant,
+        retry_at: Instant,
+    },
+    /// Retrying has ended: the config cannot be retried.
+    Stopped,
+}
+
+/// One service's row: the server's answer to its bind, and once bound, its connections open
+/// and its bytes per second each way over the last sample.
+#[derive(Clone, Copy, Debug)]
+pub enum Row {
+    Bound {
+        port: Port,
+        open: u64,
+        down: u64,
+        up: u64,
+    },
+    Refused(BindFailure),
+}
+
+/// The header's fields: who this is, the server, and where the connection stands at `now`.
+fn header(link: Link, cfg: &ClientConfig, style: Style, now: Instant) -> Vec<String> {
+    let dot = || style.dim(style.pick("·", "|"));
+    let mut header = vec![
+        "  hawse client".to_owned(),
+        format!("  {}  {}", dot(), cfg.server),
+    ];
+    match link {
+        Link::Up {
             transport,
             round_trip,
-            ..
+            since,
         } => {
-            let transport = transport.to_string().to_uppercase();
-            format!(
-                "\n  hawse client  {dot}  {}  {dot}  {transport}  {dot}  {}\n",
-                cfg.server,
-                millis(*round_trip)
-            )
+            header.push(format!(
+                "  {}  {}",
+                dot(),
+                transport.to_string().to_uppercase()
+            ));
+            header.push(format!("  {}  {}", dot(), millis(round_trip)));
+            header.push(format!("  {}  up {}", dot(), span(now - since)));
         }
-        Event::Bound { service, port } => {
-            let host = split_host_port(&cfg.server)
-                .map(|(host, _)| host)
-                .unwrap_or_default();
-            let ports = cfg.expose.values().map(|e| port_width(e.port)).max();
-            let width = host.len() + 1 + ports.unwrap_or(0);
-            let local = cfg.expose.get(service).map_or("", |e| e.local.as_str());
-            let from = style.dim(&format!("{}  {local}", style.pick("←", "<-")));
-            format!(
-                "  {ok} {service:names$}  {:width$}  {from}",
-                format!("{host}:{port}")
-            )
+        Link::Down { since, retry_at } if retry_at > now => {
+            let left = retry_at - now;
+            let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+            header.push(format!("  {}  down {}", dot(), span(now - since)));
+            header.push(format!("  {}  retrying in {secs} s", dot()));
         }
-        Event::BindFailed { service, reason } => format!("  {no} {service:names$}  {reason}"),
-        Event::Denied { key } => format!(
+        Link::Connecting | Link::Down { .. } => header.push(format!("  {}  connecting", dot())),
+        Link::Stopped => header.push(format!("  {}  stopped", dot())),
+    }
+    header
+}
+
+/// The client's panel: a header for the connection, then a row for each service in `rows` that
+/// `cfg` still exposes, in its order. Each line is cut to one column less than `width`, and the
+/// panel folded to `height` lines; a `width` or `height` of 0 is a terminal that does not say.
+pub fn frame(
+    link: Link,
+    rows: &BTreeMap<String, Row>,
+    cfg: &ClientConfig,
+    style: Style,
+    now: Instant,
+    (width, height): (usize, usize),
+) -> Vec<String> {
+    let room = width.saturating_sub(1);
+    let (no, again) = (style.pick("✗", "x"), style.pick("↻", "~"));
+    let (moving, idle) = (style.pick("●", "*"), style.pick("○", "o"));
+    let (toward, from) = (style.pick("↓", "v"), style.pick("↑", "^"));
+    let host = split_host_port(&cfg.server)
+        .map(|(host, _)| host)
+        .unwrap_or_default();
+    let names = cfg.expose.keys().map(String::len).max().unwrap_or(0);
+    let public = host.len()
+        + 1
+        + cfg
+            .expose
+            .values()
+            .map(|e| port_width(e.port))
+            .max()
+            .unwrap_or(0);
+    let locals = cfg
+        .expose
+        .values()
+        .map(|e| e.local.len())
+        .max()
+        .unwrap_or(0);
+    let counts = rows
+        .values()
+        .filter_map(|row| match row {
+            Row::Bound { open, .. } => Some(open.to_string().len()),
+            Row::Refused(_) => None,
+        })
+        .max()
+        .unwrap_or(1);
+
+    let mut body = Vec::new();
+    for (service, expose) in &cfg.expose {
+        let Some(row) = rows.get(service) else {
+            continue;
+        };
+        let fields = match *row {
+            Row::Refused(reason) => vec![format!("  {no} {service:names$}  {reason}")],
+            Row::Bound {
+                port,
+                open,
+                down,
+                up,
+            } => {
+                let moved = down > 0 || up > 0;
+                let mark = match link {
+                    Link::Up { .. } if moved => moving,
+                    Link::Up { .. } => idle,
+                    Link::Stopped => no,
+                    Link::Connecting | Link::Down { .. } => again,
+                };
+                // Every row's local column is as wide, so a narrow terminal drops it from all of
+                // them or none.
+                let pad = locals - expose.local.len();
+                let local = style.dim(&format!("  {}  {}", style.pick("←", "<-"), expose.local));
+                let mut fields = vec![
+                    format!(
+                        "  {mark} {service:names$}  {:public$}",
+                        format!("{host}:{port}")
+                    ),
+                    format!("{local}{:pad$}", ""),
+                ];
+                if matches!(link, Link::Up { .. }) {
+                    if open == 0 && !moved {
+                        fields.push(format!("  {}", style.dim("idle")));
+                    } else {
+                        fields.push(format!("  {open:>counts$}"));
+                        if moved {
+                            fields.push(format!("  {toward} {:>6}", rate(down)));
+                            fields.push(format!("  {from} {:>6}", rate(up)));
+                        }
+                    }
+                }
+                fields
+            }
+        };
+        // The padding of a column with nothing after it.
+        body.push(fit(&fields, room).trim_end().to_owned());
+    }
+
+    let mut lines = vec![fit(&header(link, cfg, style, now), room)];
+    if !body.is_empty() {
+        lines.push(String::new());
+        lines.extend(body);
+    }
+    if height > 0 && lines.len() > height {
+        let kept = height.saturating_sub(1).max(1);
+        let more = lines.len() - kept;
+        lines.truncate(kept);
+        lines.push(format!("  {} {more} more", style.pick("…", "...")));
+    }
+    lines
+}
+
+/// The line to print above the panel for `event`, or `None` for one that only changes the panel.
+pub fn event(event: &Event, style: Style) -> Option<String> {
+    let (no, again) = (style.pick("✗", "x"), style.pick("↻", "~"));
+    match event {
+        Event::Denied { key } => Some(format!(
             "  {no} not authorized. on the server, add to server.toml:\n\n      [clients.NAME]\n      key = \"{key}\"\n\n    then wait for the next retry"
-        ),
+        )),
         Event::Disconnected { cause, retry_in } => {
             let reason = reason(cause.clone());
-            match retry_in {
-                Some(wait) => {
-                    let retry = format!("retrying in {:.1} s", wait.as_secs_f64());
-                    format!("  {again} {reason} {dot} {}", style.dim(&retry))
-                }
+            Some(match retry_in {
+                Some(_) => format!("  {again} {reason}"),
                 None => format!("  {no} {reason}; the config cannot be retried"),
-            }
+            })
         }
-        Event::RoundTrip { .. } => {
-            unreachable!("`report` prints nothing for a round trip")
-        }
+        Event::Connected { .. }
+        | Event::Bound { .. }
+        | Event::BindFailed { .. }
+        | Event::RoundTrip { .. } => None,
     }
 }
 
@@ -300,12 +438,13 @@ mod tests {
     use hawse_core::transport::TransportKind;
     use hawse_proto::msg::BindFailure;
     use hawse_proto::port::Port;
+    use tokio::time::Instant;
 
     use super::*;
     use crate::config_file::parse;
 
-    fn session(style: Style) -> String {
-        let cfg: ClientConfig = parse(
+    fn cfg() -> ClientConfig {
+        parse(
             std::path::Path::new("client.toml"),
             r#"
 server = "tunnel.example.com:4433"
@@ -323,7 +462,11 @@ local = "127.0.0.1:51820"
 port = "51820/udp"
 "#,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn session(style: Style) -> String {
+        let cfg = cfg();
         let bound = |service: &str, number, kind| Event::Bound {
             service: service.to_owned(),
             port: Port { number, kind },
@@ -354,13 +497,13 @@ port = "51820/udp"
                 retry_in: None,
             },
         ];
-        let mut out: Vec<String> = events.iter().map(|e| event(e, &cfg, style)).collect();
+        let mut out: Vec<String> = events.iter().filter_map(|e| event(e, style)).collect();
         out.push(note("config reloaded", style));
         out.join("\n")
     }
 
     #[test]
-    fn a_session_reads_as_rows_under_a_header() {
+    fn what_scrolls_above_the_panel() {
         insta::assert_snapshot!(session(Style {
             color: false,
             unicode: true
@@ -368,7 +511,7 @@ port = "51820/udp"
     }
 
     #[test]
-    fn a_session_without_unicode_keeps_to_ascii() {
+    fn what_scrolls_above_the_panel_keeps_to_ascii() {
         let out = session(Style {
             color: false,
             unicode: false,
@@ -513,10 +656,11 @@ port = "51820/udp"
 
     #[test]
     fn colour_only_dims() {
-        let out = session(Style {
+        let style = Style {
             color: true,
             unicode: true,
-        });
+        };
+        let out = format!("{}\n{}", session(style), frames(style));
         let plain = out.replace("\x1b[2m", "").replace("\x1b[0m", "");
         assert!(out.len() > plain.len(), "nothing was dimmed");
         assert!(
@@ -575,5 +719,130 @@ port = "51820/udp"
         let dim = ["\x1b[2mab\x1b[0m".to_owned(), "cd".to_owned()];
         assert_eq!(columns(&dim[0]), 2);
         assert_eq!(fit(&dim, 4), "\x1b[2mab\x1b[0mcd");
+    }
+
+    fn frames(style: Style) -> String {
+        let cfg = cfg();
+        let now = Instant::now();
+        let up = Link::Up {
+            transport: TransportKind::Quic,
+            round_trip: Duration::from_millis(24),
+            since: now - Duration::from_secs(2 * 3600 + 14 * 60),
+        };
+        let port = |number, kind| Port { number, kind };
+        let bound = |number, kind, open, down, up| Row::Bound {
+            port: port(number, kind),
+            open,
+            down,
+            up,
+        };
+        let busy = BTreeMap::from([
+            (
+                "ssh".to_owned(),
+                bound(2222, Kind::Tcp, 1, 2 * 1024, 9 * 1024),
+            ),
+            (
+                "dev".to_owned(),
+                bound(40017, Kind::Tcp, 2, 308 * 1024, 1_258_291),
+            ),
+            ("wireguard".to_owned(), bound(51820, Kind::Udp, 0, 0, 0)),
+        ]);
+        let mut quiet = busy.clone();
+        quiet.insert("ssh".to_owned(), bound(2222, Kind::Tcp, 1, 0, 0));
+        let mut refused = busy.clone();
+        refused.insert(
+            "wireguard".to_owned(),
+            Row::Refused(BindFailure::NotGranted),
+        );
+        let down = Link::Down {
+            since: now - Duration::from_secs(180),
+            retry_at: now + Duration::from_millis(3200),
+        };
+        let none = BTreeMap::new();
+        let shown = [
+            ("busy", frame(up, &busy, &cfg, style, now, (0, 0))),
+            (
+                "open with nothing moving",
+                frame(up, &quiet, &cfg, style, now, (0, 0)),
+            ),
+            (
+                "a refused bind",
+                frame(up, &refused, &cfg, style, now, (0, 0)),
+            ),
+            ("down", frame(down, &busy, &cfg, style, now, (0, 0))),
+            (
+                "connecting",
+                frame(Link::Connecting, &none, &cfg, style, now, (0, 0)),
+            ),
+            (
+                "stopped",
+                frame(Link::Stopped, &busy, &cfg, style, now, (0, 0)),
+            ),
+            (
+                "cut at 60 columns",
+                frame(up, &busy, &cfg, style, now, (61, 0)),
+            ),
+            (
+                "folded to 4 lines",
+                frame(up, &busy, &cfg, style, now, (0, 4)),
+            ),
+        ];
+        shown
+            .iter()
+            .map(|(name, lines)| format!("{name}:\n{}", lines.join("\n")))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    #[test]
+    fn a_panel_reads_as_a_header_over_a_row_per_service() {
+        insta::assert_snapshot!(frames(Style {
+            color: false,
+            unicode: true
+        }));
+    }
+
+    #[test]
+    fn a_panel_without_unicode_keeps_to_ascii() {
+        let out = frames(Style {
+            color: false,
+            unicode: false,
+        });
+        assert!(out.is_ascii(), "{out}");
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn a_service_the_config_no_longer_has_has_no_row() {
+        let rows = BTreeMap::from([(
+            "gone".to_owned(),
+            Row::Bound {
+                port: Port {
+                    number: 9,
+                    kind: Kind::Tcp,
+                },
+                open: 1,
+                down: 0,
+                up: 0,
+            },
+        )]);
+        let now = Instant::now();
+        let up = Link::Up {
+            transport: TransportKind::Tcp,
+            round_trip: Duration::from_millis(5),
+            since: now,
+        };
+        let lines = frame(
+            up,
+            &rows,
+            &cfg(),
+            Style {
+                color: false,
+                unicode: true,
+            },
+            now,
+            (0, 0),
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
     }
 }
