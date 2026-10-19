@@ -648,6 +648,7 @@ dependencies = [
  "insta",
  "miette",
  "notify",
+ "owo-colors",
  "rustix",
  "serde",
  "tempfile",

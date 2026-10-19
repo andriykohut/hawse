@@ -256,6 +256,7 @@ mod tests {
     const STYLE: Style = Style {
         color: false,
         unicode: true,
+        accent: None,
     };
 
     fn cfg() -> ClientConfig {
