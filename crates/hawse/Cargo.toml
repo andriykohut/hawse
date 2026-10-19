@@ -36,6 +36,7 @@ notify.workspace = true
 owo-colors.workspace = true
 rustix = { workspace = true, features = ["termios"] }
 serde.workspace = true
+strsim.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
