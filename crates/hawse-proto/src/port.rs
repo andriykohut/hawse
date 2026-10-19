@@ -56,7 +56,7 @@ pub enum ParsePortError {
     Empty,
     #[error("`{0}` is not a port number between 1 and 65535")]
     Number(String),
-    #[error("unknown protocol `{0}`, expected tcp or udp")]
+    #[error("unknown protocol `{0}`, expected `tcp` or `udp`")]
     Protocol(String),
     #[error("range {0}-{1} runs backwards")]
     Reversed(u16, u16),
