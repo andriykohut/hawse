@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use clap::builder::styling::{self, Ansi256Color, Color, RgbColor};
 use hawse_core::client::Event;
 use hawse_core::config::{ClientConfig, split_host_port};
 use hawse_core::server;
@@ -11,6 +12,7 @@ use hawse_core::transport::TransportKind;
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::BindFailure;
 use hawse_proto::port::{Kind, Port, PortRequest};
+use miette::{GraphicalTheme, ThemeCharacters, ThemeStyles};
 use tokio::time::Instant;
 use unicode_width::UnicodeWidthChar as _;
 
@@ -20,11 +22,14 @@ use crate::commands::client::reason;
 pub struct Style {
     pub color: bool,
     pub unicode: bool,
+    /// The colour of the mark as the terminal can show it, `None` without colour or where it
+    /// cannot.
+    pub accent: Option<Color>,
 }
 
 impl Style {
     /// Unicode marks where the locale says the terminal reads UTF-8, which the first of these
-    /// that is set decides.
+    /// that is set decides, and with `color` the accent [`accent`] finds.
     pub fn detect(color: bool) -> Self {
         let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
             .into_iter()
@@ -34,6 +39,39 @@ impl Style {
         Self {
             color,
             unicode: locale.contains("utf-8") || locale.contains("utf8"),
+            accent: accent().filter(|_| color),
+        }
+    }
+
+    /// The theme a report is drawn in: its mark red, what it points at in the accent and bold,
+    /// its help dimmed, and the file it names underlined.
+    pub fn theme(self) -> GraphicalTheme {
+        let characters = if self.unicode {
+            ThemeCharacters::unicode()
+        } else {
+            ThemeCharacters::ascii()
+        };
+        if !self.color {
+            return GraphicalTheme {
+                characters,
+                styles: ThemeStyles::none(),
+            };
+        }
+        let plain = owo_colors::Style::new();
+        let pointed = match self.accent {
+            Some(Color::Rgb(RgbColor(r, g, b))) => plain.truecolor(r, g, b),
+            Some(Color::Ansi256(Ansi256Color(n))) => plain.color(owo_colors::XtermColors::from(n)),
+            Some(Color::Ansi(_)) | None => plain,
+        };
+        GraphicalTheme {
+            characters,
+            styles: ThemeStyles {
+                advice: plain.dimmed(),
+                help: plain.dimmed(),
+                link: plain.underline(),
+                highlights: vec![pointed.bold()],
+                ..ThemeStyles::ansi()
+            },
         }
     }
 
@@ -47,6 +85,42 @@ impl Style {
         } else {
             text.to_owned()
         }
+    }
+
+    fn red(self, text: &str) -> String {
+        if self.color {
+            format!("\x1b[31m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    }
+
+    fn accent(self, text: &str) -> String {
+        match self.accent {
+            Some(color) => {
+                let style = styling::Style::new().fg_color(Some(color));
+                format!("{style}{text}{style:#}")
+            }
+            None => text.to_owned(),
+        }
+    }
+}
+
+/// The colour of the mark, `#e8632b`, where the terminal says it shows 24-bit colour, the nearest
+/// of the 256 where it says it has those, and `None` where it has only the basic 16, none of
+/// them orange.
+pub fn accent() -> Option<Color> {
+    let var = |name| std::env::var(name).unwrap_or_default();
+    accent_for(&var("COLORTERM"), &var("TERM"))
+}
+
+fn accent_for(colorterm: &str, term: &str) -> Option<Color> {
+    if colorterm == "truecolor" || colorterm == "24bit" {
+        Some(Color::Rgb(RgbColor(0xe8, 0x63, 0x2b)))
+    } else if term.contains("256color") {
+        Some(Color::Ansi256(Ansi256Color(166)))
+    } else {
+        None
     }
 }
 
@@ -103,8 +177,13 @@ pub fn span(elapsed: Duration) -> String {
 }
 
 /// How many columns `text` takes on a terminal, a wide character two of them, leaving out the
-/// escapes `Style::dim` adds.
+/// escapes a [`Style`] adds.
 pub fn columns(text: &str) -> usize {
+    plain(text).chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+/// `text` without the escapes a [`Style`] adds.
+fn plain(text: &str) -> String {
     let mut escape = false;
     text.chars()
         .filter(|&c| {
@@ -116,12 +195,11 @@ pub fn columns(text: &str) -> usize {
                 !escape
             }
         })
-        .map(|c| c.width().unwrap_or(0))
-        .sum()
+        .collect()
 }
 
 /// `fields` joined, dropping whole fields from the right until the line fits in `room` columns,
-/// and cutting the first by characters when it does not fit alone, its dimming dropped with the
+/// and cutting the first by characters when it does not fit alone, its colour dropped with the
 /// cut. A `room` of 0 is a terminal that does not say how wide it is, and cuts nothing.
 pub fn fit(fields: &[String], room: usize) -> String {
     let mut line = String::new();
@@ -132,9 +210,8 @@ pub fn fit(fields: &[String], room: usize) -> String {
         line.push_str(field);
     }
     if room > 0 && columns(&line) > room {
-        let plain: String = line.replace("\x1b[2m", "").replace("\x1b[0m", "");
         let mut taken = 0;
-        return plain
+        return plain(&line)
             .chars()
             .take_while(|c| {
                 taken += c.width().unwrap_or(0);
@@ -240,8 +317,10 @@ pub fn frame(
     (width, height): (usize, usize),
 ) -> Vec<String> {
     let room = width.saturating_sub(1);
-    let (no, again) = (style.pick("✗", "x"), style.pick("↻", "~"));
-    let (moving, idle) = (style.pick("●", "*"), style.pick("○", "o"));
+    let no = style.red(style.pick("✗", "x"));
+    let again = style.accent(style.pick("↻", "~"));
+    let moving = style.accent(style.pick("●", "*"));
+    let idle = style.accent(style.pick("○", "o"));
     let (toward, from) = (style.pick("↓", "v"), style.pick("↑", "^"));
     let host = split_host_port(&cfg.server)
         .map(|(host, _)| host)
@@ -285,10 +364,10 @@ pub fn frame(
             } => {
                 let moved = down > 0 || up > 0;
                 let mark = match link {
-                    Link::Up { .. } if moved => moving,
-                    Link::Up { .. } => idle,
-                    Link::Stopped => no,
-                    Link::Connecting | Link::Down { .. } => again,
+                    Link::Up { .. } if moved => &moving,
+                    Link::Up { .. } => &idle,
+                    Link::Stopped => &no,
+                    Link::Connecting | Link::Down { .. } => &again,
                 };
                 // Every row's local column is as wide, so the figures after it line up.
                 let pad = locals - expose.local.len();
@@ -304,10 +383,12 @@ pub fn frame(
                     if open == 0 && !moved {
                         fields.push(format!("  {}", style.dim("idle")));
                     } else {
-                        fields.push(format!("  {open:>counts$}"));
+                        fields.push(format!("  {}", style.accent(&format!("{open:>counts$}"))));
                         if moved {
-                            fields.push(format!("  {toward} {:>6}", rate(down)));
-                            fields.push(format!("  {from} {:>6}", rate(up)));
+                            let down = style.accent(&format!("{toward} {:>6}", rate(down)));
+                            let up = style.accent(&format!("{from} {:>6}", rate(up)));
+                            fields.push(format!("  {down}"));
+                            fields.push(format!("  {up}"));
                         }
                     }
                 }
@@ -343,7 +424,8 @@ pub fn frame(
 
 /// The line to print above the panel for `event`, or `None` for one that only changes the panel.
 pub fn event(event: &Event, style: Style) -> Option<String> {
-    let (no, again) = (style.pick("✗", "x"), style.pick("↻", "~"));
+    let no = style.red(style.pick("✗", "x"));
+    let again = style.accent(style.pick("↻", "~"));
     match event {
         Event::Denied { key } => Some(format!(
             "  {no} not authorized. on the server, add to server.toml:\n\n      [clients.NAME]\n      key = \"{key}\"\n\n    then wait for the next retry"
@@ -403,9 +485,9 @@ pub fn server_header(
 pub fn served(event: &server::Event, names: usize, style: Style) -> String {
     use server::Event;
     let (ok, no, again) = (
-        style.pick("✓", "+"),
-        style.pick("✗", "x"),
-        style.pick("↻", "~"),
+        style.accent(style.pick("✓", "+")),
+        style.red(style.pick("✗", "x")),
+        style.accent(style.pick("↻", "~")),
     );
     match event {
         Event::Connected {
@@ -459,7 +541,7 @@ pub fn knocks_again(shown: &mut Option<PublicKey>, event: &server::Event) -> boo
 
 /// Something that happened to the client which is not the server's doing, a reload for one.
 pub fn note(text: &str, style: Style) -> String {
-    format!("  {} {text}", style.pick("↻", "~"))
+    format!("  {} {text}", style.accent(style.pick("↻", "~")))
 }
 
 /// Writes `line` to stderr through [`crate::screen::print`], above the client's panel when it is
@@ -543,7 +625,8 @@ port = "51820/udp"
     fn what_scrolls_above_the_panel() {
         insta::assert_snapshot!(session(Style {
             color: false,
-            unicode: true
+            unicode: true,
+            accent: None,
         }));
     }
 
@@ -552,6 +635,7 @@ port = "51820/udp"
         let out = session(Style {
             color: false,
             unicode: false,
+            accent: None,
         });
         assert!(out.is_ascii(), "{out}");
         insta::assert_snapshot!(out);
@@ -646,7 +730,8 @@ port = "51820/udp"
     fn a_server_reads_as_rows_under_a_header() {
         insta::assert_snapshot!(server_session(Style {
             color: false,
-            unicode: true
+            unicode: true,
+            accent: None,
         }));
     }
 
@@ -655,6 +740,7 @@ port = "51820/udp"
         let out = server_session(Style {
             color: false,
             unicode: false,
+            accent: None,
         });
         assert!(out.is_ascii(), "{out}");
         insta::assert_snapshot!(out);
@@ -692,18 +778,39 @@ port = "51820/udp"
     }
 
     #[test]
-    fn colour_only_dims() {
-        let style = Style {
+    fn colour_only_adds_escapes() {
+        let render = |style| {
+            format!(
+                "{}\n{}\n{}",
+                session(style),
+                server_session(style),
+                frames(style)
+            )
+        };
+        let out = render(Style {
             color: true,
             unicode: true,
-        };
-        let out = format!("{}\n{}", session(style), frames(style));
-        let plain = out.replace("\x1b[2m", "").replace("\x1b[0m", "");
-        assert!(out.len() > plain.len(), "nothing was dimmed");
-        assert!(
-            !plain.contains('\x1b'),
-            "an escape other than dim: {plain:?}"
-        );
+            accent: accent_for("truecolor", ""),
+        });
+        let uncoloured = render(Style {
+            color: false,
+            unicode: true,
+            accent: None,
+        });
+        assert_eq!(plain(&out), uncoloured);
+        assert!(out.contains("\x1b[38;2;232;99;43m"), "no accent: {out:?}");
+    }
+
+    #[test]
+    fn the_accent_is_what_the_terminal_says_it_shows() {
+        let orange = Some(Color::Rgb(RgbColor(232, 99, 43)));
+        assert_eq!(accent_for("truecolor", "xterm-256color"), orange);
+        assert_eq!(accent_for("24bit", "xterm"), orange);
+        let nearest = Some(Color::Ansi256(Ansi256Color(166)));
+        assert_eq!(accent_for("", "xterm-256color"), nearest);
+        assert_eq!(accent_for("", "tmux-256color"), nearest);
+        assert_eq!(accent_for("", "xterm"), None);
+        assert_eq!(accent_for("", "dumb"), None);
     }
 
     #[test]
@@ -791,6 +898,7 @@ port = "51820/udp"
         let style = Style {
             color: false,
             unicode: true,
+            accent: None,
         };
         for (width, height) in [(0, 1), (0, 2), (12, 2), (12, 3), (12, 4)] {
             let lines = frame(up, &rows, &cfg(), style, now, (width, height));
@@ -828,6 +936,7 @@ port = "51820/udp"
         let style = Style {
             color: false,
             unicode: true,
+            accent: None,
         };
         let lines = frame(up, &rows, &cfg(), style, now, (80, 0));
         let row = lines.last().unwrap();
@@ -912,7 +1021,8 @@ port = "51820/udp"
     fn a_panel_reads_as_a_header_over_a_row_per_service() {
         insta::assert_snapshot!(frames(Style {
             color: false,
-            unicode: true
+            unicode: true,
+            accent: None,
         }));
     }
 
@@ -921,6 +1031,7 @@ port = "51820/udp"
         let out = frames(Style {
             color: false,
             unicode: false,
+            accent: None,
         });
         assert!(out.is_ascii(), "{out}");
         insta::assert_snapshot!(out);
@@ -953,6 +1064,7 @@ port = "51820/udp"
             Style {
                 color: false,
                 unicode: true,
+                accent: None,
             },
             now,
             (0, 0),

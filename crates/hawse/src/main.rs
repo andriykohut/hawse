@@ -6,12 +6,13 @@ mod paths;
 mod screen;
 mod terminal;
 
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgAction, CommandFactory as _, Parser, Subcommand, ValueEnum};
+use clap::builder::styling::{self, Styles};
+use clap::{ArgAction, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
 use hawse_proto::key::PublicKey;
 use miette::IntoDiagnostic as _;
 
@@ -109,12 +110,39 @@ pub enum ColorChoice {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let mut command = Cli::command()
+        .styles(styles())
+        .color(match color_arg(&args) {
+            ColorChoice::Auto => clap::ColorChoice::Auto,
+            ColorChoice::Always => clap::ColorChoice::Always,
+            ColorChoice::Never => clap::ColorChoice::Never,
+        });
+    let cli = Cli::from_arg_matches(&command.get_matches_mut())
+        .unwrap_or_else(|err| err.format(&mut command).exit());
+    let color = match cli.color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => {
+            std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+        }
+    };
+    let style = terminal::Style::detect(color);
+    miette::set_hook(Box::new(move |_| {
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .graphical_theme(style.theme())
+                .build(),
+        )
+    }))
+    .expect("the hook is set before any report is made");
     let terminal = logging::init(
         cli.verbose,
         cli.quiet,
         cli.log,
-        cli.color,
+        style,
         matches!(cli.command, Command::Client { .. } | Command::Server { .. }),
     );
     match run(cli, terminal) {
@@ -131,6 +159,37 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// clap's styles, with its headings in the accent where the terminal has one.
+fn styles() -> Styles {
+    match terminal::accent() {
+        Some(accent) => {
+            let heading = styling::Style::new().fg_color(Some(accent)).bold();
+            Styles::styled().header(heading).usage(heading)
+        }
+        None => Styles::styled(),
+    }
+}
+
+/// The last `--color` in `args` before any `--`, or `auto` without one. It is read ahead of clap
+/// because clap prints `--help` and a usage error while it parses, before `Cli` holds the choice.
+fn color_arg(args: &[String]) -> ColorChoice {
+    let mut choice = ColorChoice::Auto;
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        let value = match arg.strip_prefix("--color") {
+            Some("") => args.get(i + 1).map(String::as_str),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        };
+        if let Some(value) = value.and_then(|value| ColorChoice::from_str(value, false).ok()) {
+            choice = value;
+        }
+    }
+    choice
 }
 
 fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> {
@@ -167,4 +226,25 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_last_color_flag_decides() {
+        let args = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let choice = |line| format!("{:?}", color_arg(&args(line)));
+        assert_eq!(choice("hawse --help"), "Auto");
+        assert_eq!(choice("hawse --color never --help"), "Never");
+        assert_eq!(choice("hawse client --help --color=always"), "Always");
+        assert_eq!(choice("hawse --color never --color=always"), "Always");
+        assert_eq!(choice("hawse --colour never"), "Auto");
+        assert_eq!(choice("hawse --color"), "Auto");
+        assert_eq!(
+            choice("hawse --color never check -- --color=always"),
+            "Never"
+        );
+    }
 }

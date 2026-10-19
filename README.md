@@ -6,8 +6,8 @@
 </h1>
 
 [![CI](https://github.com/andriykohut/hawse/actions/workflows/ci.yml/badge.svg)](https://github.com/andriykohut/hawse/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/hawse.svg)](https://crates.io/crates/hawse)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/hawse.svg?color=e8632b)](https://crates.io/crates/hawse)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-e8632b.svg)](#license)
 
 hawse publishes TCP and UDP services on a server's ports. The client opens one
 outbound QUIC connection to the server, so the network holding the services

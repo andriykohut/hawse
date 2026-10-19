@@ -3,8 +3,8 @@ use std::io::IsTerminal as _;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
+use crate::LogFormat;
 use crate::terminal::Style;
-use crate::{ColorChoice, LogFormat};
 
 pub fn level(verbose: u8, quiet: bool) -> &'static str {
     match (quiet, verbose) {
@@ -22,7 +22,7 @@ pub fn init(
     verbose: u8,
     quiet: bool,
     format: LogFormat,
-    color: ColorChoice,
+    style: Style,
     form: bool,
 ) -> Option<Style> {
     let tty = std::io::stderr().is_terminal();
@@ -48,11 +48,6 @@ pub fn init(
         LogFormat::Pretty => false,
         LogFormat::Auto => !tty,
     };
-    let ansi = match color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => tty && std::env::var_os("NO_COLOR").is_none(),
-    };
     // A log line has to land above the client's panel, and only the screen knows where it is.
     let writer = if terminal {
         BoxMakeWriter::new(crate::screen::Stderr)
@@ -70,9 +65,9 @@ pub fn init(
     if json {
         builder.json().init();
     } else {
-        builder.with_ansi(ansi).compact().init();
+        builder.with_ansi(style.color).compact().init();
     }
-    terminal.then(|| Style::detect(ansi))
+    terminal.then_some(style)
 }
 
 #[cfg(test)]
