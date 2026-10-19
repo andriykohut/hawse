@@ -17,3 +17,7 @@ through each service and their rates change, and the server prints a header when
 it starts and a row for each client and service, with warnings and errors logged
 beside them. `--log pretty`, `-v`, `-q` and `HAWSE_LOG` each bring the log lines
 back.
+
+In the client's rows, the public address of a TCP service is a link on a
+terminal that supports them: `https://` when the service's local port is 443 or
+8443, `http://` otherwise, and none for local port 22.

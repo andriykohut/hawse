@@ -25,6 +25,8 @@ pub struct Style {
     /// The colour of the mark as the terminal can show it, `None` without colour or where it
     /// cannot.
     pub accent: Option<Color>,
+    /// Whether a TCP service's public address is a link a terminal can open.
+    pub links: bool,
 }
 
 impl Style {
@@ -40,6 +42,7 @@ impl Style {
             color,
             unicode: locale.contains("utf-8") || locale.contains("utf8"),
             accent: accent().filter(|_| color),
+            links: true,
         }
     }
 
@@ -95,6 +98,15 @@ impl Style {
         }
     }
 
+    /// `text` as a link to `url` where links are on. A terminal that does not know the escape
+    /// ignores it and shows the text alone.
+    fn link(self, url: Option<String>, text: &str) -> String {
+        match url {
+            Some(url) if self.links => format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"),
+            _ => text.to_owned(),
+        }
+    }
+
     fn accent(self, text: &str) -> String {
         match self.accent {
             Some(color) => {
@@ -122,6 +134,24 @@ fn accent_for(colorterm: &str, term: &str) -> Option<Color> {
     } else {
         None
     }
+}
+
+/// The URL a browser opens a service public at `host` and `port` with: `https` when its `local`
+/// port is 443 or 8443, `http` otherwise, and `None` for a local port of 22, which a browser
+/// cannot open, or a UDP port.
+fn url(host: &str, port: Port, local: &str) -> Option<String> {
+    let scheme = match split_host_port(local).and_then(|(_, port)| port) {
+        _ if port.kind == Kind::Udp => return None,
+        Some(22) => return None,
+        Some(443 | 8443) => "https",
+        _ => "http",
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    Some(format!("{scheme}://{host}:{}", port.number))
 }
 
 /// The widest a service's public port can come out, known before the server has answered.
@@ -182,25 +212,29 @@ pub fn columns(text: &str) -> usize {
     plain(text).chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
-/// `text` without the escapes a [`Style`] adds.
+/// `text` without the escapes a [`Style`] adds: colours, `ESC [ … m`, and links,
+/// `ESC ] … ESC \`.
 fn plain(text: &str) -> String {
-    let mut escape = false;
-    text.chars()
-        .filter(|&c| {
-            if escape {
-                escape = c != 'm';
-                false
-            } else {
-                escape = c == '\x1b';
-                !escape
-            }
-        })
-        .collect()
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some(']') {
+            chars.by_ref().find(|&c| c == '\x1b');
+            chars.next();
+        } else {
+            chars.by_ref().find(|&c| c == 'm');
+        }
+    }
+    out
 }
 
 /// `fields` joined, dropping whole fields from the right until the line fits in `room` columns,
-/// and cutting the first by characters when it does not fit alone, its colour dropped with the
-/// cut. A `room` of 0 is a terminal that does not say how wide it is, and cuts nothing.
+/// and cutting the first by characters when it does not fit alone, its colour and link dropped
+/// with the cut. A `room` of 0 is a terminal that does not say how wide it is, and cuts nothing.
 pub fn fit(fields: &[String], room: usize) -> String {
     let mut line = String::new();
     for field in fields {
@@ -372,11 +406,11 @@ pub fn frame(
                 // Every row's local column is as wide, so the figures after it line up.
                 let pad = locals - expose.local.len();
                 let local = style.dim(&format!("  {}  {}", style.pick("←", "<-"), expose.local));
+                let address = format!("{host}:{port}");
+                let fill = public.saturating_sub(address.len());
+                let address = style.link(url(&host, port, &expose.local), &address);
                 let mut fields = vec![
-                    format!(
-                        "  {mark} {service:names$}  {:public$}",
-                        format!("{host}:{port}")
-                    ),
+                    format!("  {mark} {service:names$}  {address}{:fill$}", ""),
                     format!("{local}{:pad$}", ""),
                 ];
                 if matches!(link, Link::Up { .. }) {
@@ -627,6 +661,7 @@ port = "51820/udp"
             color: false,
             unicode: true,
             accent: None,
+            links: false,
         }));
     }
 
@@ -636,6 +671,7 @@ port = "51820/udp"
             color: false,
             unicode: false,
             accent: None,
+            links: false,
         });
         assert!(out.is_ascii(), "{out}");
         insta::assert_snapshot!(out);
@@ -732,6 +768,7 @@ port = "51820/udp"
             color: false,
             unicode: true,
             accent: None,
+            links: false,
         }));
     }
 
@@ -741,6 +778,7 @@ port = "51820/udp"
             color: false,
             unicode: false,
             accent: None,
+            links: false,
         });
         assert!(out.is_ascii(), "{out}");
         insta::assert_snapshot!(out);
@@ -778,7 +816,7 @@ port = "51820/udp"
     }
 
     #[test]
-    fn colour_only_adds_escapes() {
+    fn colour_and_links_only_add_escapes() {
         let render = |style| {
             format!(
                 "{}\n{}\n{}",
@@ -791,14 +829,45 @@ port = "51820/udp"
             color: true,
             unicode: true,
             accent: accent_for("truecolor", ""),
+            links: true,
         });
         let uncoloured = render(Style {
             color: false,
             unicode: true,
             accent: None,
+            links: false,
         });
         assert_eq!(plain(&out), uncoloured);
         assert!(out.contains("\x1b[38;2;232;99;43m"), "no accent: {out:?}");
+        let dev =
+            "\x1b]8;;http://tunnel.example.com:40017\x1b\\tunnel.example.com:40017\x1b]8;;\x1b\\";
+        assert!(out.contains(dev), "no link for dev: {out:?}");
+        assert_eq!(
+            out.matches("\x1b]8;;http").count(),
+            out.matches(dev).count(),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_browser_opens_a_service_by_its_local_port() {
+        let port = |number, kind| Port { number, kind };
+        let at = |host, number, kind, local| url(host, port(number, kind), local);
+        let host = "tunnel.example.com";
+        assert_eq!(
+            at(host, 40017, Kind::Tcp, "127.0.0.1:3000").as_deref(),
+            Some("http://tunnel.example.com:40017")
+        );
+        assert_eq!(
+            at(host, 9443, Kind::Tcp, "127.0.0.1:443").as_deref(),
+            Some("https://tunnel.example.com:9443")
+        );
+        assert_eq!(
+            at("::1", 8443, Kind::Tcp, "[::1]:8443").as_deref(),
+            Some("https://[::1]:8443")
+        );
+        assert_eq!(at(host, 2222, Kind::Tcp, "127.0.0.1:22"), None);
+        assert_eq!(at(host, 51820, Kind::Udp, "127.0.0.1:51820"), None);
     }
 
     #[test]
@@ -899,6 +968,7 @@ port = "51820/udp"
             color: false,
             unicode: true,
             accent: None,
+            links: false,
         };
         for (width, height) in [(0, 1), (0, 2), (12, 2), (12, 3), (12, 4)] {
             let lines = frame(up, &rows, &cfg(), style, now, (width, height));
@@ -937,6 +1007,7 @@ port = "51820/udp"
             color: false,
             unicode: true,
             accent: None,
+            links: false,
         };
         let lines = frame(up, &rows, &cfg(), style, now, (80, 0));
         let row = lines.last().unwrap();
@@ -1023,6 +1094,7 @@ port = "51820/udp"
             color: false,
             unicode: true,
             accent: None,
+            links: false,
         }));
     }
 
@@ -1032,6 +1104,7 @@ port = "51820/udp"
             color: false,
             unicode: false,
             accent: None,
+            links: false,
         });
         assert!(out.is_ascii(), "{out}");
         insta::assert_snapshot!(out);
@@ -1065,6 +1138,7 @@ port = "51820/udp"
                 color: false,
                 unicode: true,
                 accent: None,
+                links: false,
             },
             now,
             (0, 0),

@@ -257,6 +257,7 @@ mod tests {
         color: false,
         unicode: true,
         accent: None,
+        links: false,
     };
 
     fn cfg() -> ClientConfig {
