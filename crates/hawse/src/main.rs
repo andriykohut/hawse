@@ -172,11 +172,14 @@ fn styles() -> Styles {
     }
 }
 
-/// The last `--color` in `args`, or `auto` without one. It is read ahead of clap because clap
-/// prints `--help` and a usage error while it parses, before `Cli` holds the choice.
+/// The last `--color` in `args` before any `--`, or `auto` without one. It is read ahead of clap
+/// because clap prints `--help` and a usage error while it parses, before `Cli` holds the choice.
 fn color_arg(args: &[String]) -> ColorChoice {
     let mut choice = ColorChoice::Auto;
-    for (i, arg) in args.iter().enumerate() {
+    for (i, arg) in args.iter().enumerate().skip(1) {
+        if arg == "--" {
+            break;
+        }
         let value = match arg.strip_prefix("--color") {
             Some("") => args.get(i + 1).map(String::as_str),
             Some(rest) => rest.strip_prefix('='),
@@ -239,5 +242,9 @@ mod tests {
         assert_eq!(choice("hawse --color never --color=always"), "Always");
         assert_eq!(choice("hawse --colour never"), "Auto");
         assert_eq!(choice("hawse --color"), "Auto");
+        assert_eq!(
+            choice("hawse --color never check -- --color=always"),
+            "Never"
+        );
     }
 }
