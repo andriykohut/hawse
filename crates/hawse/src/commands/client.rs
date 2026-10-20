@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::Reloads;
 use crate::config_file;
+use crate::notify;
 use crate::panel::{self, Shown};
 use crate::paths::{self, Role};
 use crate::screen;
@@ -107,6 +108,35 @@ fn report(event: Event, cfg: &ClientConfig) -> bool {
     stopped
 }
 
+/// Logs what the client reports until `events` closes, keeping `status` to it when systemd
+/// watches. Returns whether the client stopped for good, and how many times it connected.
+async fn log(
+    mut events: mpsc::Receiver<Event>,
+    mut showing: watch::Receiver<Shown>,
+    status: Option<notify::Status>,
+) -> (bool, u64) {
+    let (mut stopped, mut connects) = (false, 0);
+    let mut status = status.map(|status| (status, notify::Client::default()));
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                let Some(event) = event else { break };
+                connects += u64::from(matches!(event, Event::Connected { .. }));
+                if let Some((_, client)) = &mut status {
+                    client.apply(&event);
+                }
+                stopped |= report(event, &showing.borrow().cfg);
+            }
+            // A reload can take a service away with no event to say so.
+            Ok(()) = showing.changed() => {}
+        }
+        if let Some((status, client)) = &mut status {
+            status.show(client.line(&showing.borrow().cfg));
+        }
+    }
+    (stopped, connects)
+}
+
 /// 2 when a config error stopped the client, the exit of a config that does not load: starting
 /// it again will not fix either.
 pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Result<ExitCode> {
@@ -125,17 +155,16 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
         cfg: cfg.clone(),
         traffic: Arc::default(),
     });
-    let (tx, mut events) = mpsc::channel(64);
+    // Ready once the config is read, and not at the first connect, so a server that is down does
+    // not fail the unit's start.
+    // shortcut: only the log lines keep the status after this, as a unit's stderr is never a
+    // terminal; one run on a terminal under systemd says `connecting` throughout.
+    let status =
+        notify::socket().map(|socket| notify::Status::ready(socket, "connecting".to_owned()));
+    let (tx, events) = mpsc::channel(64);
     let printer = match terminal {
         Some(style) => tokio::spawn(panel::show(events, showing, style, screen::draw)),
-        None => tokio::spawn(async move {
-            let (mut stopped, mut connects) = (false, 0);
-            while let Some(event) = events.recv().await {
-                connects += u64::from(matches!(event, Event::Connected { .. }));
-                stopped |= report(event, &showing.borrow().cfg);
-            }
-            (stopped, connects)
-        }),
+        None => tokio::spawn(log(events, showing, status)),
     };
     // One turn per connection: a reload that changes more than `[expose.*]` ends the client it
     // found and starts another on what it read.
