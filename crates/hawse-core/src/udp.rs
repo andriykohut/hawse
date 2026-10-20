@@ -76,6 +76,14 @@ impl Drops {
     }
 }
 
+impl DropCounts {
+    /// The datagrams dropped: every count but `at_cap`, which counts sessions evicted to make
+    /// room for a new one, whose datagram still goes through.
+    pub fn total(&self) -> u64 {
+        self.bulk_full + self.unknown + self.socket + self.queue_full + self.not_allowed
+    }
+}
+
 /// Never returns; run it as one arm of the `select!` that owns the service's bulk stream.
 pub async fn report_drops(service: &str, drops: &Drops) {
     let mut every = tokio::time::interval(REPORT_EVERY);
@@ -205,6 +213,14 @@ mod tests {
 
     use super::*;
     use crate::transport::{CloseReason, RecvHalf};
+
+    #[test]
+    fn an_eviction_is_not_a_dropped_datagram() {
+        let drops = Drops::default();
+        drops.at_cap();
+        drops.socket();
+        assert_eq!(drops.snapshot().total(), 1);
+    }
 
     struct FakeTransport {
         space: usize,

@@ -8,6 +8,7 @@ use clap::builder::styling::{self, Ansi256Color, Color, RgbColor};
 use hawse_core::client::Event;
 use hawse_core::config::{ClientConfig, split_host_port};
 use hawse_core::server;
+use hawse_core::traffic::Counts;
 use hawse_core::transport::TransportKind;
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::BindFailure;
@@ -172,16 +173,22 @@ fn millis(round_trip: Duration) -> String {
     }
 }
 
-/// A rate in at most 6 columns: bytes under 1000, then K, M and G (binary), with one decimal
-/// under 10. A figure that would round to 1000 of a unit reads as 1.0 of the next.
+/// A rate in at most 6 columns, the bytes as [`bytes`] gives them and then `/s`.
 pub fn rate(per_second: u64) -> String {
+    format!("{}/s", bytes(per_second))
+}
+
+/// A byte count in at most 4 columns up to 999G: bytes under 1000, then K, M and G (binary),
+/// with one decimal under 10. A figure that would round to 1000 of a unit reads as 1.0 of the
+/// next.
+pub fn bytes(count: u64) -> String {
     const UNITS: [&str; 3] = ["K", "M", "G"];
-    if per_second < 1000 {
-        return format!("{per_second}B/s");
+    if count < 1000 {
+        return format!("{count}B");
     }
-    // `per_second` in units of `scale`, to the nearest whole one and the nearest tenth.
-    let whole = |scale: u128| (u128::from(per_second) * 2 + scale) / (scale * 2);
-    let tenths = |scale: u128| (u128::from(per_second) * 20 + scale) / (scale * 2);
+    // `count` in units of `scale`, to the nearest whole one and the nearest tenth.
+    let whole = |scale: u128| (u128::from(count) * 2 + scale) / (scale * 2);
+    let tenths = |scale: u128| (u128::from(count) * 20 + scale) / (scale * 2);
     let (mut scale, mut unit) = (1024u128, 0);
     while unit + 1 < UNITS.len() && whole(scale) >= 1000 {
         scale *= 1024;
@@ -189,9 +196,9 @@ pub fn rate(per_second: u64) -> String {
     }
     let tenths = tenths(scale);
     if tenths < 100 {
-        format!("{}.{}{}/s", tenths / 10, tenths % 10, UNITS[unit])
+        format!("{}.{}{}", tenths / 10, tenths % 10, UNITS[unit])
     } else {
-        format!("{}{}/s", whole(scale), UNITS[unit])
+        format!("{}{}", whole(scale), UNITS[unit])
     }
 }
 
@@ -578,6 +585,54 @@ pub fn note(text: &str, style: Style) -> String {
     format!("  {} {text}", style.accent(style.pick("↻", "~")))
 }
 
+/// What a client prints under its panel when it stops: how long it ran, how many times it
+/// reconnected if it did, and a line for each service in `carried` with its visitors and bytes
+/// each way, and its datagrams each way and dropped if it carried any.
+pub fn summary(
+    ran: Duration,
+    reconnects: u64,
+    carried: &BTreeMap<String, Counts>,
+    style: Style,
+) -> String {
+    let again = match reconnects {
+        0 => String::new(),
+        1 => ", reconnected once".to_owned(),
+        n => format!(", reconnected {n} times"),
+    };
+    let mut lines = vec![format!("\n  stopped after {}{again}", span(ran))];
+    let names = carried.keys().map(String::len).max().unwrap_or(0);
+    let visitors = carried
+        .values()
+        .map(|counts| counts.visitors.to_string().len())
+        .max()
+        .unwrap_or(0);
+    let figure = |text: String| style.accent(&text);
+    for (service, counts) in carried {
+        let datagrams = if counts.datagrams_down + counts.datagrams_up + counts.dropped > 0 {
+            format!(
+                "  {} datagrams in, {} out, {} dropped",
+                figure(counts.datagrams_down.to_string()),
+                figure(counts.datagrams_up.to_string()),
+                figure(counts.dropped.to_string()),
+            )
+        } else {
+            String::new()
+        };
+        let noun = if counts.visitors == 1 {
+            "visitor "
+        } else {
+            "visitors"
+        };
+        lines.push(format!(
+            "    {service:names$}  {} {noun}  down {}  up {}{datagrams}",
+            figure(format!("{:>visitors$}", counts.visitors)),
+            figure(format!("{:>4}", bytes(counts.down))),
+            figure(format!("{:>4}", bytes(counts.up))),
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Writes `line` to stderr through [`crate::screen::print`], above the client's panel when it is
 /// up.
 pub fn print(line: &str) {
@@ -916,6 +971,65 @@ port = "51820/udp"
         assert_eq!(span(mins(14)), "14 min");
         assert_eq!(span(mins(2 * 60 + 14)), "2 h 14 m");
         assert_eq!(span(mins(3 * 1440 + 2 * 60 + 5)), "3 d 2 h");
+    }
+
+    #[test]
+    fn a_byte_count_reads_as_a_rate_does_without_the_per_second() {
+        assert_eq!(bytes(999), "999B");
+        assert_eq!(bytes(1_258_291), "1.2M");
+        assert_eq!(rate(1_258_291), "1.2M/s");
+    }
+
+    #[test]
+    fn a_client_that_stops_sums_up_its_run() {
+        let carried = BTreeMap::from([
+            (
+                "dns".to_owned(),
+                Counts {
+                    visitors: 37,
+                    down: 1_153_434,
+                    up: 1_468_006,
+                    datagrams_down: 9104,
+                    datagrams_up: 9101,
+                    dropped: 3,
+                    ..Counts::default()
+                },
+            ),
+            (
+                "jellyfin".to_owned(),
+                Counts {
+                    visitors: 412,
+                    down: 19_541_180_006,
+                    up: 325_058_560,
+                    ..Counts::default()
+                },
+            ),
+            ("ssh".to_owned(), Counts::default()),
+        ]);
+        let style = Style {
+            color: false,
+            unicode: true,
+            accent: None,
+            links: false,
+        };
+        let ran = Duration::from_secs(3 * 86_400 + 4 * 3600 + 12 * 60);
+        insta::assert_snapshot!(summary(ran, 2, &carried, style));
+        let short = Duration::from_secs(30);
+        let header = |reconnects| summary(short, reconnects, &BTreeMap::new(), style);
+        assert_eq!(header(0), "\n  stopped after <1 min");
+        assert_eq!(header(1), "\n  stopped after <1 min, reconnected once");
+        let one = BTreeMap::from([(
+            "web".to_owned(),
+            Counts {
+                visitors: 1,
+                ..Counts::default()
+            },
+        )]);
+        let one = summary(short, 0, &one, style);
+        assert!(
+            one.ends_with("web  1 visitor   down   0B  up   0B"),
+            "{one}"
+        );
     }
 
     #[test]

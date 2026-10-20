@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hawse_core::client::{Client, DisconnectCause, Event};
 use hawse_core::config::{ClientConfig, split_host_port};
 use hawse_core::identity::Identity;
+use hawse_core::traffic::Counts;
 use miette::{IntoDiagnostic as _, WrapErr as _};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -111,6 +113,10 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     let file = paths::locate(Role::Client, config).file;
     let mut reloads = Reloads::new(file.clone());
     let (mut cfg, mut identity) = load(&file, terminal)?;
+    let started = Instant::now();
+    // Every finished client's totals, summed by service: a reload that reconnects starts a new
+    // client, whose totals start again.
+    let mut carried = BTreeMap::<String, Counts>::new();
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
     // What the printer names a service's addresses from and reads its figures from, replaced by
@@ -123,11 +129,12 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     let printer = match terminal {
         Some(style) => tokio::spawn(panel::show(events, showing, style, screen::draw)),
         None => tokio::spawn(async move {
-            let mut stopped = false;
+            let (mut stopped, mut connects) = (false, 0);
             while let Some(event) = events.recv().await {
+                connects += u64::from(matches!(event, Event::Connected { .. }));
                 stopped |= report(event, &showing.borrow().cfg);
             }
-            stopped
+            (stopped, connects)
         }),
     };
     // One turn per connection: a reload that changes more than `[expose.*]` ends the client it
@@ -168,14 +175,32 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
             client.expose().send_replace(new.expose.clone());
             cfg = new;
         };
+        for (service, counts) in client.traffic().snapshot() {
+            *carried.entry(service).or_default() += counts;
+        }
         let Some(next) = next else { break };
         (cfg, identity) = next;
     }
     // The printer ends when the last sender does.
     drop(tx);
-    let stopped = printer.await.into_diagnostic()?;
-    if terminal.is_some() {
+    let (stopped, connects) = printer.await.into_diagnostic()?;
+    let (ran, reconnects) = (started.elapsed(), connects.saturating_sub(1));
+    tracing::info!(uptime_s = ran.as_secs(), reconnects, "stopped");
+    for (service, counts) in &carried {
+        tracing::info!(
+            service,
+            visitors = counts.visitors,
+            down = counts.down,
+            up = counts.up,
+            datagrams_down = counts.datagrams_down,
+            datagrams_up = counts.datagrams_up,
+            dropped = counts.dropped,
+            "service totals"
+        );
+    }
+    if let Some(style) = terminal {
         screen::release();
+        terminal::print(&terminal::summary(ran, reconnects, &carried, style));
     }
     Ok(if stopped {
         ExitCode::from(2)

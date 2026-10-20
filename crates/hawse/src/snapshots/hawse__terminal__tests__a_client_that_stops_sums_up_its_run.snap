@@ -1,0 +1,9 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "summary(ran, 2, &carried, style)"
+---
+
+  stopped after 3 d 4 h, reconnected 2 times
+    dns        37 visitors  down 1.1M  up 1.4M  9104 datagrams in, 9101 out, 3 dropped
+    jellyfin  412 visitors  down  18G  up 310M
+    ssh         0 visitors  down   0B  up   0B
