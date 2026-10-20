@@ -194,7 +194,7 @@ impl UdpLocal {
             None => session.socket.send(payload).await,
         };
         match sent {
-            Ok(_) => self.meter.toward_local(payload.len()),
+            Ok(_) => self.meter.datagram_toward_local(payload.len()),
             Err(err) => {
                 self.note(&err);
                 self.drops.socket();
@@ -270,6 +270,13 @@ impl UdpLocal {
     }
 }
 
+impl Drop for UdpLocal {
+    // Each binding counts its own drops; the meter keeps the service's across sessions.
+    fn drop(&mut self) {
+        self.meter.dropped(self.drops.snapshot().total());
+    }
+}
+
 /// A linear scan: it runs only at the cap, once per new session.
 fn quietest(sessions: &HashMap<u32, Arc<LocalSession>>) -> Option<u32> {
     sessions
@@ -319,7 +326,7 @@ async fn read_replies(local: Arc<UdpLocal>, id: u32, session: Arc<LocalSession>)
                     local.heard_from_local();
                     // Synchronous, so the shared buffer is never held across an await.
                     local.sender.send(header, &buf[..len]);
-                    local.meter.from_local(len);
+                    local.meter.datagram_from_local(len);
                     Ok(())
                 });
                 if let Err(err) = received {
@@ -723,7 +730,19 @@ mod tests {
         assert_eq!(counts.open, 1);
         assert_eq!(counts.down, 1);
         assert_eq!(counts.up, u64::try_from(port.len()).unwrap());
+        assert_eq!((counts.datagrams_down, counts.datagrams_up), (1, 1));
         open_settles(&service, 0).await;
+        assert_eq!(service.meter.counts().visitors, 1);
+    }
+
+    #[tokio::test]
+    async fn a_service_adds_its_drops_to_its_meter_as_it_goes() {
+        let (service, _replies) = with_local("no-port".to_owned(), IDLE, SESSION_CAP);
+        service.deliver(&packet_for(5, b"?")).await;
+        let meter = Arc::clone(&service.meter);
+        assert_eq!(meter.counts().dropped, 0);
+        drop(service);
+        assert_eq!(meter.counts().dropped, 1);
     }
 
     #[tokio::test]

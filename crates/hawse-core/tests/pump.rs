@@ -453,9 +453,9 @@ async fn a_pump_meters_each_direction_as_it_copies() {
     assert_eq!(
         traffic.snapshot()["svc"],
         Counts {
-            open: 0,
             down: 3,
-            up: 5
+            up: 5,
+            ..Counts::default()
         }
     );
 }

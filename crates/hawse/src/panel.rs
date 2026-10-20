@@ -125,6 +125,7 @@ impl State {
                     open: now.open,
                     down: per_second(now.down, then.down),
                     up: per_second(now.up, then.up),
+                    ..Counts::default()
                 };
                 (service.clone(), figures)
             })
@@ -149,7 +150,7 @@ impl State {
                 let row = match *answer {
                     Answer::Refused(reason) => Row::Refused(reason),
                     Answer::Bound(port) => {
-                        let Counts { open, down, up } =
+                        let Counts { open, down, up, .. } =
                             self.figures.get(service).copied().unwrap_or_default();
                         Row::Bound {
                             port,
@@ -167,16 +168,16 @@ impl State {
 
 /// Keeps the panel for the client whose events arrive on `events`, handing each frame and the
 /// terminal's width to `draw`, until `events` closes. Returns whether the client stopped for
-/// good.
+/// good, and how many times it connected.
 pub async fn show(
     mut events: mpsc::Receiver<Event>,
     mut shown: watch::Receiver<Shown>,
     style: Style,
     mut draw: impl FnMut(Vec<String>, usize),
-) -> bool {
+) -> (bool, u64) {
     let mut state = State::default();
     let mut traffic = Arc::clone(&shown.borrow().traffic);
-    let mut stopped = false;
+    let (mut stopped, mut connects) = (false, 0);
     let mut ticking = false;
     let mut sampled = Instant::now();
     let mut tick = tokio::time::interval_at(Instant::now() + SAMPLE, SAMPLE);
@@ -214,6 +215,7 @@ pub async fn show(
             event = events.recv() => {
                 let Some(event) = event else { break };
                 stopped |= matches!(event, Event::Disconnected { retry_in: None, .. });
+                connects += u64::from(matches!(event, Event::Connected { .. }));
                 let line = state.apply(&event, Instant::now(), style, &shown.borrow().cfg);
                 if let Some(line) = line {
                     screen::print(&line);
@@ -240,7 +242,7 @@ pub async fn show(
             }
         }
     }
-    stopped
+    (stopped, connects)
 }
 
 #[cfg(test)]
@@ -277,7 +279,7 @@ mod tests {
                 Counts {
                     open: 1,
                     down,
-                    up: 0,
+                    ..Counts::default()
                 },
             )])
         };
@@ -288,8 +290,7 @@ mod tests {
             state.figures["web"],
             Counts {
                 open: 1,
-                down: 0,
-                up: 0
+                ..Counts::default()
             }
         );
     }
@@ -381,9 +382,22 @@ mod tests {
         shown.send_modify(|shown| shown.traffic = Arc::default());
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(last().contains("connecting"), "{}", last());
+        tx.send(Event::Connected {
+            remote: "203.0.113.7:4433".parse().unwrap(),
+            transport: TransportKind::Quic,
+            name: "laptop".to_owned(),
+            agent: "hawse/0.8.0".to_owned(),
+            round_trip: Duration::from_millis(24),
+        })
+        .await
+        .unwrap();
 
         drop(tx);
-        panel.await.unwrap();
+        assert_eq!(
+            panel.await.unwrap(),
+            (false, 2),
+            "stopped, and connected twice"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -428,6 +442,6 @@ mod tests {
         assert_eq!(draws.load(Ordering::Relaxed), 6);
 
         drop(tx);
-        assert!(!panel.await.unwrap());
+        assert!(!panel.await.unwrap().0);
     }
 }

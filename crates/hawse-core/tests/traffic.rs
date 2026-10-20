@@ -58,8 +58,10 @@ async fn a_visitor_is_counted_open_while_it_is_and_its_bytes_each_way() {
     visitor.read_exact(&mut back).await.unwrap();
     let open = Counts {
         open: 1,
+        visitors: 1,
         down: 1000,
         up: 1000,
+        ..Counts::default()
     };
     settles(&traffic, "echo", open).await;
     drop(visitor);
@@ -126,8 +128,12 @@ async fn a_udp_visitor_is_counted_open_until_its_service_is_unbound() {
     assert_eq!(udp_ask(&visitor, port.number, b"hello").await, b"hello");
     let open = Counts {
         open: 1,
+        visitors: 1,
         down: 5,
         up: 5,
+        datagrams_down: 1,
+        datagrams_up: 1,
+        ..Counts::default()
     };
     settles(&traffic, "echo", open).await;
     expose.send_replace(BTreeMap::new());

@@ -76,6 +76,17 @@ impl Drops {
     }
 }
 
+impl DropCounts {
+    pub fn total(&self) -> u64 {
+        self.bulk_full
+            + self.at_cap
+            + self.unknown
+            + self.socket
+            + self.queue_full
+            + self.not_allowed
+    }
+}
+
 /// Never returns; run it as one arm of the `select!` that owns the service's bulk stream.
 pub async fn report_drops(service: &str, drops: &Drops) {
     let mut every = tokio::time::interval(REPORT_EVERY);

@@ -1,20 +1,40 @@
-//! What a client's services carry while it runs: per service, the connections open through it
-//! and the bytes each way, as running totals for whatever shows them. The pumps and the UDP path
+//! What a client's services carry while it runs: per service, the connections open through it,
+//! the visitors so far, and the bytes and datagrams each way, as running totals for whatever shows
+//! them. The pumps and the UDP path
 //! add as they copy; a reader takes snapshots and works out rates from the difference.
 
 use std::collections::BTreeMap;
+use std::ops::AddAssign;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::Notify;
 
 /// One service's totals as `Traffic::snapshot` reads them. `down` is bytes toward the local
-/// service, `up` bytes from it.
+/// service, `up` bytes from it, and `datagrams_down` and `datagrams_up` a UDP service's datagrams
+/// the same ways. `visitors` counts every connection or UDP session opened, `open` those open now.
+/// `dropped` is a UDP service's datagrams the client lost, added only once the service has gone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     pub open: u64,
+    pub visitors: u64,
     pub down: u64,
     pub up: u64,
+    pub datagrams_down: u64,
+    pub datagrams_up: u64,
+    pub dropped: u64,
+}
+
+impl AddAssign for Counts {
+    fn add_assign(&mut self, other: Self) {
+        self.open += other.open;
+        self.visitors += other.visitors;
+        self.down += other.down;
+        self.up += other.up;
+        self.datagrams_down += other.datagrams_down;
+        self.datagrams_up += other.datagrams_up;
+        self.dropped += other.dropped;
+    }
 }
 
 /// Whether anything moved since the last `Traffic::take_moved`, and the wakeup for a reader
@@ -40,8 +60,12 @@ impl Activity {
 #[derive(Debug, Default)]
 pub struct Meter {
     open: AtomicU64,
+    visitors: AtomicU64,
     down: AtomicU64,
     up: AtomicU64,
+    datagrams_down: AtomicU64,
+    datagrams_up: AtomicU64,
+    dropped: AtomicU64,
     activity: Arc<Activity>,
 }
 
@@ -56,9 +80,24 @@ impl Meter {
         self.activity.touch();
     }
 
-    /// Counts a connection open until the returned guard drops.
+    pub fn datagram_toward_local(&self, bytes: usize) {
+        add(&self.datagrams_down, 1);
+        self.toward_local(bytes);
+    }
+
+    pub fn datagram_from_local(&self, bytes: usize) {
+        add(&self.datagrams_up, 1);
+        self.from_local(bytes);
+    }
+
+    pub fn dropped(&self, datagrams: u64) {
+        self.dropped.fetch_add(datagrams, Ordering::Relaxed);
+    }
+
+    /// Counts a connection open until the returned guard drops, and a visitor for good.
     pub fn open(self: &Arc<Self>) -> Open {
         self.open.fetch_add(1, Ordering::Relaxed);
+        self.visitors.fetch_add(1, Ordering::Relaxed);
         self.activity.touch();
         Open(Arc::clone(self))
     }
@@ -66,8 +105,12 @@ impl Meter {
     pub(crate) fn counts(&self) -> Counts {
         Counts {
             open: self.open.load(Ordering::Relaxed),
+            visitors: self.visitors.load(Ordering::Relaxed),
             down: self.down.load(Ordering::Relaxed),
             up: self.up.load(Ordering::Relaxed),
+            datagrams_down: self.datagrams_down.load(Ordering::Relaxed),
+            datagrams_up: self.datagrams_up.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -160,15 +203,70 @@ mod tests {
             counts(&traffic),
             Counts {
                 open: 2,
+                visitors: 2,
                 down: 1000,
-                up: 24
+                up: 24,
+                ..Counts::default()
             }
         );
         drop((one, two));
         assert_eq!(counts(&traffic).open, 0);
+        assert_eq!(counts(&traffic).visitors, 2);
         // Asked for again, it is the same meter.
         traffic.meter("web").toward_local(1);
         assert_eq!(counts(&traffic).down, 1001);
+    }
+
+    #[test]
+    fn a_datagram_is_counted_with_its_bytes_and_drops_as_they_are_added() {
+        let traffic = Traffic::default();
+        let meter = traffic.meter("dns");
+        meter.datagram_toward_local(40);
+        meter.datagram_toward_local(40);
+        meter.datagram_from_local(100);
+        meter.dropped(3);
+        assert_eq!(
+            traffic.snapshot()["dns"],
+            Counts {
+                down: 80,
+                up: 100,
+                datagrams_down: 2,
+                datagrams_up: 1,
+                dropped: 3,
+                ..Counts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn counts_add_figure_by_figure() {
+        let mut sum = Counts {
+            visitors: 1,
+            down: 10,
+            datagrams_up: 4,
+            ..Counts::default()
+        };
+        sum += Counts {
+            open: 1,
+            visitors: 2,
+            up: 5,
+            datagrams_down: 6,
+            datagrams_up: 1,
+            dropped: 1,
+            ..Counts::default()
+        };
+        assert_eq!(
+            sum,
+            Counts {
+                open: 1,
+                visitors: 3,
+                down: 10,
+                up: 5,
+                datagrams_down: 6,
+                datagrams_up: 5,
+                dropped: 1,
+            }
+        );
     }
 
     /// Whether `moved` is still waiting after 50 ms.
