@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -242,13 +243,7 @@ impl UdpLocal {
                 return None;
             }
         };
-        let fresh = Arc::new(LocalSession {
-            socket,
-            used: Mutex::new(Instant::now()),
-            cancel: self.cancel.child_token(),
-            _open: self.meter.open(),
-        });
-        let session = {
+        let (session, fresh) = {
             let mut sessions = self.sessions.lock().expect("udp sessions lock");
             // Evicting under the lock that inserts is what makes the cap exact.
             let full = sessions.len() >= self.cap && !sessions.contains_key(&id);
@@ -258,10 +253,22 @@ impl UdpLocal {
                 self.drops.at_cap();
             }
             // The datagram path and the bulk stream deliver from different tasks, so another one
-            // may have opened this session while the socket above was being connected.
-            Arc::clone(sessions.entry(id).or_insert_with(|| Arc::clone(&fresh)))
+            // may have opened this session while the socket above was being connected. Only the
+            // session that goes in is counted, so a visitor is counted once.
+            match sessions.entry(id) {
+                Entry::Occupied(held) => (Arc::clone(held.get()), false),
+                Entry::Vacant(slot) => {
+                    let session = slot.insert(Arc::new(LocalSession {
+                        socket,
+                        used: Mutex::new(Instant::now()),
+                        cancel: self.cancel.child_token(),
+                        _open: self.meter.open(),
+                    }));
+                    (Arc::clone(session), true)
+                }
+            }
         };
-        if Arc::ptr_eq(&session, &fresh) {
+        if fresh {
             tracing::debug!(service = self.service, session = id, "udp session opened");
             self.tasks
                 .spawn(read_replies(Arc::clone(self), id, Arc::clone(&session)));
@@ -733,6 +740,17 @@ mod tests {
         assert_eq!((counts.datagrams_down, counts.datagrams_up), (1, 1));
         open_settles(&service, 0).await;
         assert_eq!(service.meter.counts().visitors, 1);
+    }
+
+    /// `localhost` is looked up off the task, so both deliveries are mid-connect at once and race
+    /// to put their session in the table.
+    #[tokio::test]
+    async fn two_paths_opening_one_session_at_once_count_one_visitor() {
+        let (service, _replies) = with_local("localhost:9".to_owned(), IDLE, SESSION_CAP);
+        let (one, two) = tokio::join!(service.session(5), service.session(5));
+        assert!(Arc::ptr_eq(&one.unwrap(), &two.unwrap()));
+        let counts = service.meter.counts();
+        assert_eq!((counts.open, counts.visitors), (1, 1));
     }
 
     #[tokio::test]
