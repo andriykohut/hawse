@@ -117,18 +117,31 @@ async fn log(
 ) -> (bool, u64) {
     let (mut stopped, mut connects) = (false, 0);
     let mut status = status.map(|status| (status, notify::Client::default()));
+    let mut traffic = Arc::clone(&showing.borrow().traffic);
     loop {
         tokio::select! {
+            // First, so a new client is taken in before any event it sends, as the panel does.
+            biased;
+            // A reload can take a service away with no event to say so. One that reconnects
+            // makes a new client, yet to connect, and the session it ended was cancelled, which
+            // sends no event either.
+            Ok(()) = showing.changed() => {
+                let latest = Arc::clone(&showing.borrow().traffic);
+                if !Arc::ptr_eq(&latest, &traffic) {
+                    traffic = latest;
+                    if let Some((_, client)) = &mut status {
+                        *client = notify::Client::default();
+                    }
+                }
+            }
             event = events.recv() => {
                 let Some(event) = event else { break };
                 connects += u64::from(matches!(event, Event::Connected { .. }));
                 if let Some((_, client)) = &mut status {
-                    client.apply(&event);
+                    client.apply(&event, &showing.borrow().cfg);
                 }
                 stopped |= report(event, &showing.borrow().cfg);
             }
-            // A reload can take a service away with no event to say so.
-            Ok(()) = showing.changed() => {}
         }
         if let Some((status, client)) = &mut status {
             status.show(client.line(&showing.borrow().cfg));
@@ -236,4 +249,67 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     } else {
         ExitCode::SUCCESS
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixDatagram;
+
+    use hawse_core::transport::TransportKind;
+
+    use super::*;
+
+    /// The next line `systemd` is sent, waiting up to 2 s for it.
+    async fn next_line(systemd: &UnixDatagram) -> String {
+        let mut buf = [0u8; 512];
+        for _ in 0..200 {
+            if let Ok(len) = systemd.recv(&mut buf) {
+                return String::from_utf8(buf[..len].to_vec()).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("nothing sent within 2 s");
+    }
+
+    #[tokio::test]
+    async fn a_reload_that_reconnects_says_connecting_until_the_new_client_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notify");
+        let systemd = UnixDatagram::bind(&path).unwrap();
+        systemd.set_nonblocking(true).unwrap();
+        let cfg = config_file::parse(
+            Path::new("client.toml"),
+            r#"
+server = "tunnel.example.com:4433"
+server_key = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+"#,
+        )
+        .unwrap();
+        let (shown, showing) = watch::channel(Shown {
+            cfg,
+            traffic: Arc::default(),
+        });
+        let (tx, events) = mpsc::channel(8);
+        let status = notify::Status::ready(path.into_os_string(), "connecting".to_owned());
+        let printer = tokio::spawn(log(events, showing, Some(status)));
+        assert_eq!(next_line(&systemd).await, "READY=1\nSTATUS=connecting");
+        let connected = Event::Connected {
+            remote: "203.0.113.7:4433".parse().unwrap(),
+            transport: TransportKind::Quic,
+            name: "nas".to_owned(),
+            agent: "hawse/0.8.0".to_owned(),
+            round_trip: Duration::from_millis(24),
+        };
+        tx.send(connected.clone()).await.unwrap();
+        assert_eq!(next_line(&systemd).await, "STATUS=connected over QUIC");
+
+        // The session the reload ends is cancelled, which sends no event.
+        shown.send_modify(|shown| shown.traffic = Arc::default());
+        assert_eq!(next_line(&systemd).await, "STATUS=connecting");
+        tx.send(connected).await.unwrap();
+        assert_eq!(next_line(&systemd).await, "STATUS=connected over QUIC");
+
+        drop(tx);
+        printer.await.unwrap();
+    }
 }

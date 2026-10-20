@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::os::unix::net::UnixDatagram;
 
 use hawse_core::client::Event;
-use hawse_core::config::ClientConfig;
+use hawse_core::config::{ClientConfig, Expose};
 use hawse_core::server;
 use hawse_core::transport::TransportKind;
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -32,6 +32,9 @@ pub fn send(socket: &OsStr, state: &str) {
 
 fn try_send(socket: &OsStr, state: &str) -> io::Result<()> {
     let sender = UnixDatagram::unbound()?;
+    // A receiver that has fallen behind loses this line rather than holding up a runtime worker,
+    // which with `--threads 1` would be every task.
+    sender.set_nonblocking(true)?;
     #[cfg(target_os = "linux")]
     if let Some(name) = socket.as_encoded_bytes().strip_prefix(b"@") {
         use std::os::linux::net::SocketAddrExt as _;
@@ -68,9 +71,9 @@ impl Status {
 #[derive(Default)]
 pub struct Client {
     link: Link,
-    /// Whether the server bound each service the session asked for, by name, since the last
-    /// connect.
-    answers: BTreeMap<String, bool>,
+    /// Whether the server bound each service the session asked for, with the settings it was
+    /// asked with, by name, since the last connect.
+    answers: BTreeMap<String, (Expose, bool)>,
 }
 
 #[derive(Default)]
@@ -83,18 +86,22 @@ enum Link {
 }
 
 impl Client {
-    pub fn apply(&mut self, event: &Event) {
+    /// Takes in `event`. `cfg` is the config in force, whose settings a bind's answer is recorded
+    /// against.
+    pub fn apply(&mut self, event: &Event, cfg: &ClientConfig) {
+        let mut answer = |service: &String, bound| {
+            if let Some(expose) = cfg.expose.get(service) {
+                self.answers
+                    .insert(service.clone(), (expose.clone(), bound));
+            }
+        };
         match event {
             Event::Connected { transport, .. } => {
                 self.link = Link::Up(*transport);
                 self.answers.clear();
             }
-            Event::Bound { service, .. } => {
-                self.answers.insert(service.clone(), true);
-            }
-            Event::BindFailed { service, .. } => {
-                self.answers.insert(service.clone(), false);
-            }
+            Event::Bound { service, .. } => answer(service, true),
+            Event::BindFailed { service, .. } => answer(service, false),
             Event::Disconnected { cause, retry_in } => {
                 let why = reason(cause.clone());
                 self.link = match retry_in {
@@ -106,7 +113,7 @@ impl Client {
         }
     }
 
-    /// The status line, counting only the services `cfg` still exposes.
+    /// The status line, counting only the services `cfg` still exposes as they were asked for.
     pub fn line(&self, cfg: &ClientConfig) -> String {
         match &self.link {
             Link::Connecting => "connecting".to_owned(),
@@ -115,8 +122,8 @@ impl Client {
                 let answered: Vec<bool> = self
                     .answers
                     .iter()
-                    .filter(|(service, _)| cfg.expose.contains_key(*service))
-                    .map(|(_, bound)| *bound)
+                    .filter(|(service, (expose, _))| cfg.expose.get(*service) == Some(expose))
+                    .map(|(_, (_, bound))| *bound)
                     .collect();
                 let bound = answered.iter().filter(|bound| **bound).count();
                 let noun = if answered.len() == 1 {
@@ -256,6 +263,24 @@ mod tests {
         );
     }
 
+    /// A receiver whose queue is full makes a blocking send wait for it, which on one worker
+    /// would stop the tunnel.
+    #[test]
+    fn a_receiver_that_falls_behind_is_never_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_systemd, path) = listener(&dir);
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..1000 {
+                send(&path, "STATUS=busy");
+            }
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a send waited for a full queue");
+    }
+
     #[test]
     fn a_socket_nothing_listens_on_costs_nothing_but_a_warning() {
         let dir = tempfile::tempdir().unwrap();
@@ -321,15 +346,16 @@ port = "51820/udp"
         let mut cfg = cfg();
         let mut client = Client::default();
         assert_eq!(client.line(&cfg), "connecting");
-        client.apply(&connected(TransportKind::Quic));
+        client.apply(&connected(TransportKind::Quic), &cfg);
         assert_eq!(client.line(&cfg), "connected over QUIC");
-        client.apply(&bound("ssh"));
+        client.apply(&bound("ssh"), &cfg);
         assert_eq!(client.line(&cfg), "connected over QUIC, 1 service bound");
-        client.apply(&bound("web"));
-        client.apply(&Event::BindFailed {
+        client.apply(&bound("web"), &cfg);
+        let refused = Event::BindFailed {
             service: "wireguard".to_owned(),
             reason: BindFailure::NotGranted,
-        });
+        };
+        client.apply(&refused, &cfg);
         assert_eq!(
             client.line(&cfg),
             "connected over QUIC, 2 of 3 services bound"
@@ -337,23 +363,31 @@ port = "51820/udp"
         // A reload that takes a service away sends no event of its own.
         cfg.expose.remove("wireguard");
         assert_eq!(client.line(&cfg), "connected over QUIC, 2 services bound");
+        // One that changes a service asks the server again, and the service is not bound until
+        // the server says so.
+        cfg.expose.get_mut("ssh").unwrap().local = "127.0.0.1:2022".to_owned();
+        assert_eq!(client.line(&cfg), "connected over QUIC, 1 service bound");
+        client.apply(&bound("ssh"), &cfg);
+        assert_eq!(client.line(&cfg), "connected over QUIC, 2 services bound");
 
-        client.apply(&Event::Disconnected {
+        let unresponsive = Event::Disconnected {
             cause: DisconnectCause::Unresponsive,
             retry_in: Some(Duration::from_secs(8)),
-        });
+        };
+        client.apply(&unresponsive, &cfg);
         assert_eq!(
             client.line(&cfg),
             "disconnected: server stopped answering, retrying"
         );
         // The next session starts its answers over.
-        client.apply(&connected(TransportKind::Tcp));
+        client.apply(&connected(TransportKind::Tcp), &cfg);
         assert_eq!(client.line(&cfg), "connected over TCP");
 
-        client.apply(&Event::Disconnected {
+        let stopped = Event::Disconnected {
             cause: DisconnectCause::Config("no such service".to_owned()),
             retry_in: None,
-        });
+        };
+        client.apply(&stopped, &cfg);
         assert_eq!(client.line(&cfg), "stopped: no such service");
     }
 
