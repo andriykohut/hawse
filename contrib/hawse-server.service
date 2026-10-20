@@ -5,7 +5,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=exec
+Type=notify
 ExecStart=/usr/local/bin/hawse server --config /etc/hawse/server.toml --log pretty
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always

@@ -1,6 +1,7 @@
 mod commands;
 mod config_file;
 mod logging;
+mod notify;
 mod panel;
 mod paths;
 mod screen;

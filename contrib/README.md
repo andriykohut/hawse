@@ -67,6 +67,19 @@ ReadWritePaths=/mnt/pool/apps/hawse
 read-only, so a config directory elsewhere needs the `ReadWritePaths` line above
 for the service to create its key.
 
+## Status
+
+Both units are `Type=notify`. The server counts as started once it listens, and
+the client once it has read its config, so a server that is down does not fail
+the client's start. `systemctl status` shows a line that follows how each one
+stands:
+
+```
+Status: "listening on [::]:4433, 2 clients: laptop, nas"
+Status: "connected over QUIC, 2 services bound"
+Status: "disconnected: server stopped answering, retrying"
+```
+
 ## Logging
 
 The units pass `--log pretty` because journald is the reader. Drop it to get one

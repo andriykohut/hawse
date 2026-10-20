@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::Reloads;
 use crate::config_file::{self, LoadError};
+use crate::notify;
 use crate::paths::{self, Located, Role};
 use crate::terminal::{self, Style};
 
@@ -75,6 +76,9 @@ pub async fn run(
         .into_diagnostic()
         .wrap_err("cannot start the server")?;
     let addr = server.local_addr();
+    if let Some(socket) = notify::socket() {
+        tokio::spawn(notify::serve(socket, addr, server.events()));
+    }
     // Before the line that says the server is up, which is what a script waits for to signal it.
     let cancel = CancellationToken::new();
     tokio::spawn(super::shutdown_signal(cancel.clone()));
