@@ -21,3 +21,9 @@ back.
 In the client's rows, the public address of a TCP service is a link on a
 terminal that supports them: `https://` when the service's local port is 443 or
 8443, `http://` otherwise, and none for local port 22.
+
+When the client stops it prints how long it ran, how many times it reconnected,
+and what each service carried: its visitors, the bytes each way, and for a UDP
+service the datagrams each way and those dropped. Without the rows, the same
+figures are logged at info level as a `stopped` line and a `service totals` line
+for each service.
