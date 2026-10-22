@@ -25,6 +25,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets --no-default-features --features ring
       - run: cargo test --workspace
       - run: cargo test --workspace --no-default-features --features ring
+  service:
+    # Not ubuntu-latest, for the same reason as check.
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p hawse
+      - run: .github/scripts/service-check.sh
   deny:
     runs-on: ubuntu-26.04
     steps:
