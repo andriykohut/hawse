@@ -11,6 +11,13 @@ per-connection events, `-vv` adds trace output, and `-q` restricts output to
 warnings and errors. The `HAWSE_LOG` environment variable takes a `tracing`
 filter directive and overrides all of them.
 
+On macOS, `--log oslog` sends the log to the unified log, which keeps and
+expires it, under the subsystem `io.github.andriykohut.hawse` and the category
+`server`, `client` or `cli`. A service installed with `hawse service install`
+logs there. `/usr/bin/log stream --predicate 'subsystem == "io.github.andriykohut.hawse"'`
+follows it, and `/usr/bin/log show --last 1d` with the same predicate reads it
+back; the full path is because zsh has a `log` builtin of its own.
+
 On a terminal the client keeps a header and a row for each service at the
 bottom of the screen in place of its log lines, redrawn as the connections
 through each service and their rates change, and the server prints a header when

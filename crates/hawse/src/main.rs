@@ -101,6 +101,10 @@ pub enum LogFormat {
     Auto,
     Pretty,
     Json,
+    /// macOS's unified log, under the subsystem io.github.andriykohut.hawse; what a launchd
+    /// agent runs.
+    #[cfg(target_os = "macos")]
+    Oslog,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -139,12 +143,18 @@ fn main() -> ExitCode {
         )
     }))
     .expect("the hook is set before any report is made");
+    let category = match cli.command {
+        Command::Server { .. } => "server",
+        Command::Client { .. } => "client",
+        _ => "cli",
+    };
     let terminal = logging::init(
         cli.verbose,
         cli.quiet,
         cli.log,
         style,
         matches!(cli.command, Command::Client { .. } | Command::Server { .. }),
+        category,
     );
     match run(cli, terminal) {
         Ok(code) => code,
@@ -232,6 +242,12 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oslog_is_a_log_format_on_macos_only() {
+        let parsed = Cli::try_parse_from(["hawse", "--log", "oslog", "keygen"]);
+        assert_eq!(parsed.is_ok(), cfg!(target_os = "macos"));
+    }
 
     #[test]
     fn the_last_color_flag_decides() {
