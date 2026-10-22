@@ -12,5 +12,7 @@ COPY --chown=65532:65532 state /var/lib/hawse
 # A non-root hawse reads config from $XDG_CONFIG_HOME/hawse or else /etc/hawse, and without a
 # config writes keys to the first.
 ENV XDG_CONFIG_HOME=/var/lib
+# Where keys go when a config mounted at /etc/hawse names none.
+ENV STATE_DIRECTORY=/var/lib/hawse
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/hawse"]

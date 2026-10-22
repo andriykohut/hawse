@@ -50,12 +50,7 @@ a client on different versions do not work together, so run the same tag on both
 ends.
 
 The container reads its config from `/etc/hawse` and keeps keys in
-`/var/lib/hawse`, which is the only directory it can write. The config has to set
-`key` to a full path, because the default resolves next to the config:
-
-```toml
-key = "/var/lib/hawse/server.key"
-```
+`/var/lib/hawse`, which is the only directory it can write.
 
 Run the server with host networking. It binds public ports as clients ask for
 them, and Docker only forwards ports named when the container starts:

@@ -8,15 +8,16 @@ Configuration is read from `$XDG_CONFIG_HOME/hawse/` (`~/.config/hawse/` by
 default), falling back to `/etc/hawse/` when the file is not there. `--config
 PATH` and the `HAWSE_CONFIG` environment variable override the location.
 Relative key paths resolve against the directory containing the config file.
-When neither directory has a config, keys are written to `/etc/hawse/` if
-running as root and to `$XDG_CONFIG_HOME/hawse/` otherwise.
+A config that sets no `key` uses `server.key` or `client.key` beside it when
+that file is there. Otherwise the key goes in `$STATE_DIRECTORY`, which a
+systemd unit sets to `/var/lib/hawse/`, then in `/var/lib/hawse/` if running as
+root, and beside the config otherwise.
 
 Server settings and their defaults:
 
 ```toml
 listen = "[::]:4433"
 bind = "::"
-key = "server.key"
 dynamic_ports = "40000-41000"
 ```
 
@@ -121,8 +122,8 @@ trip before the server spends anything on a handshake. It also lets a failed
 QUIC handshake count against the limit above; without it only failures after
 the handshake do, since an unproven source address can be forged.
 
-Client settings: `server` and `server_key` are required, `key` defaults to
-`client.key`, and each `[expose.NAME]` table needs a `local` address.
+Client settings: `server` and `server_key` are required, `key` defaults as
+above, and each `[expose.NAME]` table needs a `local` address.
 
 `transport.prefer` chooses how the client reaches the server:
 

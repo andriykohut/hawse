@@ -23,17 +23,18 @@ fn load_key(path: &Path) -> miette::Result<Option<Identity>> {
 pub async fn run(config: Option<PathBuf>, connect: bool) -> miette::Result<()> {
     let mut client = None;
     for role in config_file::roles(config.as_deref())? {
-        let (name, located, key, cfg) = match role {
+        let (located, key, cfg) = match role {
             Role::Server => {
                 let (cfg, located) = config_file::load_server(config.clone())?;
-                ("server", located, cfg.key, None)
+                (located, cfg.key, None)
             }
             Role::Client => {
                 let (cfg, located) = config_file::load_client(config.clone())?;
-                ("client", located, cfg.key.clone(), Some(cfg))
+                (located, cfg.key.clone(), Some(cfg))
             }
         };
-        let key_path = located.dir.join(key);
+        let name = role.name();
+        let key_path = paths::key_path(role, &located, key.as_deref());
         let identity = load_key(&key_path)?;
         let file = located.file.display();
         if let Some(identity) = &identity {

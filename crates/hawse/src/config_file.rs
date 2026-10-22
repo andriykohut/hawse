@@ -157,9 +157,9 @@ pub fn client_key_path(explicit: Option<PathBuf>) -> Result<PathBuf, LoadError> 
     let key = if located.exists {
         parse::<ClientConfig>(&located.file, &read(&located.file)?)?.key
     } else {
-        PathBuf::from(Role::Client.key_name())
+        None
     };
-    Ok(located.dir.join(key))
+    Ok(paths::key_path(Role::Client, &located, key.as_deref()))
 }
 
 #[cfg(test)]

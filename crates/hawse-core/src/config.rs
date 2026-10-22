@@ -22,7 +22,7 @@ pub const DEFAULT_PORT: u16 = 4433;
 pub struct ServerConfig {
     pub listen: SocketAddr,
     pub bind: IpAddr,
-    pub key: PathBuf,
+    pub key: Option<PathBuf>,
     pub dynamic_ports: PortSpan,
     pub quic_retry: bool,
     pub limits: Limits,
@@ -35,7 +35,7 @@ impl Default for ServerConfig {
         Self {
             listen: SocketAddr::from(([0u16; 8], DEFAULT_PORT)),
             bind: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-            key: PathBuf::from("server.key"),
+            key: None,
             dynamic_ports: PortSpan {
                 first: 40000,
                 last: 41000,
@@ -136,18 +136,14 @@ impl Default for ServerTransport {
 pub struct ClientConfig {
     pub server: String,
     pub server_key: PublicKey,
-    #[serde(default = "default_client_key")]
-    pub key: PathBuf,
+    #[serde(default)]
+    pub key: Option<PathBuf>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub expose: BTreeMap<String, Expose>,
     #[serde(default)]
     pub transport: ClientTransport,
-}
-
-fn default_client_key() -> PathBuf {
-    PathBuf::from("client.key")
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -519,6 +515,7 @@ prefer = "tcp"
     fn server_example_parses() {
         let cfg: ServerConfig = toml::from_str(SERVER).unwrap();
         assert_eq!(cfg.listen, "0.0.0.0:4433".parse().unwrap());
+        assert_eq!(cfg.key.as_deref(), Some(std::path::Path::new("server.key")));
         assert_eq!(
             cfg.dynamic_ports,
             PortSpan {
@@ -542,7 +539,7 @@ prefer = "tcp"
     fn empty_server_config_is_all_defaults() {
         let cfg: ServerConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.listen, "[::]:4433".parse().unwrap());
-        assert_eq!(cfg.key, PathBuf::from("server.key"));
+        assert_eq!(cfg.key, None);
         assert_eq!(
             cfg.dynamic_ports,
             PortSpan {
@@ -573,7 +570,7 @@ prefer = "tcp"
     fn client_example_parses() {
         let cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         assert_eq!(cfg.name.as_deref(), Some("homelab"));
-        assert_eq!(cfg.key, PathBuf::from("client.key"));
+        assert_eq!(cfg.key, None);
         assert_eq!(cfg.transport.prefer, Prefer::Tcp);
         assert_eq!(cfg.transport.stream_window, units::ByteSize(2 << 20));
         assert_eq!(cfg.transport.congestion, Congestion::Bbr);

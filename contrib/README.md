@@ -16,15 +16,8 @@ from an unpacked archive with `hawse` in place of `target/release/hawse`.
 
 Both units run under `DynamicUser=yes`, so there is no account to create and no
 uid to keep track of. systemd creates `/etc/hawse` for the config, which stays
-owned by root, and `/var/lib/hawse` for the key, which the service owns. Point
-the config at the second one:
-
-```toml
-key = "/var/lib/hawse/server.key"
-```
-
-A relative `key` resolves next to the config file, where the service cannot
-write.
+owned by root, and `/var/lib/hawse` for the key, which the service owns. A config
+that sets no `key` keeps it there.
 
 ## Getting the public key
 
