@@ -8,6 +8,7 @@ pub mod systemd;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use hawse_core::identity::Identity;
 use hawse_proto::key::PublicKey;
@@ -89,7 +90,7 @@ pub fn uninstall(role: Role) -> miette::Result<()> {
     }
     match manager {
         Manager::Systemd => run("systemctl", &["disable", "--now", &name])?,
-        Manager::Launchd => bootout(&name),
+        Manager::Launchd => bootout(&name)?,
     }
     std::fs::remove_file(&file)
         .into_diagnostic()
@@ -191,7 +192,7 @@ fn install_agent(
     }
     let label = launchd::label(role);
     let uid = rustix::process::getuid().as_raw();
-    bootout(&label);
+    bootout(&label)?;
     run(
         "launchctl",
         &["bootstrap", &format!("gui/{uid}"), text(&file)?],
@@ -348,15 +349,31 @@ fn run(program: &str, args: &[&str]) -> miette::Result<()> {
     Ok(())
 }
 
-/// Unloads the agent `label` if launchd has it loaded.
-fn bootout(label: &str) {
-    let uid = rustix::process::getuid().as_raw();
+/// Unloads the agent `label` if launchd has it loaded, and returns once launchd has let go of it,
+/// so it can be loaded again. An error when it has not within 30 s.
+fn bootout(label: &str) -> miette::Result<()> {
+    let target = format!("gui/{}/{label}", rustix::process::getuid().as_raw());
+    let launchctl = |command: &str| {
+        Command::new("launchctl")
+            .args([command, &target])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
     // An agent that is not loaded is the usual case on a first install, and launchctl says so as
     // an error.
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}/{label}")])
-        .stderr(Stdio::null())
-        .status();
+    launchctl("bootout");
+    // bootout returns once it has sent SIGTERM, and launchd refuses to load the label again until
+    // the process has exited, which it forces with SIGKILL after 20 s.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while launchctl("print") {
+        if Instant::now() > deadline {
+            miette::bail!("{label} is still stopping; run this again");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
