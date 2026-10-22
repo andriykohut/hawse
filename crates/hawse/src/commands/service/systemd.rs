@@ -1,6 +1,7 @@
 //! The systemd unit `hawse service install` writes: the contrib unit for the role, run from the
 //! binary and on the config install was given.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::MARKER;
@@ -37,16 +38,18 @@ pub fn unit(role: Role, exe: &str, config: &str, account: Option<&Account<'_>>) 
         match account {
             _ if line.starts_with("ExecStart=") => {
                 exec = true;
-                text += &format!(
-                    "ExecStart={} {name} --config {} --log pretty\n",
+                let _ = writeln!(
+                    text,
+                    "ExecStart={} {name} --config {} --log pretty",
                     quote(exe),
                     quote(config)
                 );
             }
             Some(account) if line == "DynamicUser=yes" => {
                 user = true;
-                text += &format!(
-                    "User={}\nReadWritePaths={}\n",
+                let _ = writeln!(
+                    text,
+                    "User={}\nReadWritePaths={}",
                     account.name,
                     word(account.key_dir)
                 );

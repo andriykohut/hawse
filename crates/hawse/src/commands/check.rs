@@ -9,7 +9,7 @@ use crate::paths::{self, Role};
 
 /// The key at `path`, or `None` when there is none yet. A start would create it; this writes
 /// nothing.
-fn load_key(path: &Path) -> miette::Result<Option<Identity>> {
+pub(crate) fn load_key(path: &Path) -> miette::Result<Option<Identity>> {
     let pem = match std::fs::read_to_string(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         read => read,

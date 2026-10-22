@@ -17,6 +17,8 @@ use clap::{ArgAction, CommandFactory as _, FromArgMatches as _, Parser, Subcomma
 use hawse_proto::key::PublicKey;
 use miette::IntoDiagnostic as _;
 
+use crate::paths::Role;
+
 #[derive(Parser)]
 #[command(
     name = "hawse",
@@ -92,8 +94,30 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Run the server or the client as a service that starts by itself.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Print the completion script for a shell.
     Completions { shell: clap_complete::Shell },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Write the service, enable and start it, and print its public key.
+    Install {
+        role: Role,
+        /// The config the service runs. Without one, the config `server` or `client` would read.
+        #[arg(long, env = "HAWSE_CONFIG")]
+        config: Option<PathBuf>,
+        /// Run the unit as this account instead of a throwaway one, keeping the key beside the
+        /// config (Linux).
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Stop and remove the service; the config and key stay.
+    Uninstall { role: Role },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -227,6 +251,13 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
             Command::Keygen { config, out } => {
                 commands::keygen::run(config, out).map(|()| ExitCode::SUCCESS)
             }
+            Command::Service { action } => match action {
+                ServiceAction::Install { role, config, user } => {
+                    commands::service::install(role, config, user.as_deref())
+                }
+                ServiceAction::Uninstall { role } => commands::service::uninstall(role),
+            }
+            .map(|()| ExitCode::SUCCESS),
             Command::Completions { shell } => {
                 // `generate` panics on a write that fails, which a reader that has gone away
                 // makes of a write to stdout.

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use etcetera::BaseStrategy as _;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Role {
     Server,
     Client,
