@@ -178,9 +178,10 @@ pub async fn keep(mut events: broadcast::Receiver<Event>, keeper: watch::Sender<
     loop {
         match events.recv().await {
             Ok(event) => keeper.send_modify(|keeper| keeper.apply(&event, Instant::now())),
-            // shortcut: a lag loses a session's details and a knock; who is connected comes from
-            // live sessions and stays right. Rebuild from the core if details go missing in
-            // practice.
+            // shortcut: a lag loses a knock, and one that drops a reconnect's Connected leaves the
+            // previous session's transport, agent, up time and services showing as current; only
+            // who is connected comes from live sessions and stays right. Rebuild from the core if
+            // those details go stale in practice.
             Err(RecvError::Lagged(_)) => {}
             Err(RecvError::Closed) => return,
         }

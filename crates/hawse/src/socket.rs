@@ -165,7 +165,8 @@ pub fn bind(role: Role) -> Option<Bound> {
         Place::UnitWithout => {
             tracing::warn!(
                 "this unit has no RuntimeDirectory=, so hawse status cannot reach it; \
-                 sudo hawse service install {} again rewrites it",
+                 `sudo hawse service install {}` again, with the --config and --user it was \
+                 installed with, rewrites it",
                 role.name()
             );
             return None;

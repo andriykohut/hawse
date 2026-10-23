@@ -63,9 +63,8 @@ read. The unit runs under a throwaway account that keeps its key in
 A server with no config yet runs on the defaults and reads
 `/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
 shows how it stands. `sudo hawse status` shows more: the clients and their
-ports, the services and their totals, and the keys that knocked. For a unit
-installed with `--user` and for the agent on macOS, `hawse status` run as that
-account needs no sudo. `--json` prints the same for scripts.
+ports, the services and their totals, and the keys that knocked. `--json`
+prints the same for scripts.
 
 On macOS it writes a LaunchAgent, which starts when you log in, so it runs as
 you, without sudo:
@@ -75,7 +74,7 @@ hawse service install client
 ```
 
 The agent logs to macOS's unified log, which [Logging](/hawse/logging/) says how
-to read.
+to read. `hawse status` for the agent needs no sudo.
 
 Run it again after replacing the binary: it rewrites the service from that
 version and restarts it. `hawse service uninstall server` or `client` stops the
@@ -96,6 +95,8 @@ sudo /mnt/pool/apps/hawse/hawse service install client \
 Run `hawse join` for that config as the same account, without sudo, so the key
 it creates is the one the service reads. A TrueNAS upgrade drops `/etc` and the
 unit with it; a POSTINIT init script that runs the same command puts it back.
+`hawse status` for a unit installed with `--user` needs no sudo when run as that
+account.
 
 Both units keep their keys in `/var/lib/hawse`, so a host runs one of them as a
 unit; a second on the same host needs `--user`.

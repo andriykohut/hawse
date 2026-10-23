@@ -37,8 +37,10 @@ pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitC
     };
     let roles = role.map_or_else(|| vec![Role::Server, Role::Client], |role| vec![role]);
     let mut replies = Vec::new();
-    let mut denied = false;
+    let mut denied = Vec::new();
     for role in roles {
+        let mut answered = false;
+        let mut refused = false;
         for path in socket::candidates(role, &env) {
             match ask(&path) {
                 Ok(line) => {
@@ -47,11 +49,12 @@ pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitC
                     } else {
                         draw(role, &line, style, width)
                     });
+                    answered = true;
                     break;
                 }
                 Err(err) => match err.kind() {
                     io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {}
-                    io::ErrorKind::PermissionDenied => denied = true,
+                    io::ErrorKind::PermissionDenied => refused = true,
                     _ => {
                         let path = path.display();
                         tracing::warn!(%path, %err, "no answer on the status socket");
@@ -59,10 +62,16 @@ pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitC
                 },
             }
         }
+        if refused && !answered {
+            denied.push(role);
+        }
     }
     if replies.is_empty() {
-        eprintln!("{}", nothing_answered(denied));
+        eprintln!("{}", nothing_answered(!denied.is_empty()));
         return Ok(ExitCode::FAILURE);
+    }
+    for role in denied {
+        eprintln!("{}", denied_alongside_answer(role));
     }
     let between = if json { "\n" } else { "\n\n" };
     // One write, which a pipe takes whole even when its reader stops at the first line it wants.
@@ -112,10 +121,18 @@ fn nothing_answered(denied: bool) -> String {
     let why = if denied {
         "run it as root, or as the user the service runs as"
     } else {
-        "one started from a unit hawse 0.10.0 wrote has no socket until hawse service install is \
-         run again"
+        "one started from a unit hawse 0.10.0 wrote has no socket until `sudo hawse service \
+         install` is run again, with the --config and --user it was installed with"
     };
     format!("no hawse server or client answered here\n{why}")
+}
+
+/// What to say on stderr when `role`'s socket refused permission while the other role answered.
+fn denied_alongside_answer(role: Role) -> String {
+    format!(
+        "the hawse {} here: permission denied; run it as root, or as the user the service runs as",
+        role.name()
+    )
 }
 
 #[cfg(test)]
@@ -130,6 +147,17 @@ mod tests {
     fn nothing_answered_says_what_to_do() {
         assert!(nothing_answered(true).contains("run it as root"));
         assert!(nothing_answered(false).contains("hawse service install"));
+        assert!(nothing_answered(false).contains("--config and --user"));
+    }
+
+    #[test]
+    fn a_denied_role_is_named_beside_an_answer() {
+        let hint = denied_alongside_answer(Role::Client);
+        assert!(
+            hint.starts_with("the hawse client here: permission denied"),
+            "{hint}"
+        );
+        assert!(hint.contains("run it as root"), "{hint}");
     }
 
     #[test]
