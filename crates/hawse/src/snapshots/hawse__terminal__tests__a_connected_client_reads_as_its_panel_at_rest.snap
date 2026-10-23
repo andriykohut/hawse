@@ -1,0 +1,9 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "drawn(&status, uncoloured(true), 0)"
+---
+● hawse client  connected  ·  tunnel.example.com:4433  ·  QUIC  ·  38 ms  ·  up 2 h 10 m
+
+  ● jellyfin  tunnel.example.com:8096       ←  127.0.0.1:8096   2  ↓  14G  ↑ 210M
+  ○ wg        tunnel.example.com:51820/udp  ←  127.0.0.1:51820  0  ↓ 1.1G  ↑  96M
+  ✗ ssh       port is not granted to this client

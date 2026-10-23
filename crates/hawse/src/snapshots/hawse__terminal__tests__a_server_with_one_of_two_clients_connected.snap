@@ -1,0 +1,12 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "drawn(&status, uncoloured(true), 0)"
+---
+● hawse server  1 of 2 clients  ·  0.0.0.0:4433  ·  up 3 d 4 h  ·  0.11.0
+
+  ● nas     203.0.113.7  ·  QUIC  ·  up 2 h 10 m  ·  0.11.0
+      jellyfin  :8096
+      wg        :51820/udp
+  ○ laptop  not connected
+
+  ✗ unknown key ed25519:Qm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eHgzUms from 198.51.100.4  ·  3 times, last 12 min ago

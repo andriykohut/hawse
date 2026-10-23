@@ -1,0 +1,9 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "drawn(&Status::Client(status), uncoloured(true), 0)"
+---
+✗ hawse client  down 3 min  ·  tunnel.example.com:4433  ·  retrying in 8 s
+  ✗ server stopped answering
+
+  ↻ jellyfin  tunnel.example.com:8096       ←  127.0.0.1:8096
+  ↻ wg        tunnel.example.com:51820/udp  ←  127.0.0.1:51820
