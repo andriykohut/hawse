@@ -9,7 +9,206 @@ use std::str::FromStr;
 
 use miette::{IntoDiagnostic as _, WrapErr as _};
 
+use super::service::{self, launchd, systemd};
 use crate::paths::{self, Role};
+
+const REPO: &str = "https://github.com/andriykohut/hawse";
+
+/// Replaces this binary with the release `version` names, or the latest, and restarts each
+/// systemd unit or launchd agent that runs it; with `check` it only says whether a newer release
+/// exists. Nothing is written until the release is fetched, checked and tried, and the binary it
+/// replaces stays beside it with `.old` after its name.
+pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
+    let target = target().ok_or_else(|| {
+        miette::miette!("no release binary for this system; try: cargo install --locked hawse")
+    })?;
+    let wanted = match version {
+        Some(version) => version.parse()?,
+        None => latest()?,
+    };
+    let running: Version = env!("CARGO_PKG_VERSION").parse()?;
+    let to = match decide(running, wanted, check)? {
+        Decision::Current => {
+            println!("hawse {running} is the one running");
+            return Ok(());
+        }
+        Decision::Check { latest } if latest == running => {
+            println!("hawse {running} is running, the latest");
+            return Ok(());
+        }
+        Decision::Check { latest } => {
+            println!("hawse {running} is running; {latest} is the latest");
+            return Ok(());
+        }
+        Decision::Install { to } => to,
+    };
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .into_diagnostic()
+        .wrap_err("cannot find the hawse binary")?;
+    let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from);
+    let home = etcetera::home_dir().ok();
+    if let Some(tool) = owner(&exe, cargo_home.as_deref(), home.as_deref()) {
+        miette::bail!(
+            "{} was installed by {tool}; upgrade it with {tool}",
+            exe.display()
+        );
+    }
+    let services = services(&exe);
+    if !paths::is_root()
+        && let Some(unit) = services.iter().find(|s| matches!(s, Service::Unit(_)))
+    {
+        miette::bail!(
+            "run it with sudo: {} runs this binary, and restarting it needs root",
+            unit.name()
+        );
+    }
+    let units = replace(REPO, to, target, &exe)?;
+    for service in &services {
+        restart(service).wrap_err_with(|| {
+            format!(
+                "the new binary is in place; mv {} {} goes back",
+                kept(&exe).display(),
+                exe.display()
+            )
+        })?;
+    }
+    println!("hawse {running} → {to}");
+    for service in &services {
+        println!("restarted {}", service.name());
+    }
+    if to > running {
+        for service in &services {
+            if let Service::Unit(role) = *service
+                && changed(role, &units)
+            {
+                let role = role.name();
+                println!(
+                    "this release changes hawse-{role}.service; `sudo hawse service install {role}` again, with the --config and --user it was installed with, rewrites it"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The latest release, from where its page redirects, which costs no API call.
+fn latest() -> miette::Result<Version> {
+    let url = format!("{REPO}/releases/latest");
+    let effective = output(Command::new("curl").args([
+        "-fsSLI",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{url_effective}",
+        &url,
+    ]))
+    .ok_or_else(|| miette::miette!("cannot reach {url}"))?;
+    tag(&effective)
+        .ok_or_else(|| miette::miette!("{url} led to {effective}, which names no release"))
+}
+
+/// A service that runs hawse, by whatever wrote it.
+enum Service {
+    Unit(Role),
+    /// An agent in the launchd domain of the user `uid`.
+    Agent {
+        role: Role,
+        uid: u32,
+    },
+}
+
+impl Service {
+    fn name(&self) -> String {
+        match *self {
+            Service::Unit(role) => format!("hawse-{}", role.name()),
+            Service::Agent { role, .. } => launchd::label(role),
+        }
+    }
+}
+
+/// The services that run the binary at `exe`, as systemd or launchd reports them. One that runs
+/// another binary is named and left out.
+fn services(exe: &Path) -> Vec<Service> {
+    let mut found = Vec::new();
+    for role in [Role::Server, Role::Client] {
+        let (service, runs) = if Path::new("/run/systemd/system").is_dir() {
+            let unit = format!("hawse-{}", role.name());
+            let show = output(Command::new("systemctl").args([
+                "show",
+                "-p",
+                "ExecStart",
+                "--value",
+                &unit,
+            ]));
+            let runs = show.as_deref().and_then(exec_path).map(PathBuf::from);
+            (Service::Unit(role), runs)
+        } else if cfg!(target_os = "macos") {
+            let uid = agent_uid();
+            let target = format!("gui/{uid}/{}", launchd::label(role));
+            let print = output(Command::new("launchctl").args(["print", &target]));
+            let runs = print.as_deref().and_then(program).map(PathBuf::from);
+            (Service::Agent { role, uid }, runs)
+        } else {
+            continue;
+        };
+        let Some(runs) = runs else { continue };
+        if std::fs::canonicalize(&runs).unwrap_or_else(|_| runs.clone()) == exe {
+            found.push(service);
+        } else {
+            println!("{} runs {}, not this one", service.name(), runs.display());
+        }
+    }
+    found
+}
+
+/// The user whose launchd agents are this upgrade's: the one who ran sudo, under sudo.
+fn agent_uid() -> u32 {
+    let sudo = paths::is_root()
+        .then(|| std::env::var("SUDO_UID").ok()?.parse().ok())
+        .flatten();
+    sudo.unwrap_or_else(|| rustix::process::getuid().as_raw())
+}
+
+fn restart(service: &Service) -> miette::Result<()> {
+    match *service {
+        Service::Unit(role) => run_command(
+            Command::new("systemctl").args(["restart", &format!("hawse-{}", role.name())]),
+        ),
+        Service::Agent { role, uid } => run_command(Command::new("launchctl").args([
+            "kickstart",
+            "-k",
+            &format!("gui/{uid}/{}", launchd::label(role)),
+        ])),
+    }
+}
+
+/// Whether the unit `hawse service install` wrote for `role` comes from another contrib unit
+/// than the release's, among `units`. A unit written by hand is not install's to rewrite.
+fn changed(role: Role, units: &[(Role, String)]) -> bool {
+    let ours =
+        std::fs::read_to_string(systemd::file(role)).is_ok_and(|text| service::is_ours(&text));
+    let release = units
+        .iter()
+        .find(|(r, _)| *r == role)
+        .map(|(_, text)| text.as_str());
+    ours && release.is_some_and(|text| text != systemd::contrib(role))
+}
+
+/// What `command` printed, when it succeeded.
+fn output(command: &mut Command) -> Option<String> {
+    let out = command.output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Where [`replace`] keeps the binary at `exe` that it replaces: beside it, `.old` after its name.
+fn kept(exe: &Path) -> PathBuf {
+    let mut name = exe.file_name().unwrap_or_default().to_owned();
+    name.push(".old");
+    exe.with_file_name(name)
+}
 
 /// A release's number, as its tag names it after the `v`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,6 +318,37 @@ fn program(print: &str) -> Option<&str> {
         .find_map(|line| line.trim().strip_prefix("program = "))
 }
 
+/// What an upgrade from `running` to `wanted` comes to before anything is downloaded.
+#[derive(Debug)]
+enum Decision {
+    /// `wanted` is the release running.
+    Current,
+    /// Only `--check` was asked for.
+    Check {
+        latest: Version,
+    },
+    Install {
+        to: Version,
+    },
+}
+
+/// What to do to go from `running` to `wanted`: with `check` only say so; an error for a release
+/// below [`FLOOR`], which an upgrade does not install.
+fn decide(running: Version, wanted: Version, check: bool) -> miette::Result<Decision> {
+    if check {
+        return Ok(Decision::Check { latest: wanted });
+    }
+    if wanted == running {
+        return Ok(Decision::Current);
+    }
+    if wanted < FLOOR {
+        miette::bail!(
+            "hawse {wanted} keeps its key elsewhere and does not tell systemd it is ready; install a release before {FLOOR} by hand"
+        );
+    }
+    Ok(Decision::Install { to: wanted })
+}
+
 /// Puts release `version` for `target`, fetched from `base`, at `exe`, and keeps the binary it
 /// replaces beside it with `.old` after its name. The release has to match its `SHA256SUMS` and
 /// run here before anything is replaced, and its staging directory is removed either way. Returns
@@ -147,14 +377,16 @@ fn replace(
     let archive = stage.0.join(format!("{name}.tar.gz"));
     let sums = stage.0.join("SHA256SUMS");
     let url = |file: &str| format!("{base}/releases/download/v{version}/{file}");
-    run(Command::new("curl")
-        .arg("-fsSL")
-        .arg("-o")
-        .arg(&archive)
-        .arg(url(&format!("{name}.tar.gz")))
-        .arg("-o")
-        .arg(&sums)
-        .arg(url("SHA256SUMS")))?;
+    run_command(
+        Command::new("curl")
+            .arg("-fsSL")
+            .arg("-o")
+            .arg(&archive)
+            .arg(url(&format!("{name}.tar.gz")))
+            .arg("-o")
+            .arg(&sums)
+            .arg(url("SHA256SUMS")),
+    )?;
     let read = |path: &Path| {
         std::fs::read(path)
             .into_diagnostic()
@@ -165,11 +397,13 @@ fn replace(
     if sum(&sums, &format!("{name}.tar.gz")) != Some(got.as_str()) {
         miette::bail!("{name}.tar.gz does not match the release's SHA256SUMS");
     }
-    run(Command::new("tar")
-        .arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&stage.0))?;
+    run_command(
+        Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&stage.0),
+    )?;
     let unpacked = stage.0.join(&name);
     let new = unpacked.join("hawse");
     let why = match Command::new(&new).arg("--version").output() {
@@ -193,9 +427,7 @@ fn replace(
             Ok((role, String::from_utf8_lossy(&read(&unit)?).into_owned()))
         })
         .collect::<miette::Result<Vec<_>>>()?;
-    let mut old_name = exe.file_name().unwrap_or_default().to_owned();
-    old_name.push(".old");
-    let old = exe.with_file_name(old_name);
+    let old = kept(exe);
     std::fs::copy(exe, &old)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot keep {} as {}", exe.display(), old.display()))?;
@@ -220,7 +452,7 @@ impl Drop for Staging {
 }
 
 /// Runs `command` on this terminal; an error naming it when it fails.
-fn run(command: &mut Command) -> miette::Result<()> {
+fn run_command(command: &mut Command) -> miette::Result<()> {
     let line = std::iter::once(command.get_program())
         .chain(command.get_args())
         .map(|part| part.to_string_lossy())
@@ -346,6 +578,31 @@ mod tests {
         replace(&base, Version(9, 9, 9), target().unwrap(), &exe).unwrap();
         let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o750);
+    }
+
+    #[test]
+    fn a_version_below_the_floor_or_the_running_one_downloads_nothing() {
+        let running = Version(0, 10, 0);
+        assert!(matches!(
+            decide(running, running, false),
+            Ok(Decision::Current)
+        ));
+        assert!(matches!(
+            decide(running, Version(0, 11, 0), true),
+            Ok(Decision::Check { .. })
+        ));
+        let err = decide(running, Version(0, 9, 0), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("by hand"), "{err}");
+        assert!(matches!(
+            decide(running, Version(0, 11, 0), false),
+            Ok(Decision::Install { to }) if to == Version(0, 11, 0)
+        ));
+        assert!(matches!(
+            decide(Version(0, 11, 0), running, false),
+            Ok(Decision::Install { .. })
+        ));
     }
 
     #[test]

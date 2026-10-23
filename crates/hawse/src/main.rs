@@ -99,6 +99,16 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Replace this binary with a release, checked and tried first, and restart the service that
+    /// runs it. The binary it replaces is kept beside it as hawse.old.
+    Upgrade {
+        /// The release to install, newer or older, instead of the latest.
+        #[arg(long)]
+        version: Option<String>,
+        /// Say whether a newer release exists, and change nothing.
+        #[arg(long, conflicts_with = "version")]
+        check: bool,
+    },
     /// Print the completion script for a shell.
     Completions { shell: clap_complete::Shell },
 }
@@ -258,6 +268,9 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
                 ServiceAction::Uninstall { role } => commands::service::uninstall(role),
             }
             .map(|()| ExitCode::SUCCESS),
+            Command::Upgrade { version, check } => {
+                commands::upgrade::run(version.as_deref(), check).map(|()| ExitCode::SUCCESS)
+            }
             Command::Completions { shell } => {
                 // `generate` panics on a write that fails, which a reader that has gone away
                 // makes of a write to stdout.
@@ -273,6 +286,12 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_takes_a_version_of_its_own() {
+        assert!(Cli::try_parse_from(["hawse", "upgrade", "--version", "0.10.0"]).is_ok());
+        assert!(Cli::try_parse_from(["hawse", "upgrade", "--check"]).is_ok());
+    }
 
     #[test]
     fn oslog_is_a_log_format_on_macos_only() {
