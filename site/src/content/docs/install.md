@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Release binaries, the install script, running as a service, Docker images and building from source.
+description: Release binaries, the install script, running as a service, upgrading, Docker images and building from source.
 ---
 
 Each [release](https://github.com/andriykohut/hawse/releases) has a static binary
@@ -96,6 +96,35 @@ unit with it; a POSTINIT init script that runs the same command puts it back.
 
 Both units keep their keys in `/var/lib/hawse`, so a host runs one of them as a
 unit; a second on the same host needs `--user`.
+
+## Upgrading
+
+`hawse upgrade` replaces the binary that runs it with the latest release and
+restarts the systemd unit or LaunchAgent that runs that binary, whoever wrote
+it. It checks the release against its `SHA256SUMS` and runs it once before
+anything is replaced, and keeps the binary it replaces beside it as
+`hawse.old`. Run it on each host, the server first:
+
+```sh
+sudo hawse upgrade
+```
+
+Restarting a systemd unit needs root, and so does a binary in a directory only
+root can write, such as `/usr/local/bin`. On macOS, an agent is restarted for the
+user who ran sudo.
+
+`--check` says whether a newer release exists and changes nothing. `--version`
+installs another release, newer or older, down to 0.10.0: an older one keeps its
+key elsewhere and does not tell systemd when it is ready. To go back by hand, move
+`hawse.old` over the binary and restart the service.
+
+Upgrade restarts a unit and does not rewrite it. When a release changes a unit
+`hawse service install` wrote, upgrade says so, and running the same install
+command again rewrites it.
+
+A binary installed by cargo, Homebrew or Nix is upgraded with that tool, and an
+image by its tag. The checksums show the download is the release's;
+`gh attestation verify` also shows the release was built by this repository.
 
 ## Docker
 
