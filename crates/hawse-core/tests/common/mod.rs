@@ -18,7 +18,7 @@ use hawse_core::frame::read_frame;
 use hawse_core::identity::Identity;
 use hawse_core::net;
 use hawse_core::server::policy::Policy;
-use hawse_core::server::{self, Server, ServerError};
+use hawse_core::server::{self, Server, ServerError, Sessions};
 use hawse_core::tls;
 use hawse_core::transport::quic::{self, QuicTransport, Tuning};
 use hawse_core::transport::tcp;
@@ -121,6 +121,7 @@ pub struct RunningServer {
     pub key: PublicKey,
     pub policy: watch::Sender<Policy>,
     pub events: broadcast::Receiver<server::Event>,
+    pub sessions: Sessions,
     pub cancel: CancellationToken,
     pub task: JoinHandle<()>,
 }
@@ -172,6 +173,7 @@ pub fn start_server(cfg: &ServerConfig, identity: &Identity) -> RunningServer {
     let addr = server.local_addr();
     let policy = server.policy();
     let events = server.events();
+    let sessions = server.sessions();
     let cancel = CancellationToken::new();
     let task = tokio::spawn(server.serve(cancel.clone()));
     RunningServer {
@@ -179,6 +181,7 @@ pub fn start_server(cfg: &ServerConfig, identity: &Identity) -> RunningServer {
         key: identity.public_key(),
         policy,
         events,
+        sessions,
         cancel,
         task,
     }

@@ -54,6 +54,11 @@ impl Policy {
     pub fn is_empty(&self) -> bool {
         self.by_key.is_empty()
     }
+
+    /// Every configured client with its key, in no particular order.
+    pub fn grants(&self) -> impl Iterator<Item = (&PublicKey, &Grant)> {
+        self.by_key.iter()
+    }
 }
 
 #[cfg(test)]
@@ -103,6 +108,29 @@ mod tests {
         assert!(!grant.allows("8050".parse().unwrap()));
         assert!(!grant.allows("444".parse().unwrap()));
         assert!(policy.lookup(&key(2)).is_none());
+    }
+
+    #[test]
+    fn grants_lists_every_client_the_config_names() {
+        let mut cfg = ServerConfig::default();
+        for (name, b) in [("nas", 1), ("laptop", 2)] {
+            cfg.clients.insert(
+                name.into(),
+                ClientPolicy {
+                    key: key(b),
+                    ports: vec![],
+                    bind: None,
+                    allow: vec![],
+                },
+            );
+        }
+        let policy = Policy::from_config(&cfg);
+        let mut grants: Vec<_> = policy
+            .grants()
+            .map(|(k, g)| (g.name.as_str(), *k))
+            .collect();
+        grants.sort();
+        assert_eq!(grants, [("laptop", key(2)), ("nas", key(1))]);
     }
 
     #[test]

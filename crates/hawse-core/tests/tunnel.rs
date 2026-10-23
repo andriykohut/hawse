@@ -73,6 +73,38 @@ async fn a_loopback_bind_serves_visitors_on_loopback() {
     server.cancel.cancel();
 }
 
+#[tokio::test]
+async fn a_server_lists_a_connected_client_until_it_leaves() {
+    let (server_id, client_id) = ids();
+    let client_key = client_id.public_key();
+    let mut server = start_server(&server_config(&[("test", client_key, &[])]), &server_id);
+    let mut client = start_client(client_config(server.addr, server.key, &[]), client_id);
+    assert!(matches!(
+        next_event(&mut client.events).await,
+        Event::Connected { .. }
+    ));
+    let live = server.sessions.live();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].0, client_key);
+
+    client.cancel.cancel();
+    client.task.await.unwrap().unwrap();
+    loop {
+        if matches!(told(&mut server).await, Told::Ended { .. }) {
+            break;
+        }
+    }
+    // The session releases its key after it tells of its end, once its tasks have wound down.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.sessions.live().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the session released its key within 5 s");
+    server.cancel.cancel();
+}
+
 async fn echo_through_the_tunnel(prefer: Prefer, expected: TransportKind) {
     let (server_id, client_id) = ids();
     let server = start_server(
