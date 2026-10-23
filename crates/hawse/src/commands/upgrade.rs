@@ -58,7 +58,12 @@ pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
             exe.display()
         );
     }
-    let services = services(&exe);
+    let found = services(&exe);
+    let services: Vec<&Service> = found
+        .iter()
+        .filter(|found| found.running)
+        .map(|found| &found.service)
+        .collect();
     if !paths::is_root()
         && let Some(unit) = services.iter().find(|s| matches!(s, Service::Unit(_)))
     {
@@ -77,21 +82,15 @@ pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
             )
         })?;
     }
-    let restarted: Vec<String> = services.iter().map(Service::name).collect();
+    let restarted: Vec<String> = services.iter().map(|service| service.name()).collect();
     for line in report(running, to, &restarted) {
         println!("{line}");
     }
-    if to > running {
-        for service in &services {
-            if let Service::Unit(role) = *service
-                && changed(role, &units)
-            {
-                let role = role.name();
-                println!(
-                    "this release changes hawse-{role}.service; `sudo hawse service install {role}` again, with the --config and --user it was installed with, rewrites it"
-                );
-            }
-        }
+    for role in advise(&found, |role| changed(role, &units)) {
+        let role = role.name();
+        println!(
+            "hawse {to} ships another hawse-{role}.service than {running}; `sudo hawse service install {role}` again, with the --config and --user it was installed with, rewrites it"
+        );
     }
     Ok(())
 }
@@ -149,50 +148,66 @@ impl Service {
     }
 }
 
+/// A service that runs the binary an upgrade replaces, and whether it is running.
+struct Found {
+    service: Service,
+    running: bool,
+}
+
 /// The services that run the binary at `exe`, as systemd or launchd reports them. One that runs
-/// another binary is named and left out.
-fn services(exe: &Path) -> Vec<Service> {
+/// another binary is named and left out; one that is not running is named.
+fn services(exe: &Path) -> Vec<Found> {
     let mut found = Vec::new();
     for role in [Role::Server, Role::Client] {
-        let (service, runs) = if Path::new("/run/systemd/system").is_dir() {
+        let (service, runs, running) = if Path::new("/run/systemd/system").is_dir() {
             let unit = format!("hawse-{}", role.name());
-            let show = output(Command::new("systemctl").args([
-                "show",
-                "-p",
-                "ExecStart",
-                "--value",
-                &unit,
-            ]));
-            let runs = show.as_deref().and_then(exec_path).map(PathBuf::from);
-            let state = output(Command::new("systemctl").args([
-                "show",
-                "-p",
-                "ActiveState",
-                "--value",
-                &unit,
-            ]));
-            if runs.is_some() && !state.as_deref().is_some_and(|state| running(state.trim())) {
-                println!("{unit} is not running, and is left as it is");
-                continue;
-            }
-            (Service::Unit(role), runs)
+            let show = |property: &str| {
+                output(Command::new("systemctl").args(["show", "-p", property, "--value", &unit]))
+            };
+            let runs = show("ExecStart")
+                .as_deref()
+                .and_then(exec_path)
+                .map(PathBuf::from);
+            let active = show("ActiveState").is_some_and(|state| running(state.trim()));
+            (Service::Unit(role), runs, active)
         } else if cfg!(target_os = "macos") {
             let uid = agent_uid();
             let target = format!("gui/{uid}/{}", launchd::label(role));
             let print = output(Command::new("launchctl").args(["print", &target]));
             let runs = print.as_deref().and_then(program).map(PathBuf::from);
-            (Service::Agent { role, uid }, runs)
+            let active = print.as_deref().is_some_and(agent_running);
+            (Service::Agent { role, uid }, runs, active)
         } else {
             continue;
         };
         let Some(runs) = runs else { continue };
-        if std::fs::canonicalize(&runs).unwrap_or_else(|_| runs.clone()) == exe {
-            found.push(service);
-        } else {
+        if std::fs::canonicalize(&runs).unwrap_or_else(|_| runs.clone()) != exe {
             println!("{} runs {}, not this one", service.name(), runs.display());
+            continue;
         }
+        if !running {
+            println!("{} is not running, and is left as it is", service.name());
+        }
+        found.push(Found { service, running });
     }
     found
+}
+
+/// Whether `launchctl print` says the agent's process is running, rather than loaded and waiting.
+fn agent_running(print: &str) -> bool {
+    print.lines().any(|line| line.trim() == "state = running")
+}
+
+/// The roles of the units among `found` to advise rewriting, running or not: those `differs` says
+/// the release ships another contrib unit for. An agent is written by code, not from contrib.
+fn advise(found: &[Found], differs: impl Fn(Role) -> bool) -> Vec<Role> {
+    found
+        .iter()
+        .filter_map(|found| match found.service {
+            Service::Unit(role) if differs(role) => Some(role),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The user whose launchd agents are this upgrade's: the one who ran sudo, under sudo.
@@ -323,7 +338,9 @@ fn owner(exe: &Path, cargo_home: Option<&Path>, home: Option<&Path>) -> Option<&
     let cargo = cargo_home
         .map(Path::to_path_buf)
         .or_else(|| home.map(|home| home.join(".cargo")));
-    if cargo.is_some_and(|cargo| exe.starts_with(cargo.join("bin"))) {
+    // The directory as well as the home: under sudo, HOME is root's and CARGO_HOME is gone.
+    let in_cargo_bin = exe.parent().is_some_and(|dir| dir.ends_with(".cargo/bin"));
+    if in_cargo_bin || cargo.is_some_and(|cargo| exe.starts_with(cargo.join("bin"))) {
         Some("cargo")
     } else if ["/opt/homebrew", "/usr/local/Cellar", "/home/linuxbrew"]
         .iter()
@@ -408,17 +425,28 @@ fn replace(
     use std::os::unix::fs::MetadataExt as _;
 
     let dir = exe.parent().unwrap_or(Path::new("/"));
-    let stage = Staging(dir.join(".hawse-upgrade"));
-    // Left by an upgrade that was killed.
-    let _ = std::fs::remove_dir_all(&stage.0);
-    if let Err(err) = std::fs::create_dir(&stage.0) {
-        if err.kind() == std::io::ErrorKind::PermissionDenied {
-            miette::bail!("cannot write to {}; run it with sudo", dir.display());
+    let staging = dir.join(".hawse-upgrade");
+    // The directory is also the lock: one already there is another upgrade's, or a killed one's.
+    if let Err(err) = std::fs::create_dir(&staging) {
+        match err.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                miette::bail!("cannot write to {}; run it with sudo", dir.display());
+            }
+            std::io::ErrorKind::AlreadyExists => {
+                miette::bail!(
+                    "another upgrade of {} is staging in {}; if none is running, one was killed, so remove it and run this again",
+                    exe.display(),
+                    staging.display()
+                );
+            }
+            _ => {
+                return Err(err)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("cannot create {}", staging.display()));
+            }
         }
-        return Err(err)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("cannot create {}", stage.0.display()));
     }
+    let stage = Staging(staging);
     let name = format!("hawse-{version}-{target}");
     let archive = stage.0.join(format!("{name}.tar.gz"));
     let sums = stage.0.join("SHA256SUMS");
@@ -686,6 +714,53 @@ mod tests {
     }
 
     #[test]
+    fn an_upgrade_already_staging_is_left_to_finish() {
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
+        let other = bin.path().join(".hawse-upgrade");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("its.tar.gz"), "").unwrap();
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        let err = replace(&base, Version(9, 9, 9), target().unwrap(), &exe)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("another upgrade"), "{err}");
+        assert!(other.join("its.tar.gz").exists());
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_stopped_agent_is_not_running() {
+        assert!(agent_running(
+            "gui/501/x = {\n\tstate = running\n\tprogram = /h\n"
+        ));
+        assert!(!agent_running(
+            "gui/501/x = {\n\tstate = not running\n\tprogram = /h\n"
+        ));
+        assert!(!agent_running(""));
+    }
+
+    #[test]
+    fn a_unit_that_runs_this_binary_gets_the_advice_running_or_not() {
+        let found = [
+            Found {
+                service: Service::Unit(Role::Client),
+                running: false,
+            },
+            Found {
+                service: Service::Agent {
+                    role: Role::Server,
+                    uid: 501,
+                },
+                running: true,
+            },
+        ];
+        assert_eq!(advise(&found, |_| true), [Role::Client]);
+        assert_eq!(advise(&found, |_| false), Vec::<Role>::new());
+    }
+
+    #[test]
     fn a_missing_archive_is_a_failed_download() {
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
@@ -753,6 +828,12 @@ mod tests {
         assert_eq!(at("/opt/homebrew/bin/hawse"), Some("Homebrew"));
         assert_eq!(at("/nix/store/abc-hawse/bin/hawse"), Some("Nix"));
         assert_eq!(at("/usr/local/bin/hawse"), None);
+        // Under sudo, HOME is root's and CARGO_HOME is gone.
+        let root = Some(Path::new("/root"));
+        assert_eq!(
+            owner(Path::new("/home/alice/.cargo/bin/hawse"), None, root),
+            Some("cargo")
+        );
     }
 
     #[test]
