@@ -23,10 +23,7 @@ pub fn file(role: Role) -> PathBuf {
 /// `account` it runs as that account, may write to the account's key directory, and has systemd
 /// make no directories for it.
 pub fn unit(role: Role, exe: &str, config: &str, account: Option<&Account<'_>>) -> String {
-    let contrib = match role {
-        Role::Server => include_str!("../../../units/hawse-server.service"),
-        Role::Client => include_str!("../../../units/hawse-client.service"),
-    };
+    let contrib = contrib(role);
     let name = role.name();
     let mut text = format!(
         "# {MARKER} Run it again to update this file, and put changes in a drop-in (systemctl edit hawse-{name}).\n"
@@ -67,6 +64,14 @@ pub fn unit(role: Role, exe: &str, config: &str, account: Option<&Account<'_>>) 
     assert!(exec, "the contrib unit has an ExecStart= line");
     assert!(user, "the contrib unit has a DynamicUser=yes line");
     text
+}
+
+/// The contrib unit for `role`, as this release ships it.
+pub fn contrib(role: Role) -> &'static str {
+    match role {
+        Role::Server => include_str!("../../../units/hawse-server.service"),
+        Role::Client => include_str!("../../../units/hawse-client.service"),
+    }
 }
 
 /// Whether systemd runs a binary at `path`: it refuses one that holds a quote, a backslash or a

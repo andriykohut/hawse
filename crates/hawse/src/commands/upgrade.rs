@@ -3,8 +3,13 @@
 //! beside it, and restarts the service that runs it.
 
 use std::fmt::{self, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::str::FromStr;
+
+use miette::{IntoDiagnostic as _, WrapErr as _};
+
+use crate::paths::{self, Role};
 
 /// A release's number, as its tag names it after the `v`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,6 +119,123 @@ fn program(print: &str) -> Option<&str> {
         .find_map(|line| line.trim().strip_prefix("program = "))
 }
 
+/// Puts release `version` for `target`, fetched from `base`, at `exe`, and keeps the binary it
+/// replaces beside it with `.old` after its name. The release has to match its `SHA256SUMS` and
+/// run here before anything is replaced, and its staging directory is removed either way. Returns
+/// the release's unit for each role, from its `contrib/`.
+fn replace(
+    base: &str,
+    version: Version,
+    target: &str,
+    exe: &Path,
+) -> miette::Result<Vec<(Role, String)>> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let dir = exe.parent().unwrap_or(Path::new("/"));
+    let stage = Staging(dir.join(".hawse-upgrade"));
+    // Left by an upgrade that was killed.
+    let _ = std::fs::remove_dir_all(&stage.0);
+    if let Err(err) = std::fs::create_dir(&stage.0) {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            miette::bail!("cannot write to {}; run it with sudo", dir.display());
+        }
+        return Err(err)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("cannot create {}", stage.0.display()));
+    }
+    let name = format!("hawse-{version}-{target}");
+    let archive = stage.0.join(format!("{name}.tar.gz"));
+    let sums = stage.0.join("SHA256SUMS");
+    let url = |file: &str| format!("{base}/releases/download/v{version}/{file}");
+    run(Command::new("curl")
+        .arg("-fsSL")
+        .arg("-o")
+        .arg(&archive)
+        .arg(url(&format!("{name}.tar.gz")))
+        .arg("-o")
+        .arg(&sums)
+        .arg(url("SHA256SUMS")))?;
+    let read = |path: &Path| {
+        std::fs::read(path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("cannot read {}", path.display()))
+    };
+    let got = hex(&hawse_core::tls::sha256(&read(&archive)?));
+    let sums = String::from_utf8_lossy(&read(&sums)?).into_owned();
+    if sum(&sums, &format!("{name}.tar.gz")) != Some(got.as_str()) {
+        miette::bail!("{name}.tar.gz does not match the release's SHA256SUMS");
+    }
+    run(Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&stage.0))?;
+    let unpacked = stage.0.join(&name);
+    let new = unpacked.join("hawse");
+    let why = match Command::new(&new).arg("--version").output() {
+        Ok(out) if out.status.success() && says(&String::from_utf8_lossy(&out.stdout), version) => {
+            None
+        }
+        Ok(out) if out.status.success() => Some(format!(
+            "it says {}",
+            String::from_utf8_lossy(&out.stdout).trim()
+        )),
+        Ok(out) => Some(format!("it ended with {}", out.status)),
+        Err(err) => Some(err.to_string()),
+    };
+    if let Some(why) = why {
+        miette::bail!("the {version} binary does not run here: {why}");
+    }
+    let units = [Role::Server, Role::Client]
+        .into_iter()
+        .map(|role| {
+            let unit = unpacked.join(format!("contrib/hawse-{}.service", role.name()));
+            Ok((role, String::from_utf8_lossy(&read(&unit)?).into_owned()))
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    let mut old_name = exe.file_name().unwrap_or_default().to_owned();
+    old_name.push(".old");
+    let old = exe.with_file_name(old_name);
+    std::fs::copy(exe, &old)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot keep {} as {}", exe.display(), old.display()))?;
+    let meta = std::fs::metadata(exe).into_diagnostic()?;
+    std::fs::set_permissions(&new, meta.permissions()).into_diagnostic()?;
+    if paths::is_root() {
+        std::os::unix::fs::chown(&new, Some(meta.uid()), Some(meta.gid())).into_diagnostic()?;
+    }
+    std::fs::rename(&new, exe)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot replace {}", exe.display()))?;
+    Ok(units)
+}
+
+/// Removes the staging directory however [`replace`] ends.
+struct Staging(PathBuf);
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs `command` on this terminal; an error naming it when it fails.
+fn run(command: &mut Command) -> miette::Result<()> {
+    let line = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let status = command
+        .status()
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot run {line}"))?;
+    if !status.success() {
+        miette::bail!("{line} failed");
+    }
+    Ok(())
+}
+
 /// Whether `output`, what a binary printed for `--version`, names `version`.
 fn says(output: &str, version: Version) -> bool {
     output.trim() == format!("hawse {version}")
@@ -122,6 +244,109 @@ fn says(output: &str, version: Version) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lays out a release of `version` under `root`, whose binary is the shell script `binary`,
+    /// and returns the base URL curl fetches it from.
+    fn release(root: &Path, version: &str, binary: &str) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+        let name = format!("hawse-{version}-{}", target().unwrap());
+        let dir = root.join("stage").join(&name);
+        std::fs::create_dir_all(dir.join("contrib")).unwrap();
+        std::fs::write(dir.join("hawse"), binary).unwrap();
+        std::fs::set_permissions(dir.join("hawse"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::write(dir.join("contrib/hawse-server.service"), "server unit").unwrap();
+        std::fs::write(dir.join("contrib/hawse-client.service"), "client unit").unwrap();
+        let download = root.join(format!("releases/download/v{version}"));
+        std::fs::create_dir_all(&download).unwrap();
+        let archive = download.join(format!("{name}.tar.gz"));
+        let status = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(root.join("stage"))
+            .arg(&name)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let hash = hex(&hawse_core::tls::sha256(&std::fs::read(&archive).unwrap()));
+        std::fs::write(
+            download.join("SHA256SUMS"),
+            format!("{hash}  {name}.tar.gz\n"),
+        )
+        .unwrap();
+        format!("file://{}", root.display())
+    }
+
+    #[test]
+    fn a_release_replaces_the_binary_and_keeps_the_old_one() {
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        let units = replace(&base, Version(9, 9, 9), target().unwrap(), &exe).unwrap();
+        assert!(
+            std::fs::read_to_string(&exe)
+                .unwrap()
+                .contains("hawse 9.9.9")
+        );
+        assert_eq!(
+            std::fs::read_to_string(bin.path().join("hawse.old")).unwrap(),
+            "old"
+        );
+        assert!(!bin.path().join(".hawse-upgrade").exists());
+        assert_eq!(
+            units,
+            vec![
+                (Role::Server, "server unit".to_owned()),
+                (Role::Client, "client unit".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bad_checksum_replaces_nothing_and_leaves_nothing() {
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
+        let sums = root.path().join("releases/download/v9.9.9/SHA256SUMS");
+        let text = std::fs::read_to_string(&sums).unwrap();
+        std::fs::write(&sums, format!("{}{}", "0".repeat(64), &text[64..])).unwrap();
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        let err = replace(&base, Version(9, 9, 9), target().unwrap(), &exe)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match"), "{err}");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+        assert!(!bin.path().join(".hawse-upgrade").exists());
+        assert!(!bin.path().join("hawse.old").exists());
+    }
+
+    #[test]
+    fn a_binary_that_does_not_run_replaces_nothing() {
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\nexit 1\n");
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        let err = replace(&base, Version(9, 9, 9), target().unwrap(), &exe)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not run here"), "{err}");
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+    }
+
+    #[test]
+    fn the_new_binary_keeps_the_old_ones_owner_and_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o750)).unwrap();
+        replace(&base, Version(9, 9, 9), target().unwrap(), &exe).unwrap();
+        let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750);
+    }
 
     #[test]
     fn a_version_reads_with_or_without_a_v() {
