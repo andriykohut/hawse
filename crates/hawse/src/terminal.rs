@@ -552,10 +552,14 @@ fn client_status_header(status: &ClientStatus, style: Style, room: usize) -> Vec
             cause,
         } => {
             let down = style.red(&format!("down {}", span(secs(*down_s))));
+            let retry = match retry_in_s {
+                0 => "retrying now".to_owned(),
+                secs => format!("retrying in {secs} s"),
+            };
             let header = [
                 format!("{no} hawse client  {down}"),
                 server,
-                format!("  {}  retrying in {retry_in_s} s", dot()),
+                format!("  {}  {retry}", dot()),
             ];
             lines.push(fit(&header, room));
             lines.push(fit(&[format!("  {no} {cause}")], room));
@@ -732,11 +736,12 @@ fn server_status_lines(status: &ServerStatus, style: Style, room: usize) -> Vec<
     }
     for knock in &status.unknown_keys {
         // Fields, so a narrow terminal drops the counts before it cuts the key to be pasted.
+        let times = if knock.times == 1 { "time" } else { "times" };
         let fields = [
             format!("  {no} unknown key {}", knock.key),
             format!(" from {}", ip(&knock.remote)),
             format!(
-                "  {}  {} times, last {} ago",
+                "  {}  {} {times}, last {} ago",
                 dot(),
                 knock.times,
                 span(secs(knock.last_s))
@@ -1703,6 +1708,14 @@ port = "51820/udp"
         // The last session's answers stay until the next session, and ssh's had not come.
         status.services[2].answer = Answer::Pending;
         insta::assert_snapshot!(drawn(&Status::Client(status), uncoloured(true), 0));
+
+        let due = client_status(LinkStatus::Down {
+            down_s: 180,
+            retry_in_s: 0,
+            cause: "server stopped answering".to_owned(),
+        });
+        let lines = status_lines(&Status::Client(due), uncoloured(true), 0);
+        assert!(lines[0].ends_with("  ·  retrying now"), "{lines:?}");
     }
 
     #[test]
@@ -1753,6 +1766,13 @@ port = "51820/udp"
         insta::assert_snapshot!(drawn(&status, uncoloured(true), 0));
         let lines = status_lines(&status, coloured(), 0);
         assert!(lines[0].starts_with("\x1b[31m✗"), "{lines:?}");
+
+        let Status::Server(mut once) = status else {
+            unreachable!()
+        };
+        once.unknown_keys[0].times = 1;
+        let out = drawn(&Status::Server(once), uncoloured(true), 0);
+        assert!(out.ends_with("  ·  1 time, last 12 min ago"), "{out}");
     }
 
     #[test]
