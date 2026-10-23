@@ -284,9 +284,13 @@ async fn answer<S: Serialize>(mut stream: UnixStream, status: &impl Fn() -> S) {
             Err(err) => refusal(&format!("cannot read this request: {err}")),
         },
     };
-    // A caller that has gone has nobody to tell.
-    let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
-    let _ = write.shutdown().await;
+    // A caller that has gone has nobody to tell, and one that stops reading is not waited for
+    // past the deadline.
+    let _ = timeout_at(deadline, async {
+        write.write_all(format!("{reply}\n").as_bytes()).await?;
+        write.shutdown().await
+    })
+    .await;
     if over_limit {
         // On Linux, closing a stream socket with unread data resets the peer's connection, which
         // would turn the caller's read of the refusal's end into an error. Reading to the
@@ -556,5 +560,28 @@ mod tests {
         let mut rest = Vec::new();
         silent.read_to_end(&mut rest).await.unwrap();
         assert_eq!(rest, b"");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_caller_that_never_reads_its_reply_is_dropped_at_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client.sock");
+        let bound = bind_at(&path).unwrap();
+        // Far more than the socket's buffers hold, so the write waits on the caller.
+        let big = "x".repeat(8 << 20);
+        tokio::spawn(bound.serve(move || big.clone()));
+        let mut caller = UnixStream::connect(&path).await.unwrap();
+        caller
+            .write_all(b"{\"request\":\"status\"}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(REQUEST_WAIT).await;
+        let mut got = Vec::new();
+        caller.read_to_end(&mut got).await.unwrap();
+        assert!(
+            got.len() < 8 << 20,
+            "the whole reply came: {} bytes",
+            got.len()
+        );
     }
 }

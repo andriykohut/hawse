@@ -315,6 +315,13 @@ fn status_json_prints_one_line_per_role() {
 
 #[test]
 fn status_with_nothing_running_exits_1_and_says_so() {
+    // `hawse status` always tries the units' sockets under /run, which a hawse unit running on
+    // this machine would answer on.
+    let units = ["server", "client"].map(|role| format!("/run/hawse-{role}/{role}.sock"));
+    if units.iter().any(|path| std::path::Path::new(path).exists()) {
+        eprintln!("skipped: a hawse unit runs on this machine");
+        return;
+    }
     let empty = tempfile::tempdir().unwrap();
     let out = hawse()
         .arg("status")
