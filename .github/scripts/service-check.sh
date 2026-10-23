@@ -6,6 +6,8 @@ me=$(id -un)
 sudo install -m755 target/debug/hawse "$bin"
 server_key=$(sudo "$bin" service install server | sed -n 's/^server key: //p')
 test -n "$server_key"
+# hawse upgrade finds the binary a unit runs as systemd reports it.
+systemctl show -p ExecStart --value hawse-server | grep -q "path=$bin "
 # A second install is how a unit is upgraded.
 sudo "$bin" service install server >/dev/null
 sudo install -d -o "$me" /srv/hawse
