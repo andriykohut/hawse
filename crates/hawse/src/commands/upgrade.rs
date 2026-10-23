@@ -116,14 +116,12 @@ fn running(state: &str) -> bool {
 /// The latest release, from where its page redirects, which costs no API call.
 fn latest() -> miette::Result<Version> {
     let url = format!("{REPO}/releases/latest");
-    let effective = output(Command::new("curl").args([
-        "-fsSLI",
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{url_effective}",
-        &url,
-    ]))
+    // curl's own error, such as a name that does not resolve, goes to the terminal.
+    let effective = output(
+        Command::new("curl")
+            .args(["-fsSLI", "-o", "/dev/null", "-w", "%{url_effective}", &url])
+            .stderr(std::process::Stdio::inherit()),
+    )
     .ok_or_else(|| miette::miette!("cannot reach {url}"))?;
     tag(&effective)
         .ok_or_else(|| miette::miette!("{url} led to {effective}, which names no release"))
@@ -422,8 +420,6 @@ fn replace(
     target: &str,
     exe: &Path,
 ) -> miette::Result<Vec<(Role, String)>> {
-    use std::os::unix::fs::MetadataExt as _;
-
     let dir = exe.parent().unwrap_or(Path::new("/"));
     let staging = dir.join(".hawse-upgrade");
     // The directory is also the lock: one already there is another upgrade's, or a killed one's.
@@ -503,19 +499,47 @@ fn replace(
             Ok((role, String::from_utf8_lossy(&read(&unit)?).into_owned()))
         })
         .collect::<miette::Result<Vec<_>>>()?;
+    swap(exe, &new, &stage.0)?;
+    Ok(units)
+}
+
+/// Keeps the binary at `exe` as [`kept`] and renames `new` over it, both with its mode and,
+/// under root, its owner. The kept copy is made in `stage` first.
+fn swap(exe: &Path, new: &Path, stage: &Path) -> miette::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let meta = std::fs::metadata(exe)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot read {}", exe.display()))?;
+    // Both files take the running binary's owner, so a root upgrade of an account's binary leaves
+    // them that account's.
+    let own = |path: &Path| -> miette::Result<()> {
+        std::fs::set_permissions(path, meta.permissions())
+            .into_diagnostic()
+            .wrap_err_with(|| format!("cannot set the mode of {}", path.display()))?;
+        if paths::is_root() {
+            std::os::unix::fs::chown(path, Some(meta.uid()), Some(meta.gid()))
+                .into_diagnostic()
+                .wrap_err_with(|| format!("cannot set the owner of {}", path.display()))?;
+        }
+        Ok(())
+    };
+    // Copied into staging and renamed into place, so the way back is never half written and a
+    // link at its name is replaced rather than written through.
     let old = kept(exe);
-    std::fs::copy(exe, &old)
+    let staged_old = stage.join("hawse.old");
+    std::fs::copy(exe, &staged_old)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot copy {}", exe.display()))?;
+    own(&staged_old)?;
+    std::fs::rename(&staged_old, &old)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot keep {} as {}", exe.display(), old.display()))?;
-    let meta = std::fs::metadata(exe).into_diagnostic()?;
-    std::fs::set_permissions(&new, meta.permissions()).into_diagnostic()?;
-    if paths::is_root() {
-        std::os::unix::fs::chown(&new, Some(meta.uid()), Some(meta.gid())).into_diagnostic()?;
-    }
-    std::fs::rename(&new, exe)
+    own(new)?;
+    std::fs::rename(new, exe)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot replace {}", exe.display()))?;
-    Ok(units)
+    Ok(())
 }
 
 /// Removes the staging directory however [`replace`] ends.
@@ -641,6 +665,25 @@ mod tests {
             .to_string();
         assert!(err.contains("does not run here"), "{err}");
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+    }
+
+    #[test]
+    fn the_kept_binary_replaces_a_link_rather_than_writing_through_it() {
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        let victim = bin.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, bin.path().join("hawse.old")).unwrap();
+        replace(&base, Version(9, 9, 9), target().unwrap(), &exe).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        let kept = std::fs::symlink_metadata(bin.path().join("hawse.old")).unwrap();
+        assert!(kept.is_file());
+        assert_eq!(
+            std::fs::read_to_string(bin.path().join("hawse.old")).unwrap(),
+            "old"
+        );
     }
 
     #[test]
