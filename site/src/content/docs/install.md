@@ -62,7 +62,10 @@ read. The unit runs under a throwaway account that keeps its key in
 `/var/lib/hawse`.
 A server with no config yet runs on the defaults and reads
 `/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
-shows how it stands.
+shows how it stands. `sudo hawse status` shows more: the clients and their
+ports, the services and their totals, and the keys that knocked. For a unit
+installed with `--user` and for the agent on macOS, `hawse status` run as that
+account needs no sudo. `--json` prints the same for scripts.
 
 On macOS it writes a LaunchAgent, which starts when you log in, so it runs as
 you, without sudo:

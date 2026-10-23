@@ -73,6 +73,10 @@ it answered on. It hangs up before the client would introduce itself, so a
 client already running with the same key keeps its session, and the server
 does not say whether the key is authorized.
 
+`hawse status` asks the server and the client running on this host how they
+stand, and `hawse status server` or `client` asks only that one. It exits 0
+when one answered, whatever state it is in, and 1 when none did.
+
 Both ends read their config again when the file changes, and on SIGHUP. The
 server takes up `[clients.*]` without touching the other sessions: a client
 whose table is gone is disconnected at once, one whose `bind` or `allow`

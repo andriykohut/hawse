@@ -29,7 +29,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What a caller may ask. The reply to [`Request::Status`] is whatever the status function
 /// given to [`Bound::serve`] returns.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "lowercase")]
 pub enum Request {
     Status,
@@ -119,10 +119,6 @@ pub fn place(role: Role, env: &Env) -> Place {
 /// Every path a caller of `role` tries, in order. A caller does not know how the process it asks
 /// was started, so this is the union of the places [`place`] can choose, minus those the
 /// platform does not have.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "`hawse status` calls it to find the socket")
-)]
 pub fn candidates(role: Role, env: &Env) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     paths.extend(

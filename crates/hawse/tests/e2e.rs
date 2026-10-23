@@ -183,8 +183,16 @@ fn ask_status(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&line).ok()
 }
 
-#[test]
-fn a_running_server_and_client_each_answer_on_a_socket() {
+/// A server and a client that reaches it, each with its status socket in `run`, once the client
+/// is up and the server has answered its bind.
+struct Pair {
+    _server: Proc,
+    _client: Proc,
+    run: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+}
+
+fn running_pair() -> Pair {
     let dir = tempfile::tempdir().unwrap();
     let run = tempfile::tempdir().unwrap();
     let server_key = keygen(&dir.path().join("server.key"));
@@ -204,7 +212,7 @@ fn a_running_server_and_client_each_answer_on_a_socket() {
         format!("server = \"127.0.0.1:{server_port}\"\nserver_key = \"{server_key}\"\nname = \"e2e\"\n\n[expose.echo]\nlocal = \"{echo_addr}\"\nport = {public_port}\n"),
     )
     .unwrap();
-    let _server = Proc(
+    let server = Proc(
         hawse()
             .args(["server", "--config"])
             .arg(dir.path().join("server.toml"))
@@ -212,7 +220,7 @@ fn a_running_server_and_client_each_answer_on_a_socket() {
             .spawn()
             .unwrap(),
     );
-    let _client = Proc(
+    let client = Proc(
         hawse()
             .args(["client", "--config"])
             .arg(dir.path().join("client.toml"))
@@ -231,26 +239,98 @@ fn a_running_server_and_client_each_answer_on_a_socket() {
         std::thread::sleep(Duration::from_millis(200));
     }
     // Up comes before the server answers the bind, and the bind's answer is what is checked.
-    let client = loop {
-        let status = ask_status(&client_sock);
-        if let Some(status) = status.filter(|s| {
-            s["link"]["state"] == "up" && s["services"][0]["answer"]["state"] != "pending"
-        }) {
-            break status;
-        }
+    while !ask_status(&client_sock).is_some_and(|s| {
+        s["link"]["state"] == "up" && s["services"][0]["answer"]["state"] != "pending"
+    }) {
         assert!(Instant::now() < deadline, "the client never said it was up");
         std::thread::sleep(Duration::from_millis(200));
-    };
+    }
+    Pair {
+        _server: server,
+        _client: client,
+        run,
+        _dir: dir,
+    }
+}
+
+#[test]
+fn a_running_server_and_client_each_answer_on_a_socket() {
+    let pair = running_pair();
+    let client = ask_status(&pair.run.path().join("client.sock")).expect("the client answers");
     assert_eq!(client["role"], "client");
     assert_eq!(
         client["services"][0]["answer"]["state"], "bound",
         "{client}"
     );
 
-    let server = ask_status(&server_sock).expect("the server answers");
+    let server = ask_status(&pair.run.path().join("server.sock")).expect("the server answers");
     assert_eq!(server["role"], "server");
     assert_eq!(server["clients"][0]["state"], "connected", "{server}");
     assert_eq!(server["clients"][0]["name"], "e2e");
+}
+
+/// `hawse status` with `args`, asking the sockets in `run`.
+fn status(run: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let out = hawse()
+        .arg("status")
+        .args(args)
+        .env("RUNTIME_DIRECTORY", run)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let text = |bytes| String::from_utf8(bytes).unwrap();
+    (out.status.code(), text(out.stdout), text(out.stderr))
+}
+
+#[test]
+fn status_shows_the_server_and_the_client_it_reaches() {
+    let pair = running_pair();
+    let (code, stdout, stderr) = status(pair.run.path(), &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    for needle in [
+        "hawse server",
+        "1 of 1 clients",
+        "hawse client",
+        "connected",
+    ] {
+        assert!(stdout.contains(needle), "{needle} in {stdout}");
+    }
+    // Piped, it is text for a file or a pipe: no colour and no links.
+    assert!(!stdout.contains('\x1b'), "{stdout:?}");
+}
+
+#[test]
+fn status_json_prints_one_line_per_role() {
+    let pair = running_pair();
+    let (code, stdout, stderr) = status(pair.run.path(), &["--json"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_eq!(lines[0]["role"], "server");
+    assert_eq!(lines[1]["role"], "client");
+}
+
+#[test]
+fn status_with_nothing_running_exits_1_and_says_so() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = hawse()
+        .arg("status")
+        .env("RUNTIME_DIRECTORY", empty.path())
+        .env("XDG_RUNTIME_DIR", empty.path())
+        .env("HOME", empty.path())
+        .env_remove("XDG_STATE_HOME")
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("no hawse server or client answered here"),
+        "{stderr}"
+    );
 }
 
 /// Whether a visitor to `port` gets its bytes back, tried until `open` is what it sees.

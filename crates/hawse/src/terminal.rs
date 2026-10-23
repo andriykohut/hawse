@@ -505,7 +505,6 @@ pub fn frame(
 /// the state, then a client's services in the panel's rows, or a server's clients and the
 /// unknown keys that knocked. Each line is cut to one column less than `width`, as [`frame`]'s
 /// are; a `width` of 0 cuts nothing.
-#[cfg_attr(not(test), expect(dead_code, reason = "`hawse status` draws with it"))]
 pub fn status_lines(status: &Status, style: Style, width: usize) -> Vec<String> {
     let room = width.saturating_sub(1);
     match status {
