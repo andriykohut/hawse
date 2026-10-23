@@ -81,10 +81,10 @@ pub fn can_execute(path: &str) -> bool {
 }
 
 /// `arg` as one word of a unit setting: `%` doubled so systemd does not read a specifier, and in
-/// double quotes when it holds whitespace, `"` or `\`.
+/// double quotes when it holds whitespace, a quote of either kind or `\`.
 fn word(arg: &str) -> String {
     let arg = arg.replace('%', "%%");
-    if arg.contains(|c: char| c.is_whitespace() || c == '"' || c == '\\') {
+    if arg.contains(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\')) {
         format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         arg
@@ -130,6 +130,7 @@ mod tests {
         assert_eq!(word("/opt/my apps/hawse"), "\"/opt/my apps/hawse\"");
         assert_eq!(word("/opt/50%/$x"), "/opt/50%%/$x");
         assert_eq!(word("/opt/a \"b\""), "\"/opt/a \\\"b\\\"\"");
+        assert_eq!(word("/opt/it's"), "\"/opt/it's\"");
     }
 
     #[test]

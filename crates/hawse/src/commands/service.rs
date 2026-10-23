@@ -57,11 +57,7 @@ pub fn install(role: Role, config: Option<PathBuf>, user: Option<&str>) -> miett
             (located, cfg.key)
         }
     };
-    let located = Located {
-        file: std::path::absolute(&located.file).into_diagnostic()?,
-        dir: std::path::absolute(&located.dir).into_diagnostic()?,
-        exists: located.exists,
-    };
+    let located = resolve(&located)?;
     let exe = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .into_diagnostic()
@@ -160,17 +156,16 @@ fn install_unit(
     run("systemctl", &["enable", &name])?;
     // A Type=notify unit's restart returns once it is ready, and both roles load or create their
     // key before they say so.
+    let created = !key.exists();
     run("systemctl", &["restart", &name])?;
     let identity = super::check::load_key(&key)?
         .ok_or_else(|| miette::miette!("the service started without a key at {}", key.display()))?;
-    report(
-        role,
-        &file,
-        &identity.public_key(),
-        &format!(
-            "`systemctl status {name}` shows how it stands, and `journalctl -u {name}` its log"
-        ),
+    let how = format!(
+        "`systemctl status {name}` shows how it stands, and `journalctl -u {name}` its log"
     );
+    for line in report(role, &file, &identity.public_key(), created, &how) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -207,25 +202,49 @@ fn install_agent(
         "launchctl",
         &["bootstrap", &format!("gui/{uid}"), text(&file)?],
     )?;
-    report(
-        role,
-        &file,
-        &identity.public_key(),
-        &format!(
-            "`/usr/bin/log stream --predicate 'subsystem == \"{}\"'` follows its log, and `launchctl print gui/{uid}/{label}` shows how it stands",
-            launchd::SUBSYSTEM
-        ),
+    let how = format!(
+        "`/usr/bin/log stream --predicate 'subsystem == \"{}\"'` follows its log, and `launchctl print gui/{uid}/{label}` shows how it stands",
+        launchd::SUBSYSTEM
     );
+    for line in report(role, &file, &identity.public_key(), created, &how) {
+        println!("{line}");
+    }
     Ok(())
 }
 
-fn report(role: Role, file: &Path, key: &PublicKey, how: &str) {
-    println!("installed {} and started it", file.display());
-    println!("{} key: {key}", role.name());
-    if role == Role::Client {
-        println!("on the server, add it to server.toml under [clients.NAME]");
+/// What install prints for the service at `file` and its `key`, which `created` says it made, and
+/// `how` to look at the service. A new key says who has to learn it.
+fn report(role: Role, file: &Path, key: &PublicKey, created: bool, how: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("installed {} and started it", file.display()),
+        format!("{} key: {key}", role.name()),
+    ];
+    if created {
+        lines.push(match role {
+            Role::Server => "it is new: each client needs it as its server_key".to_owned(),
+            Role::Client => {
+                "it is new: on the server, add it to server.toml under [clients.NAME]".to_owned()
+            }
+        });
     }
-    println!("{how}");
+    lines.push(how.to_owned());
+    lines
+}
+
+/// `located` with absolute paths, its directory resolved where it exists, so that no link or
+/// `..` in it reaches a unit or the checks made for one.
+fn resolve(located: &Located) -> miette::Result<Located> {
+    let dir = std::path::absolute(&located.dir).into_diagnostic()?;
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let name = located
+        .file
+        .file_name()
+        .ok_or_else(|| miette::miette!("{} names no file", located.file.display()))?;
+    Ok(Located {
+        file: dir.join(name),
+        dir,
+        exists: located.exists,
+    })
 }
 
 #[derive(Debug)]
@@ -371,14 +390,22 @@ fn installed(file: &Path) -> miette::Result<bool> {
     ))
 }
 
-/// `path` as the text a unit or a plist holds it as.
+/// `path` as the text a unit or a plist holds it as: UTF-8, and with no control character, which
+/// would end a unit's line.
 fn text(path: &Path) -> miette::Result<&str> {
-    path.to_str().ok_or_else(|| {
+    let text = path.to_str().ok_or_else(|| {
         miette::miette!(
             "{} is not UTF-8, which a unit or a plist cannot hold",
             path.display()
         )
-    })
+    })?;
+    if text.chars().any(char::is_control) {
+        miette::bail!(
+            "{} holds a control character, which a unit or a plist cannot hold",
+            path.display()
+        );
+    }
+    Ok(text)
 }
 
 fn home() -> miette::Result<PathBuf> {
@@ -601,6 +628,44 @@ mod tests {
                 .to_string()
                 .contains("drop --user")
         );
+    }
+
+    #[test]
+    fn a_path_with_a_control_character_is_refused() {
+        assert_eq!(text(Path::new("/srv/hawse")).unwrap(), "/srv/hawse");
+        let err = text(Path::new("/srv/a\nb")).unwrap_err().to_string();
+        assert!(err.contains("control character"), "{err}");
+    }
+
+    #[test]
+    fn a_config_path_through_dot_dot_is_resolved() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("a")).unwrap();
+        std::fs::write(root.path().join("client.toml"), "").unwrap();
+        let located = Located {
+            file: root.path().join("a/../client.toml"),
+            dir: root.path().join("a/.."),
+            exists: true,
+        };
+        let resolved = resolve(&located).unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap();
+        assert_eq!(resolved.dir, real);
+        assert_eq!(resolved.file, real.join("client.toml"));
+    }
+
+    #[test]
+    fn a_new_key_says_who_has_to_learn_it() {
+        let key: PublicKey = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            .parse()
+            .unwrap();
+        let file = Path::new("/etc/systemd/system/hawse-server.service");
+        let lines = report(Role::Server, file, &key, true, "how");
+        assert_eq!(lines[1], format!("server key: {key}"));
+        assert!(lines[2].contains("server_key"), "{lines:?}");
+        let lines = report(Role::Client, file, &key, true, "how");
+        assert!(lines[2].contains("[clients.NAME]"), "{lines:?}");
+        let lines = report(Role::Client, file, &key, false, "how");
+        assert_eq!(lines.len(), 3, "{lines:?}");
     }
 
     #[test]
