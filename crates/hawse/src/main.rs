@@ -5,6 +5,7 @@ mod notify;
 mod panel;
 mod paths;
 mod screen;
+mod socket;
 mod terminal;
 
 use std::io::{IsTerminal as _, Write as _};
