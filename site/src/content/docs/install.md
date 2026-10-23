@@ -103,7 +103,8 @@ unit; a second on the same host needs `--user`.
 restarts the systemd unit or LaunchAgent that runs that binary, whoever wrote
 it. It checks the release against its `SHA256SUMS` and runs it once before
 anything is replaced, and keeps the binary it replaces beside it as
-`hawse.old`. Run it on each host, the server first:
+`hawse.old`. It restarts `hawse-server` and `hawse-client` when they are running,
+and says so when nothing runs the binary. Run it on each host, the server first:
 
 ```sh
 sudo hawse upgrade
@@ -114,9 +115,10 @@ root can write, such as `/usr/local/bin`. On macOS, an agent is restarted for th
 user who ran sudo.
 
 `--check` says whether a newer release exists and changes nothing. `--version`
-installs another release, newer or older, down to 0.10.0: an older one keeps its
-key elsewhere and does not tell systemd when it is ready. To go back by hand, move
-`hawse.old` over the binary and restart the service.
+installs another release, newer or older, down to 0.10.0: an older one looks for
+its key elsewhere and would make a new one. Without `--version`, a binary newer
+than the latest release is left as it is. To go back by hand, move `hawse.old`
+over the binary and restart the service.
 
 Upgrade restarts a unit and does not rewrite it. When a release changes a unit
 `hawse service install` wrote, upgrade says so, and running the same install

@@ -27,9 +27,13 @@ pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
         None => latest()?,
     };
     let running: Version = env!("CARGO_PKG_VERSION").parse()?;
-    let to = match decide(running, wanted, check)? {
+    let to = match decide(running, wanted, version.is_some(), check)? {
         Decision::Current => {
             println!("hawse {running} is the one running");
+            return Ok(());
+        }
+        Decision::Newer { latest } => {
+            println!("hawse {running} is running, newer than the latest, {latest}");
             return Ok(());
         }
         Decision::Check { latest } if latest == running => {
@@ -73,9 +77,9 @@ pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
             )
         })?;
     }
-    println!("hawse {running} → {to}");
-    for service in &services {
-        println!("restarted {}", service.name());
+    let restarted: Vec<String> = services.iter().map(Service::name).collect();
+    for line in report(running, to, &restarted) {
+        println!("{line}");
     }
     if to > running {
         for service in &services {
@@ -90,6 +94,24 @@ pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
         }
     }
     Ok(())
+}
+
+/// What an upgrade from `running` to `to` that restarted the services named `restarted` prints.
+fn report(running: Version, to: Version, restarted: &[String]) -> Vec<String> {
+    let mut lines = vec![format!("hawse {running} → {to}")];
+    if restarted.is_empty() {
+        lines.push(
+            "no hawse-server or hawse-client unit, nor agent, runs this binary, so nothing was restarted; restart whatever runs it to run the new one".to_owned(),
+        );
+    }
+    lines.extend(restarted.iter().map(|name| format!("restarted {name}")));
+    lines
+}
+
+/// Whether a unit in systemd's `ActiveState` is running, or on its way to it, and so restarted
+/// by an upgrade. One stopped or failed is left as it is.
+fn running(state: &str) -> bool {
+    matches!(state, "active" | "reloading" | "activating" | "refreshing")
 }
 
 /// The latest release, from where its page redirects, which costs no API call.
@@ -142,6 +164,17 @@ fn services(exe: &Path) -> Vec<Service> {
                 &unit,
             ]));
             let runs = show.as_deref().and_then(exec_path).map(PathBuf::from);
+            let state = output(Command::new("systemctl").args([
+                "show",
+                "-p",
+                "ActiveState",
+                "--value",
+                &unit,
+            ]));
+            if runs.is_some() && !state.as_deref().is_some_and(|state| running(state.trim())) {
+                println!("{unit} is not running, and is left as it is");
+                continue;
+            }
             (Service::Unit(role), runs)
         } else if cfg!(target_os = "macos") {
             let uid = agent_uid();
@@ -214,8 +247,8 @@ fn kept(exe: &Path) -> PathBuf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Version(u64, u64, u64);
 
-/// The oldest release `--version` goes back to: the first that keeps an unnamed key where a unit
-/// `hawse service install` wrote looks for it, and tells systemd when it is ready.
+/// The oldest release `--version` goes back to: the first that looks for an unnamed key where a
+/// unit `hawse service install` wrote keeps it. One before it would make a new key there.
 const FLOOR: Version = Version(0, 10, 0);
 
 impl FromStr for Version {
@@ -327,23 +360,36 @@ enum Decision {
     Check {
         latest: Version,
     },
+    /// The release running is newer than the latest, and no `--version` asked to go back.
+    Newer {
+        latest: Version,
+    },
     Install {
         to: Version,
     },
 }
 
-/// What to do to go from `running` to `wanted`: with `check` only say so; an error for a release
-/// below [`FLOOR`], which an upgrade does not install.
-fn decide(running: Version, wanted: Version, check: bool) -> miette::Result<Decision> {
+/// What to do to go from `running` to `wanted`, which `pinned` says `--version` named rather
+/// than the latest release: with `check` only say so, and never go back unless asked. An error
+/// for a release below [`FLOOR`], which an upgrade does not install.
+fn decide(
+    running: Version,
+    wanted: Version,
+    pinned: bool,
+    check: bool,
+) -> miette::Result<Decision> {
     if check {
         return Ok(Decision::Check { latest: wanted });
     }
     if wanted == running {
         return Ok(Decision::Current);
     }
+    if !pinned && wanted < running {
+        return Ok(Decision::Newer { latest: wanted });
+    }
     if wanted < FLOOR {
         miette::bail!(
-            "hawse {wanted} keeps its key elsewhere and does not tell systemd it is ready; install a release before {FLOOR} by hand"
+            "hawse {wanted} looks for a key the config does not name beside the config, not where a unit hawse service install wrote keeps it; install a release before {FLOOR} by hand"
         );
     }
     Ok(Decision::Install { to: wanted })
@@ -377,9 +423,11 @@ fn replace(
     let archive = stage.0.join(format!("{name}.tar.gz"));
     let sums = stage.0.join("SHA256SUMS");
     let url = |file: &str| format!("{base}/releases/download/v{version}/{file}");
+    // With two URLs, curl's exit is the last transfer's unless it stops at the first failure.
     run_command(
         Command::new("curl")
             .arg("-fsSL")
+            .arg("--fail-early")
             .arg("-o")
             .arg(&archive)
             .arg(url(&format!("{name}.tar.gz")))
@@ -584,25 +632,71 @@ mod tests {
     fn a_version_below_the_floor_or_the_running_one_downloads_nothing() {
         let running = Version(0, 10, 0);
         assert!(matches!(
-            decide(running, running, false),
+            decide(running, running, false, false),
             Ok(Decision::Current)
         ));
         assert!(matches!(
-            decide(running, Version(0, 11, 0), true),
+            decide(running, Version(0, 11, 0), false, true),
             Ok(Decision::Check { .. })
         ));
-        let err = decide(running, Version(0, 9, 0), false)
+        let err = decide(Version(0, 11, 0), Version(0, 9, 0), true, false)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("by hand"), "{err}");
+        assert!(err.contains("by hand") && err.contains("key"), "{err}");
+        assert!(!err.contains("ready"), "0.9.0 does tell systemd: {err}");
         assert!(matches!(
-            decide(running, Version(0, 11, 0), false),
+            decide(running, Version(0, 11, 0), false, false),
             Ok(Decision::Install { to }) if to == Version(0, 11, 0)
         ));
         assert!(matches!(
-            decide(Version(0, 11, 0), running, false),
+            decide(Version(0, 11, 0), running, true, false),
             Ok(Decision::Install { .. })
         ));
+    }
+
+    #[test]
+    fn a_build_newer_than_the_latest_is_not_taken_back_unasked() {
+        assert!(matches!(
+            decide(Version(0, 11, 0), Version(0, 10, 0), false, false),
+            Ok(Decision::Newer { latest }) if latest == Version(0, 10, 0)
+        ));
+    }
+
+    #[test]
+    fn only_a_unit_that_runs_is_restarted() {
+        for state in ["active", "reloading", "activating", "refreshing"] {
+            assert!(running(state), "{state}");
+        }
+        for state in ["inactive", "failed", "deactivating", ""] {
+            assert!(!running(state), "{state}");
+        }
+    }
+
+    #[test]
+    fn an_upgrade_that_restarted_nothing_says_so() {
+        let lines = report(Version(0, 10, 0), Version(0, 11, 0), &[]);
+        assert_eq!(lines[0], "hawse 0.10.0 → 0.11.0");
+        assert!(lines[1].contains("nothing was restarted"), "{lines:?}");
+        let lines = report(
+            Version(0, 10, 0),
+            Version(0, 11, 0),
+            &["hawse-server".to_owned()],
+        );
+        assert_eq!(lines, ["hawse 0.10.0 → 0.11.0", "restarted hawse-server"]);
+    }
+
+    #[test]
+    fn a_missing_archive_is_a_failed_download() {
+        let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
+        let name = format!("hawse-9.9.9-{}.tar.gz", target().unwrap());
+        std::fs::remove_file(root.path().join("releases/download/v9.9.9").join(name)).unwrap();
+        let exe = bin.path().join("hawse");
+        std::fs::write(&exe, "old").unwrap();
+        let err = replace(&base, Version(9, 9, 9), target().unwrap(), &exe)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("curl"), "{err}");
     }
 
     #[test]

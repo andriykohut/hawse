@@ -37,9 +37,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         .cipher_suites
         .iter()
         .find_map(|suite| {
-            // rustls is built without `tls12`, so every suite is a TLS 1.3 one.
-            let rustls::SupportedCipherSuite::Tls13(suite) = suite;
-            let hash = suite.common.hash_provider;
+            let hash = suite.tls13()?.common.hash_provider;
             (hash.algorithm() == rustls::crypto::hash::HashAlgorithm::SHA256).then_some(hash)
         })
         .expect("both providers have TLS13_AES_128_GCM_SHA256");

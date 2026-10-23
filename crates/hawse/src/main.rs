@@ -288,6 +288,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_version_reads_as_upgrade_tries_a_release() {
+        let version = Cli::command().render_version();
+        assert_eq!(
+            version.trim(),
+            format!("hawse {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
     fn upgrade_takes_a_version_of_its_own() {
         assert!(Cli::try_parse_from(["hawse", "upgrade", "--version", "0.10.0"]).is_ok());
         assert!(Cli::try_parse_from(["hawse", "upgrade", "--check"]).is_ok());
