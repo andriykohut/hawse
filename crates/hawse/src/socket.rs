@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 
 use crate::paths::{Role, is_root};
 
@@ -78,7 +78,7 @@ impl Env {
 }
 
 /// Where a process binds its socket.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Place {
     At(PathBuf),
     /// A systemd unit without `RuntimeDirectory=`: it has nowhere writable that a caller could
@@ -268,7 +268,7 @@ impl Bound {
                     tokio::spawn(async move { answer(stream, &*status).await });
                 }
                 Err(err) => {
-                    // EMFILE and the like repeat at once; waiting keeps this from spinning.
+                    // EMFILE and ENFILE fail again at once; waiting keeps this from spinning.
                     tracing::warn!(%err, "cannot accept on the status socket");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -278,15 +278,20 @@ impl Bound {
 }
 
 async fn answer<S: Serialize>(mut stream: UnixStream, status: &impl Fn() -> S) {
+    let deadline = Instant::now() + REQUEST_WAIT;
     let (read, mut write) = stream.split();
     let mut reader = BufReader::new(read.take(REQUEST_LIMIT));
     let mut line = String::new();
-    let reply = match timeout(REQUEST_WAIT, reader.read_line(&mut line)).await {
+    let mut over_limit = false;
+    let reply = match timeout_at(deadline, reader.read_line(&mut line)).await {
         Err(_) | Ok(Ok(0)) => return,
         Ok(Err(err)) => refusal(&format!("cannot read this request: {err}")),
-        Ok(Ok(n)) if n as u64 >= REQUEST_LIMIT && !line.ends_with('\n') => refusal(&format!(
-            "a request is at most {REQUEST_LIMIT} bytes on one line"
-        )),
+        Ok(Ok(n)) if n as u64 >= REQUEST_LIMIT && !line.ends_with('\n') => {
+            over_limit = true;
+            refusal(&format!(
+                "a request is at most {REQUEST_LIMIT} bytes on one line"
+            ))
+        }
         Ok(Ok(_)) => match serde_json::from_str::<Request>(&line) {
             Ok(Request::Status) => {
                 serde_json::to_string(&status()).unwrap_or_else(|err| refusal(&err.to_string()))
@@ -297,6 +302,13 @@ async fn answer<S: Serialize>(mut stream: UnixStream, status: &impl Fn() -> S) {
     // A caller that has gone has nobody to tell.
     let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
     let _ = write.shutdown().await;
+    if over_limit {
+        // On Linux, closing a stream socket with unread data resets the peer's connection, which
+        // would turn the caller's read of the refusal's end into an error. Reading to the
+        // caller's EOF first lets it see a clean close.
+        let mut rest = reader.into_inner().into_inner();
+        let _ = timeout_at(deadline, tokio::io::copy(&mut rest, &mut tokio::io::sink())).await;
+    }
 }
 
 fn refusal(error: &str) -> String {
@@ -494,7 +506,7 @@ mod tests {
         assert!(matches!(bind_at(&path), Err(BindError::Io(_))));
     }
 
-    /// Serves `json!({"role": "client"})` on a fresh socket; the directory keeps the socket alive.
+    /// Serves `json!({"role": "client"})` on a fresh socket; the returned `TempDir` guard keeps the socket's directory alive.
     fn serving() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("client.sock");
