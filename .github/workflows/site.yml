@@ -9,10 +9,11 @@ on:
 permissions:
   contents: read
 # One run per ref at a time and in order, so an older build cannot deploy after a newer one. A
-# deployment in progress is left to finish.
+# deployment in progress is left to finish; a pull request's build, which deploys nothing, gives
+# way to a newer push.
 concurrency:
   group: site-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
     runs-on: ubuntu-latest
