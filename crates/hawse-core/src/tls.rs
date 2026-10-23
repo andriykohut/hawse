@@ -31,6 +31,24 @@ pub fn provider() -> Arc<CryptoProvider> {
     }))
 }
 
+/// The SHA-256 of `data`, from the provider's own hash, so the build needs no other crate for it.
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let hash = provider()
+        .cipher_suites
+        .iter()
+        .find_map(|suite| {
+            // rustls is built without `tls12`, so every suite is a TLS 1.3 one.
+            let rustls::SupportedCipherSuite::Tls13(suite) = suite;
+            let hash = suite.common.hash_provider;
+            (hash.algorithm() == rustls::crypto::hash::HashAlgorithm::SHA256).then_some(hash)
+        })
+        .expect("both providers have TLS13_AES_128_GCM_SHA256");
+    hash.hash(data)
+        .as_ref()
+        .try_into()
+        .expect("a SHA-256 is 32 bytes")
+}
+
 const ED25519_OID: &str = "1.3.101.112";
 
 /// RFC 8410 fixes every byte ahead of the key: no parameters, no unused bits.
@@ -224,6 +242,25 @@ mod tests {
     use rustls::pki_types::ServerName;
     use rustls::sign::{CertifiedKey, SingleCertAndKey};
     use rustls::{ClientConnection, ServerConnection};
+
+    #[test]
+    fn sha256_is_the_standard_one() {
+        let hex = |bytes: [u8; 32]| {
+            use std::fmt::Write as _;
+            bytes.iter().fold(String::new(), |mut hex, b| {
+                let _ = write!(hex, "{b:02x}");
+                hex
+            })
+        };
+        assert_eq!(
+            hex(sha256(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     fn handshake(
         client: &mut ClientConnection,
