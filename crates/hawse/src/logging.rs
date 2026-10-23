@@ -17,13 +17,15 @@ pub fn level(verbose: u8, quiet: bool) -> &'static str {
 
 /// Returns the style of the terminal form when that is what the run prints: a server's or a
 /// client's, which `form` says this is, on a terminal, with nothing asking for more or fewer lines than the default. Its rows stand in for
-/// the lines at info level, so only warnings and errors are logged beside them.
+/// the lines at info level, so only warnings and errors are logged beside them. `category` names
+/// the run in the unified log under `--log oslog`.
 pub fn init(
     verbose: u8,
     quiet: bool,
     format: LogFormat,
     style: Style,
     form: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] category: &'static str,
 ) -> Option<Style> {
     let tty = std::io::stderr().is_terminal();
     let chosen = EnvFilter::try_from_env("HAWSE_LOG");
@@ -47,6 +49,8 @@ pub fn init(
         LogFormat::Json => true,
         LogFormat::Pretty => false,
         LogFormat::Auto => !tty,
+        #[cfg(target_os = "macos")]
+        LogFormat::Oslog => return oslog(filter, category),
     };
     // A log line has to land above the client's panel, and only the screen knows where it is.
     let writer = if terminal {
@@ -68,6 +72,20 @@ pub fn init(
         builder.with_ansi(style.color).compact().init();
     }
     terminal.then_some(style)
+}
+
+#[cfg(target_os = "macos")]
+fn oslog(filter: EnvFilter, category: &'static str) -> Option<Style> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let logger =
+        tracing_oslog::OsLogger::new(crate::commands::service::launchd::SUBSYSTEM, category);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(logger)
+        .init();
+    None
 }
 
 #[cfg(test)]

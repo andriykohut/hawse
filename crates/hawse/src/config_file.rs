@@ -30,7 +30,7 @@ pub enum LoadError {
     Invalid(ConfigError),
     #[error("no client config at {0}")]
     #[diagnostic(help(
-        "create it with `server`, `server_key` and an `[expose.NAME]` table, or pass --config"
+        "create it with `hawse join`, or write `server`, `server_key` and an `[expose.NAME]` table, or pass --config"
     ))]
     MissingClient(PathBuf),
     #[error("no config at {server} or at {client}")]
@@ -157,9 +157,9 @@ pub fn client_key_path(explicit: Option<PathBuf>) -> Result<PathBuf, LoadError> 
     let key = if located.exists {
         parse::<ClientConfig>(&located.file, &read(&located.file)?)?.key
     } else {
-        PathBuf::from(Role::Client.key_name())
+        None
     };
-    Ok(located.dir.join(key))
+    Ok(paths::key_path(Role::Client, &located, key.as_deref()))
 }
 
 #[cfg(test)]

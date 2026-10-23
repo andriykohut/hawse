@@ -36,7 +36,7 @@ pub async fn run(
     config: Option<PathBuf>,
 ) -> miette::Result<ExitCode> {
     let located = paths::locate(Role::Client, config);
-    let file = located.file;
+    let file = located.file.clone();
     if located.exists {
         miette::bail!(
             "a client config is already at {}, and `hawse client` runs it",
@@ -50,7 +50,7 @@ pub async fn run(
     // Read back the way a start reads it, so what is written is a config that loads.
     let cfg: ClientConfig = config_file::parse(&file, &text)?;
     cfg.validate().map_err(LoadError::Invalid)?;
-    let key_path = located.dir.join(&cfg.key);
+    let key_path = paths::key_path(Role::Client, &located, cfg.key.as_deref());
     let (identity, created) = Identity::load_or_create(&key_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot load the client key at {}", key_path.display()))?;

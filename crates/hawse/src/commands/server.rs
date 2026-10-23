@@ -65,7 +65,7 @@ pub async fn run(
             "limits.streams_per_client is more than a client accepts, and the rest does nothing"
         );
     }
-    let key_path = located.dir.join(&cfg.key);
+    let key_path = paths::key_path(Role::Server, &located, cfg.key.as_deref());
     let (identity, created) = Identity::load_or_create(&key_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot load the server key at {}", key_path.display()))?;

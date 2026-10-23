@@ -1,6 +1,6 @@
 ---
 title: Install
-description: Release binaries, the install script, Docker images and building from source.
+description: Release binaries, the install script, running as a service, Docker images and building from source.
 ---
 
 Each [release](https://github.com/andriykohut/hawse/releases) has a static binary
@@ -42,6 +42,61 @@ eval "$(hawse completions zsh)"     # ~/.zshrc, after compinit
 hawse completions fish | source     # ~/.config/fish/config.fish
 ```
 
+## Running as a service
+
+`hawse service install` sets the server or the client up to start by itself and
+to be started again when it stops. It checks the config `hawse server` or
+`hawse client` would read, or the one `--config` names, writes the service for
+the binary that runs it, starts it, and prints the public key.
+
+On Linux it writes a systemd unit, which starts at boot, so it runs as root:
+
+```sh
+sudo hawse service install server
+sudo hawse service install client
+```
+
+A client's config is the one `sudo hawse join` writes to `/etc/hawse`; run
+without sudo, `join` writes to your own config directory, which the unit does not
+read. The unit runs under a throwaway account that keeps its key in
+`/var/lib/hawse`.
+A server with no config yet runs on the defaults and reads
+`/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
+shows how it stands.
+
+On macOS it writes a LaunchAgent, which starts when you log in, so it runs as
+you, without sudo:
+
+```sh
+hawse service install client
+```
+
+The agent logs to macOS's unified log, which [Logging](/hawse/logging/) says how
+to read.
+
+Run it again after replacing the binary: it rewrites the service from that
+version and restarts it. `hawse service uninstall server` or `client` stops the
+service and removes it, and leaves the config and the key. Install replaces or
+removes only a service it wrote, so a unit copied by hand has to be removed
+first, and a change to an installed unit belongs in a drop-in made with
+`systemctl edit`.
+
+`--user NAME` runs the unit as that account instead and keeps the key beside the
+config, for a config kept where the throwaway account cannot write, such as a
+pool on TrueNAS SCALE:
+
+```sh
+sudo /mnt/pool/apps/hawse/hawse service install client \
+  --config /mnt/pool/apps/hawse/client.toml --user someone
+```
+
+Run `hawse join` for that config as the same account, without sudo, so the key
+it creates is the one the service reads. A TrueNAS upgrade drops `/etc` and the
+unit with it; a POSTINIT init script that runs the same command puts it back.
+
+Both units keep their keys in `/var/lib/hawse`, so a host runs one of them as a
+unit; a second on the same host needs `--user`.
+
 ## Docker
 
 Images for `linux/amd64`, `linux/arm64` and `linux/arm/v7` are published to
@@ -50,12 +105,7 @@ a client on different versions do not work together, so run the same tag on both
 ends.
 
 The container reads its config from `/etc/hawse` and keeps keys in
-`/var/lib/hawse`, which is the only directory it can write. The config has to set
-`key` to a full path, because the default resolves next to the config:
-
-```toml
-key = "/var/lib/hawse/server.key"
-```
+`/var/lib/hawse`, which is the only directory it can write.
 
 Run the server with host networking. It binds public ports as clients ask for
 them, and Docker only forwards ports named when the container starts:

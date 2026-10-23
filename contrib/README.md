@@ -1,71 +1,56 @@
 # Service units
 
-`hawse-server.service` and `hawse-client.service` run hawse under systemd. Both
-expect the binary at `/usr/local/bin/hawse` and their config at
-`/etc/hawse/server.toml` or `/etc/hawse/client.toml`.
+`hawse-server.service` and `hawse-client.service` run hawse under systemd.
+`hawse service install` writes them for the binary that runs it and the config
+it reads, enables and starts them, and prints the public key:
 
 ```sh
-install -m755 target/release/hawse /usr/local/bin/hawse
-install -m644 contrib/hawse-server.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now hawse-server
+sudo hawse service install server
 ```
 
-Release archives carry these units beside the binary, so the same commands work
-from an unpacked archive with `hawse` in place of `target/release/hawse`.
+The [install page](https://andriykohut.github.io/hawse/install/#running-as-a-service)
+says more. As they are here, both expect the binary at `/usr/local/bin/hawse`
+and their config at `/etc/hawse/server.toml` or `/etc/hawse/client.toml`, and
+release archives carry them beside the binary.
 
 Both units run under `DynamicUser=yes`, so there is no account to create and no
 uid to keep track of. systemd creates `/etc/hawse` for the config, which stays
-owned by root, and `/var/lib/hawse` for the key, which the service owns. Point
-the config at the second one:
+owned by root, and `/var/lib/hawse` for the key, which the service owns. A config
+that sets no `key` keeps it there.
 
-```toml
-key = "/var/lib/hawse/server.key"
-```
-
-A relative `key` resolves next to the config file, where the service cannot
-write.
-
-## Getting the public key
-
-Because the service owns its key, generate it by starting the service and
-reading the key it prints:
-
-```sh
-systemctl start hawse-server
-journalctl -u hawse-server -n 20 | grep 'server key'
-```
-
-The same works for the client. Paste the client's key into the server's
-`server.toml`; the running server reads it within a second. `systemctl reload`
-sends either unit the SIGHUP that has it read its config again.
+The running server reads a changed `server.toml` within a second, and
+`systemctl reload` sends either unit the SIGHUP that has it read its config
+again.
 
 ## Ports below 1024
 
 `DynamicUser` runs unprivileged, so binding a public port under 1024 needs one
-capability. Add it to both lines in the server unit:
+capability. Add it to both lines with `systemctl edit hawse-server`, in a
+drop-in that a reinstall leaves alone:
 
 ```ini
+[Service]
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 ```
 
 ## Different paths
 
-`systemctl edit hawse-client` to override `ExecStart` where `/usr/local/bin` or
-`/etc` is not a good home. On TrueNAS SCALE, for example, put both the binary
-and the config on a pool:
+`hawse service install` writes the unit for the binary that runs it and the
+config it is given, where `/usr/local/bin` or `/etc` is not a good home. On
+TrueNAS SCALE, for example, put both the binary and the config on a pool, and
+run the unit as the account that owns them, which keeps the key beside the
+config:
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/mnt/pool/apps/hawse/hawse client --config /mnt/pool/apps/hawse/client.toml --log pretty
-ReadWritePaths=/mnt/pool/apps/hawse
+```sh
+sudo /mnt/pool/apps/hawse/hawse service install client \
+  --config /mnt/pool/apps/hawse/client.toml --user someone
 ```
 
 `ProtectSystem=strict` makes everything outside the unit's own directories
-read-only, so a config directory elsewhere needs the `ReadWritePaths` line above
-for the service to create its key.
+read-only, so the unit it writes allows that one directory with
+`ReadWritePaths`. A TrueNAS upgrade drops `/etc` and the unit with it; a
+POSTINIT init script that runs the same command puts it back.
 
 ## Status
 

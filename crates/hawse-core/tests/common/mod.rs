@@ -204,7 +204,7 @@ pub fn client_config(
     ClientConfig {
         server: server_addr.to_string(),
         server_key,
-        key: "unused.key".into(),
+        key: None,
         name: Some("test".to_owned()),
         expose,
         transport: ClientTransport::default(),

@@ -3,6 +3,7 @@ pub mod client;
 pub mod join;
 pub mod keygen;
 pub mod server;
+pub mod service;
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};

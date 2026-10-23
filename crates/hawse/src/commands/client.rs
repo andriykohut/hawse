@@ -32,7 +32,7 @@ fn load(file: &Path, terminal: Option<Style>) -> miette::Result<(ClientConfig, I
             "[transport] settings that tune QUIC do nothing under prefer = \"tcp\""
         );
     }
-    let key_path = located.dir.join(&cfg.key);
+    let key_path = paths::key_path(Role::Client, &located, cfg.key.as_deref());
     let (identity, created) = Identity::load_or_create(&key_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot load the client key at {}", key_path.display()))?;
