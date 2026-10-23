@@ -1,0 +1,10 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "drawn(&status, uncoloured(true), 0)"
+---
+✗ hawse server  0 of 2 clients  ·  0.0.0.0:4433  ·  up 3 d 4 h  ·  0.11.0
+
+  ○ nas     not connected, last seen 3 min ago
+  ○ laptop  not connected
+
+  ✗ unknown key ed25519:Qm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eHgzUms from 198.51.100.4  ·  3 times, last 12 min ago

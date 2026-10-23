@@ -20,6 +20,8 @@ for _ in $(seq 40); do
   sleep 0.5
 done
 systemctl show -p StatusText --value hawse-client | grep '^connected'
+sudo "$bin" status server | grep -q '1 of 1 clients'
+"$bin" status client | grep -q connected
 sudo "$bin" service uninstall client
 sudo "$bin" service uninstall server
 test ! -e /etc/systemd/system/hawse-client.service

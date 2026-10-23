@@ -1,0 +1,5 @@
+---
+source: crates/hawse/src/terminal.rs
+expression: "drawn(&Status::Client(status), uncoloured(true), 0)"
+---
+↻ hawse client  connecting  ·  tunnel.example.com:4433

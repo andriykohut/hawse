@@ -150,6 +150,24 @@ pub struct Live {
     pub remote: SocketAddr,
 }
 
+/// A read-only view of a server's live sessions, taken with [`Server::sessions`] before
+/// `serve` consumes the server.
+#[derive(Clone)]
+pub struct Sessions(Arc<Shared>);
+
+impl Sessions {
+    /// The key and remote address of each session holding its client's key right now.
+    pub fn live(&self) -> Vec<(PublicKey, SocketAddr)> {
+        self.0
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .iter()
+            .map(|(key, live)| (*key, live.remote))
+            .collect()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error(transparent)]
@@ -257,6 +275,11 @@ impl Server {
     /// the oldest, and a session never waits for one.
     pub fn events(&self) -> broadcast::Receiver<Event> {
         self.shared.events.subscribe()
+    }
+
+    /// Which clients hold a session now; it stays valid after `serve` takes the server.
+    pub fn sessions(&self) -> Sessions {
+        Sessions(Arc::clone(&self.shared))
     }
 
     /// Runs until `cancel` fires or the QUIC endpoint stops accepting. Cancelling reaches every

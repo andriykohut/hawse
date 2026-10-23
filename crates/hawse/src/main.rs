@@ -5,6 +5,8 @@ mod notify;
 mod panel;
 mod paths;
 mod screen;
+mod socket;
+mod status;
 mod terminal;
 
 use std::io::{IsTerminal as _, Write as _};
@@ -38,7 +40,8 @@ struct Cli {
     /// at the default level prints rows in place of log lines, and `pretty` keeps the lines.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Auto)]
     log: LogFormat,
-    /// Colored output. `auto` disables color when stderr is not a terminal.
+    /// Colored output. `auto` disables color when stderr is not a terminal, or for `status` when
+    /// stdout is not.
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
     /// Number of worker threads. Defaults to the number of CPUs.
@@ -109,6 +112,14 @@ enum Command {
         #[arg(long, conflicts_with = "version")]
         check: bool,
     },
+    /// Show how the server or client running on this host stands.
+    Status {
+        /// Ask only this one. Without one, the server and then the client.
+        role: Option<Role>,
+        /// Print each reply as the JSON line it came as, one line per role.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the completion script for a shell.
     Completions { shell: clap_complete::Shell },
 }
@@ -165,7 +176,11 @@ fn main() -> ExitCode {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
         ColorChoice::Auto => {
-            std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+            let terminal = match cli.command {
+                Command::Status { .. } => std::io::stdout().is_terminal(),
+                _ => std::io::stderr().is_terminal(),
+            };
+            terminal && std::env::var_os("NO_COLOR").is_none()
         }
     };
     let style = terminal::Style::detect(color);
@@ -190,7 +205,7 @@ fn main() -> ExitCode {
         matches!(cli.command, Command::Client { .. } | Command::Server { .. }),
         category,
     );
-    match run(cli, terminal) {
+    match run(cli, style, terminal) {
         Ok(code) => code,
         Err(report) => {
             // What returning the report from `main` would print.
@@ -237,7 +252,11 @@ fn color_arg(args: &[String]) -> ColorChoice {
     choice
 }
 
-fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> {
+fn run(
+    cli: Cli,
+    style: terminal::Style,
+    terminal: Option<terminal::Style>,
+) -> miette::Result<ExitCode> {
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if let Some(threads) = cli.threads {
@@ -271,6 +290,7 @@ fn run(cli: Cli, terminal: Option<terminal::Style>) -> miette::Result<ExitCode> 
             Command::Upgrade { version, check } => {
                 commands::upgrade::run(version.as_deref(), check).map(|()| ExitCode::SUCCESS)
             }
+            Command::Status { role, json } => commands::status::run(role, json, style),
             Command::Completions { shell } => {
                 // `generate` panics on a write that fails, which a reader that has gone away
                 // makes of a write to stdout.

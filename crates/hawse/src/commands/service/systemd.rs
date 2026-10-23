@@ -125,6 +125,21 @@ mod tests {
     }
 
     #[test]
+    fn every_unit_keeps_its_runtime_directory() {
+        let account = Account {
+            name: "someone",
+            key_dir: "/mnt/pool/apps/hawse",
+        };
+        for role in [Role::Server, Role::Client] {
+            let line = format!("\nRuntimeDirectory=hawse-{}\n", role.name());
+            for account in [None, Some(&account)] {
+                let text = unit(role, "/h", "/c", account);
+                assert!(text.contains(&line), "{}", role.name());
+            }
+        }
+    }
+
+    #[test]
     fn a_path_systemd_would_split_or_expand_is_quoted() {
         assert_eq!(word("/usr/local/bin/hawse"), "/usr/local/bin/hawse");
         assert_eq!(word("/opt/my apps/hawse"), "\"/opt/my apps/hawse\"");

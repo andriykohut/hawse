@@ -1,7 +1,7 @@
 //! What a server or a client run by hand prints on a terminal, in place of its log lines.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use clap::builder::styling::{self, Ansi256Color, Color, RgbColor};
@@ -18,6 +18,9 @@ use tokio::time::Instant;
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::commands::client::reason;
+use crate::status::{
+    Answer, ClientStatus, LinkStatus, Presence, ServerStatus, ServiceStatus, Status,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
@@ -346,6 +349,44 @@ fn fit_rows(rows: Vec<Vec<String>>, room: usize) -> Vec<String> {
         .collect()
 }
 
+/// How wide a bound row's columns are: the services' names, their public addresses, and their
+/// local addresses.
+#[derive(Clone, Copy)]
+struct Widths {
+    names: usize,
+    public: usize,
+    locals: usize,
+}
+
+/// A bound row's first two fields: `mark`, the service's name and its public address at `host`
+/// and `port`, a link where a browser opens it; then the dim local column, `local`, padded to
+/// `widths.locals`.
+fn service_fields(
+    mark: &str,
+    service: &str,
+    host: &str,
+    port: Port,
+    local: &str,
+    widths: Widths,
+    style: Style,
+) -> Vec<String> {
+    let Widths {
+        names,
+        public,
+        locals,
+    } = widths;
+    // Every row's local column is as wide, so the figures after it line up.
+    let pad = locals - local.len();
+    let address = format!("{host}:{port}");
+    let fill = public.saturating_sub(address.len());
+    let address = style.link(url(host, port, local), &address);
+    let local = style.dim(&format!("  {}  {local}", style.pick("←", "<-")));
+    vec![
+        format!("  {mark} {service:names$}  {address}{:fill$}", ""),
+        format!("{local}{:pad$}", ""),
+    ]
+}
+
 /// The client's panel: a blank line, a header for the connection, then a row for each service in
 /// `rows` that `cfg` still exposes, in its order. Each line is cut to one column less than `width`, and the
 /// panel folded to `height` lines; a `width` or `height` of 0 is a terminal that does not say.
@@ -381,6 +422,11 @@ pub fn frame(
         .map(|e| e.local.len())
         .max()
         .unwrap_or(0);
+    let widths = Widths {
+        names,
+        public,
+        locals,
+    };
     let counts = rows
         .values()
         .filter_map(|row| match row {
@@ -410,16 +456,8 @@ pub fn frame(
                     Link::Stopped => &no,
                     Link::Connecting | Link::Down { .. } => &again,
                 };
-                // Every row's local column is as wide, so the figures after it line up.
-                let pad = locals - expose.local.len();
-                let local = style.dim(&format!("  {}  {}", style.pick("←", "<-"), expose.local));
-                let address = format!("{host}:{port}");
-                let fill = public.saturating_sub(address.len());
-                let address = style.link(url(&host, port, &expose.local), &address);
-                let mut fields = vec![
-                    format!("  {mark} {service:names$}  {address}{:fill$}", ""),
-                    format!("{local}{:pad$}", ""),
-                ];
+                let mut fields =
+                    service_fields(mark, service, &host, port, &expose.local, widths, style);
                 if matches!(link, Link::Up { .. }) {
                     if open == 0 && !moved {
                         fields.push(format!("  {}", style.dim("idle")));
@@ -459,6 +497,256 @@ pub fn frame(
         lines.truncate(kept);
         let summary = format!("  {} {more} more", style.pick("…", "..."));
         lines.push(fit(&[summary], room));
+    }
+    lines
+}
+
+/// A status reply as `hawse status` prints it: a header that opens with a mark and a word for
+/// the state, then a client's services in the panel's rows, or a server's clients and the
+/// unknown keys that knocked. Each line is cut to one column less than `width`, as [`frame`]'s
+/// are; a `width` of 0 cuts nothing.
+pub fn status_lines(status: &Status, style: Style, width: usize) -> Vec<String> {
+    let room = width.saturating_sub(1);
+    match status {
+        Status::Client(client) => client_status_lines(client, style, room),
+        Status::Server(server) => server_status_lines(server, style, room),
+    }
+}
+
+/// A client's status header in `room` columns: a mark and a word for the link, the server, and
+/// the link's figures, with a second line for why it is down.
+fn client_status_header(status: &ClientStatus, style: Style, room: usize) -> Vec<String> {
+    let dot = || style.dim(style.pick("·", "|"));
+    let no = style.red(style.pick("✗", "x"));
+    let secs = Duration::from_secs;
+    let server = format!("  {}  {}", dot(), status.server);
+    let mut lines = Vec::new();
+    match &status.link {
+        LinkStatus::Up {
+            transport,
+            round_trip_ms,
+            up_s,
+            ..
+        } => {
+            let header = [
+                format!(
+                    "{} hawse client  {}",
+                    style.accent(style.pick("●", "*")),
+                    style.accent("connected")
+                ),
+                server,
+                format!("  {}  {}", dot(), transport.to_uppercase()),
+                format!(
+                    "  {}  {}",
+                    dot(),
+                    millis(Duration::from_millis(*round_trip_ms))
+                ),
+                format!("  {}  up {}", dot(), span(secs(*up_s))),
+            ];
+            lines.push(fit(&header, room));
+        }
+        LinkStatus::Down {
+            down_s,
+            retry_in_s,
+            cause,
+        } => {
+            let down = style.red(&format!("down {}", span(secs(*down_s))));
+            let retry = match retry_in_s {
+                0 => "retrying now".to_owned(),
+                secs => format!("retrying in {secs} s"),
+            };
+            let header = [
+                format!("{no} hawse client  {down}"),
+                server,
+                format!("  {}  {retry}", dot()),
+            ];
+            lines.push(fit(&header, room));
+            lines.push(fit(&[format!("  {no} {cause}")], room));
+        }
+        LinkStatus::Connecting => {
+            let header = [
+                format!(
+                    "{} hawse client  {}",
+                    style.accent(style.pick("↻", "~")),
+                    style.accent("connecting")
+                ),
+                server,
+            ];
+            lines.push(fit(&header, room));
+        }
+    }
+    lines
+}
+
+/// A client's status in `room` columns. A service the server has not answered yet has no row,
+/// as on the panel.
+fn client_status_lines(status: &ClientStatus, style: Style, room: usize) -> Vec<String> {
+    let no = style.red(style.pick("✗", "x"));
+    let again = style.accent(style.pick("↻", "~"));
+    let busy = style.accent(style.pick("●", "*"));
+    let idle = style.accent(style.pick("○", "o"));
+    let (toward, from) = (style.pick("↓", "v"), style.pick("↑", "^"));
+    let mut lines = client_status_header(status, style, room);
+    let up = matches!(status.link, LinkStatus::Up { .. });
+    let bound = |service: &ServiceStatus| match &service.answer {
+        Answer::Bound { port } => port.parse::<Port>().ok(),
+        Answer::Pending | Answer::Refused { .. } => None,
+    };
+    let host = split_host_port(&status.server)
+        .map(|(host, _)| host)
+        .unwrap_or_default();
+    let services = &status.services;
+    let widths = Widths {
+        names: services.iter().map(|s| s.name.len()).max().unwrap_or(0),
+        public: host.len()
+            + 1
+            + services
+                .iter()
+                .filter_map(bound)
+                .map(|port| port.to_string().len())
+                .max()
+                .unwrap_or(0),
+        locals: services.iter().map(|s| s.local.len()).max().unwrap_or(0),
+    };
+    let counts = services
+        .iter()
+        .filter(|s| bound(s).is_some())
+        .map(|s| s.open.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let mut rows = Vec::new();
+    for service in services {
+        let (name, names) = (&service.name, widths.names);
+        let fields = match (&service.answer, bound(service)) {
+            (Answer::Refused { reason }, _) => vec![format!("  {no} {name:names$}  {reason}")],
+            (_, Some(port)) => {
+                let mark = match (up, service.open) {
+                    (false, _) => &again,
+                    (true, 0) => &idle,
+                    (true, _) => &busy,
+                };
+                let mut fields =
+                    service_fields(mark, name, &host, port, &service.local, widths, style);
+                if up {
+                    let figure = |text: String| format!("  {}", style.accent(&text));
+                    fields.push(figure(format!("{:>counts$}", service.open)));
+                    fields.push(figure(format!("{toward} {:>4}", bytes(service.down))));
+                    fields.push(figure(format!("{from} {:>4}", bytes(service.up))));
+                }
+                fields
+            }
+            _ => continue,
+        };
+        rows.push(fields);
+    }
+    let body = fit_rows(rows, room);
+    if !body.is_empty() {
+        lines.push(String::new());
+        lines.extend(body);
+    }
+    lines
+}
+
+/// A server's status in `room` columns: its header, a line for each client, with the services a
+/// connected one has bound under it, and a line for each unknown key.
+fn server_status_lines(status: &ServerStatus, style: Style, room: usize) -> Vec<String> {
+    let dot = || style.dim(style.pick("·", "|"));
+    let no = style.red(style.pick("✗", "x"));
+    let secs = Duration::from_secs;
+    let ip = |remote: &str| {
+        remote
+            .parse::<SocketAddr>()
+            .map_or_else(|_| remote.to_owned(), |addr| addr.ip().to_string())
+    };
+    let clients = &status.clients;
+    let connected = clients
+        .iter()
+        .filter(|c| matches!(c.presence, Presence::Connected { .. }))
+        .count();
+    let count = format!("{connected} of {} clients", clients.len());
+    // No client authorized is how a new server starts, not a fault to show in red.
+    let (mark, state) = if clients.is_empty() {
+        let none = "no clients are authorized";
+        (style.dim(style.pick("○", "o")), style.dim(none))
+    } else if connected == 0 {
+        (no.clone(), style.red(&count))
+    } else {
+        (style.accent(style.pick("●", "*")), style.accent(&count))
+    };
+    let header = [
+        format!("{mark} hawse server  {state}"),
+        format!("  {}  {}", dot(), status.listen),
+        format!("  {}  up {}", dot(), span(secs(status.up_s))),
+        format!("  {}  {}", dot(), status.version),
+    ];
+    let mut lines = vec![fit(&header, room)];
+
+    if !clients.is_empty() {
+        lines.push(String::new());
+    }
+    let names = clients.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for client in clients {
+        let name = &client.name;
+        match &client.presence {
+            Presence::Connected {
+                remote,
+                transport,
+                agent,
+                up_s,
+                services,
+            } => {
+                let mark = style.accent(style.pick("●", "*"));
+                let mut fields = vec![format!("  {mark} {name:names$}  {}", ip(remote))];
+                fields.extend(
+                    transport
+                        .iter()
+                        .map(|t| format!("  {}  {}", dot(), t.to_uppercase())),
+                );
+                fields.extend(up_s.map(|up| format!("  {}  up {}", dot(), span(secs(up)))));
+                fields.extend(agent.as_deref().map(|agent| {
+                    let version = agent.strip_prefix("hawse/").unwrap_or(agent);
+                    format!("  {}  {version}", dot())
+                }));
+                lines.push(fit(&fields, room));
+                let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
+                for service in services {
+                    let at = match service.bind.parse::<IpAddr>() {
+                        Ok(ip) if ip.is_unspecified() => String::new(),
+                        Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+                        _ => service.bind.clone(),
+                    };
+                    let line = format!("      {:width$}  {at}:{}", service.name, service.port);
+                    lines.push(fit(&[line], room));
+                }
+            }
+            Presence::NotConnected { last_s } => {
+                let seen = last_s
+                    .map(|last| format!(", last seen {} ago", span(secs(last))))
+                    .unwrap_or_default();
+                let mark = style.pick("○", "o");
+                let line = style.dim(&format!("{mark} {name:names$}  not connected{seen}"));
+                lines.push(fit(&[format!("  {line}")], room));
+            }
+        }
+    }
+
+    if !status.unknown_keys.is_empty() {
+        lines.push(String::new());
+    }
+    for knock in &status.unknown_keys {
+        // Fields, so a narrow terminal drops the counts before it cuts the key to be pasted.
+        let times = if knock.times == 1 { "time" } else { "times" };
+        let fields = [
+            format!("  {no} unknown key {}", knock.key),
+            format!(" from {}", ip(&knock.remote)),
+            format!(
+                "  {}  {} {times}, last {} ago",
+                dot(),
+                knock.times,
+                span(secs(knock.last_s))
+            ),
+        ];
+        lines.push(fit(&fields, room));
     }
     lines
 }
@@ -650,6 +938,7 @@ mod tests {
 
     use super::*;
     use crate::config_file::parse;
+    use crate::status::{Bind, ClientEntry, Knock};
 
     fn cfg() -> ClientConfig {
         parse(
@@ -1259,5 +1548,245 @@ port = "51820/udp"
         );
         // A blank line, then the header, with no row under it.
         assert_eq!(lines.len(), 2, "{lines:?}");
+    }
+
+    fn uncoloured(unicode: bool) -> Style {
+        Style {
+            color: false,
+            unicode,
+            accent: None,
+            links: false,
+        }
+    }
+
+    fn coloured() -> Style {
+        Style {
+            color: true,
+            unicode: true,
+            accent: accent_for("truecolor", ""),
+            links: true,
+        }
+    }
+
+    fn connected() -> LinkStatus {
+        LinkStatus::Up {
+            transport: "quic".to_owned(),
+            round_trip_ms: 38,
+            up_s: 2 * 3600 + 10 * 60,
+            agent: "hawse/0.11.0".to_owned(),
+        }
+    }
+
+    fn down() -> LinkStatus {
+        LinkStatus::Down {
+            down_s: 180,
+            retry_in_s: 8,
+            cause: "server stopped answering".to_owned(),
+        }
+    }
+
+    /// The client of the spec's mockups: jellyfin bound with two open, wg bound with none, and
+    /// ssh refused.
+    fn client_status(link: LinkStatus) -> ClientStatus {
+        let service =
+            |name: &str, local: &str, port: &str, answer, (open, down, up)| ServiceStatus {
+                name: name.to_owned(),
+                local: local.to_owned(),
+                port: port.to_owned(),
+                answer,
+                open,
+                visitors: 0,
+                down,
+                up,
+                datagrams_down: 0,
+                datagrams_up: 0,
+                dropped: 0,
+            };
+        let bound = |port: &str| Answer::Bound {
+            port: port.to_owned(),
+        };
+        ClientStatus {
+            version: "0.11.0".to_owned(),
+            server: "tunnel.example.com:4433".to_owned(),
+            up_s: 3 * 3600,
+            link,
+            services: vec![
+                service(
+                    "jellyfin",
+                    "127.0.0.1:8096",
+                    "8096",
+                    bound("8096"),
+                    (2, 15_247_000_000, 220_200_960),
+                ),
+                service(
+                    "wg",
+                    "127.0.0.1:51820",
+                    "51820/udp",
+                    bound("51820/udp"),
+                    (0, 1_181_116_006, 100_663_296),
+                ),
+                service(
+                    "ssh",
+                    "127.0.0.1:22",
+                    "2222",
+                    Answer::Refused {
+                        reason: "port is not granted to this client".to_owned(),
+                    },
+                    (0, 0, 0),
+                ),
+            ],
+        }
+    }
+
+    fn nas_connected() -> ClientEntry {
+        let bind = |name: &str, bind: &str, port: &str| Bind {
+            name: name.to_owned(),
+            bind: bind.to_owned(),
+            port: port.to_owned(),
+        };
+        ClientEntry {
+            name: "nas".to_owned(),
+            presence: Presence::Connected {
+                remote: "203.0.113.7:51234".to_owned(),
+                transport: Some("quic".to_owned()),
+                agent: Some("hawse/0.11.0".to_owned()),
+                up_s: Some(2 * 3600 + 10 * 60),
+                services: vec![
+                    bind("jellyfin", "0.0.0.0", "8096"),
+                    bind("wg", "::", "51820/udp"),
+                ],
+            },
+        }
+    }
+
+    fn not_connected(name: &str, last_s: Option<u64>) -> ClientEntry {
+        ClientEntry {
+            name: name.to_owned(),
+            presence: Presence::NotConnected { last_s },
+        }
+    }
+
+    /// The server of the spec's mockup, with `clients` and one unknown key.
+    fn server_status(clients: Vec<ClientEntry>) -> Status {
+        Status::Server(ServerStatus {
+            version: "0.11.0".to_owned(),
+            listen: "0.0.0.0:4433".to_owned(),
+            tcp_fallback: false,
+            up_s: (3 * 24 + 4) * 3600,
+            clients,
+            unknown_keys: vec![Knock {
+                key: "ed25519:Qm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eHgzUms".to_owned(),
+                remote: "198.51.100.4:40122".to_owned(),
+                times: 3,
+                last_s: 12 * 60,
+            }],
+        })
+    }
+
+    fn drawn(status: &Status, style: Style, width: usize) -> String {
+        status_lines(status, style, width).join("\n")
+    }
+
+    #[test]
+    fn a_connected_client_reads_as_its_panel_at_rest() {
+        let status = Status::Client(client_status(connected()));
+        insta::assert_snapshot!(drawn(&status, uncoloured(true), 0));
+    }
+
+    #[test]
+    fn a_connected_client_status_keeps_to_ascii() {
+        let status = Status::Client(client_status(connected()));
+        let out = drawn(&status, uncoloured(false), 0);
+        assert!(out.is_ascii(), "{out}");
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn a_client_that_is_down_says_so_first() {
+        let mut status = client_status(down());
+        // The last session's answers stay until the next session, and ssh's had not come.
+        status.services[2].answer = Answer::Pending;
+        insta::assert_snapshot!(drawn(&Status::Client(status), uncoloured(true), 0));
+
+        let due = client_status(LinkStatus::Down {
+            down_s: 180,
+            retry_in_s: 0,
+            cause: "server stopped answering".to_owned(),
+        });
+        let lines = status_lines(&Status::Client(due), uncoloured(true), 0);
+        assert!(lines[0].ends_with("  ·  retrying now"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_connecting_client_says_so_first() {
+        let mut status = client_status(LinkStatus::Connecting);
+        for service in &mut status.services {
+            service.answer = Answer::Pending;
+        }
+        insta::assert_snapshot!(drawn(&Status::Client(status), uncoloured(true), 0));
+    }
+
+    #[test]
+    fn a_down_client_starts_with_a_red_mark() {
+        let lines = status_lines(&Status::Client(client_status(down())), coloured(), 0);
+        assert!(lines[0].starts_with("\x1b[31m✗"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_status_narrower_than_its_rows_drops_the_local_column_first() {
+        let status = Status::Client(client_status(connected()));
+        let out = drawn(&status, uncoloured(true), 60);
+        assert!(out.lines().all(|line| columns(line) < 60), "{out}");
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn a_server_with_one_of_two_clients_connected() {
+        let status = server_status(vec![nas_connected(), not_connected("laptop", None)]);
+        insta::assert_snapshot!(drawn(&status, uncoloured(true), 0));
+
+        let mut nas = nas_connected();
+        let Presence::Connected { services, .. } = &mut nas.presence else {
+            unreachable!()
+        };
+        services[0].bind = "127.0.0.1".to_owned();
+        services[1].bind = "::1".to_owned();
+        let out = drawn(&server_status(vec![nas]), uncoloured(true), 0);
+        assert!(out.contains("jellyfin  127.0.0.1:8096\n"), "{out}");
+        assert!(out.contains("wg        [::1]:51820/udp\n"), "{out}");
+    }
+
+    #[test]
+    fn a_server_with_no_client_connected_says_when_each_was_last_seen() {
+        let status = server_status(vec![
+            not_connected("nas", Some(180)),
+            not_connected("laptop", None),
+        ]);
+        insta::assert_snapshot!(drawn(&status, uncoloured(true), 0));
+        let lines = status_lines(&status, coloured(), 0);
+        assert!(lines[0].starts_with("\x1b[31m✗"), "{lines:?}");
+
+        let Status::Server(mut once) = status else {
+            unreachable!()
+        };
+        once.unknown_keys[0].times = 1;
+        let out = drawn(&Status::Server(once), uncoloured(true), 0);
+        assert!(out.ends_with("  ·  1 time, last 12 min ago"), "{out}");
+    }
+
+    #[test]
+    fn a_server_with_no_clients_authorized_does_not_alarm() {
+        let status = server_status(Vec::new());
+        let out = drawn(&status, uncoloured(true), 0);
+        assert!(
+            out.lines()
+                .next()
+                .unwrap()
+                .contains("no clients are authorized"),
+            "{out}"
+        );
+        insta::assert_snapshot!(out);
+        let lines = status_lines(&status, coloured(), 0);
+        assert!(!lines[0].contains("\x1b[31m"), "{lines:?}");
     }
 }

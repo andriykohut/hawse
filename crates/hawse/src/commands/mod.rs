@@ -4,6 +4,7 @@ pub mod join;
 pub mod keygen;
 pub mod server;
 pub mod service;
+pub mod status;
 pub mod upgrade;
 
 use std::io::IsTerminal as _;

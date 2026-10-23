@@ -19,6 +19,7 @@ RestartSec=5s
 
 # The service has no home, so the config path cannot be discovered and is given
 # above.
+RuntimeDirectory=hawse-client
 User=someone
 ReadWritePaths=/mnt/pool/apps/hawse
 UMask=0077
@@ -38,7 +39,8 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 PrivateTmp=yes
 PrivateDevices=yes
-# AF_UNIX is for the name resolver, which may talk to nscd or systemd-resolved.
+# AF_UNIX is for the name resolver, which may talk to nscd or systemd-resolved, and for the
+# socket that hawse status asks.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
