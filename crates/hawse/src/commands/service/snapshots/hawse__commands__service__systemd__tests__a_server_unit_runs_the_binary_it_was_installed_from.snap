@@ -1,6 +1,6 @@
 ---
 source: crates/hawse/src/commands/service/systemd.rs
-assertion_line: 89
+assertion_line: 95
 expression: "unit(Role::Server, \"/usr/local/bin/hawse\", \"/etc/hawse/server.toml\", None)"
 ---
 # Written by hawse service install. Run it again to update this file, and put changes in a drop-in (systemctl edit hawse-server).
@@ -12,7 +12,7 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/hawse server --config /etc/hawse/server.toml --log pretty
+ExecStart=:/usr/local/bin/hawse server --config /etc/hawse/server.toml --log pretty
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s

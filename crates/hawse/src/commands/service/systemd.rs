@@ -38,11 +38,13 @@ pub fn unit(role: Role, exe: &str, config: &str, account: Option<&Account<'_>>) 
         match account {
             _ if line.starts_with("ExecStart=") => {
                 exec = true;
+                // `:` turns off `$` expansion, which would reach the arguments but not the path
+                // systemd looks the binary up by.
                 let _ = writeln!(
                     text,
-                    "ExecStart={} {name} --config {} --log pretty",
-                    quote(exe),
-                    quote(config)
+                    "ExecStart=:{} {name} --config {} --log pretty",
+                    word(exe),
+                    word(config)
                 );
             }
             Some(account) if line == "DynamicUser=yes" => {
@@ -67,9 +69,10 @@ pub fn unit(role: Role, exe: &str, config: &str, account: Option<&Account<'_>>) 
     text
 }
 
-/// `arg` as one word of `ExecStart=`, which expands `$` as well as `%`: see [`word`].
-pub fn quote(arg: &str) -> String {
-    word(&arg.replace('$', "$$"))
+/// Whether systemd runs a binary at `path`: it refuses one that holds a quote, a backslash or a
+/// control character, however the path is quoted.
+pub fn can_execute(path: &str) -> bool {
+    !path.contains(['"', '\'', '\\']) && !path.chars().any(char::is_control)
 }
 
 /// `arg` as one word of a unit setting: `%` doubled so systemd does not read a specifier, and in
@@ -118,11 +121,32 @@ mod tests {
 
     #[test]
     fn a_path_systemd_would_split_or_expand_is_quoted() {
-        assert_eq!(quote("/usr/local/bin/hawse"), "/usr/local/bin/hawse");
-        assert_eq!(quote("/opt/my apps/hawse"), "\"/opt/my apps/hawse\"");
-        assert_eq!(quote("/opt/50%/$x"), "/opt/50%%/$$x");
-        assert_eq!(quote("/opt/a \"b\""), "\"/opt/a \\\"b\\\"\"");
-        assert_eq!(word("/opt/$x"), "/opt/$x");
+        assert_eq!(word("/usr/local/bin/hawse"), "/usr/local/bin/hawse");
+        assert_eq!(word("/opt/my apps/hawse"), "\"/opt/my apps/hawse\"");
+        assert_eq!(word("/opt/50%/$x"), "/opt/50%%/$x");
+        assert_eq!(word("/opt/a \"b\""), "\"/opt/a \\\"b\\\"\"");
+    }
+
+    #[test]
+    fn a_binary_path_with_a_dollar_runs_as_it_is() {
+        let text = unit(
+            Role::Server,
+            "/opt/a$b/hawse",
+            "/etc/hawse/server.toml",
+            None,
+        );
+        assert!(text.contains(
+            "\nExecStart=:/opt/a$b/hawse server --config /etc/hawse/server.toml --log pretty\n"
+        ));
+    }
+
+    #[test]
+    fn systemd_runs_no_binary_from_a_path_with_a_quote_a_backslash_or_a_control_character() {
+        assert!(can_execute("/usr/local/bin/hawse"));
+        assert!(can_execute("/opt/my apps/hawse"));
+        for path in ["/opt/a\"b", "/opt/a'b", "/opt/a\\b", "/opt/a\nb"] {
+            assert!(!can_execute(path), "{path:?}");
+        }
     }
 
     #[test]

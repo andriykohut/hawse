@@ -126,10 +126,20 @@ fn install_unit(
             );
         }
     }
-    if user.is_none() && located.exists && !readable_by_others(&located.file).into_diagnostic()? {
+    if user.is_none()
+        && located.exists
+        && let Some((path, open)) = closed_to_others(&located.file).into_diagnostic()?
+    {
         miette::bail!(
-            "{} is readable by root only, and the unit runs as a throwaway account; chmod o+r it",
-            located.file.display()
+            "{path} keeps the unit's throwaway account from reading {config}; chmod {open} {path}",
+            path = path.display(),
+            config = located.file.display()
+        );
+    }
+    if !systemd::can_execute(text(exe)?) {
+        miette::bail!(
+            "{} holds a quote, a backslash or a control character, which systemd runs no binary from; move it",
+            exe.display()
         );
     }
     let file = systemd::file(role);
@@ -245,11 +255,17 @@ fn manager(os: &str, root: bool, systemd_running: bool) -> miette::Result<Manage
     }
 }
 
-/// `name` when it can be a unit's `User=` and nothing more.
+/// `name` when it can be a unit's `User=` and nothing more. Root is refused: it would find its key
+/// by root's default, in a directory the unit cannot write.
 fn account(name: &str) -> miette::Result<&str> {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
     if name.is_empty() || name.starts_with('-') || !name.chars().all(allowed) {
         miette::bail!("`{name}` is not an account name");
+    }
+    if name == "root" {
+        miette::bail!(
+            "--user root would run the tunnel as root; drop --user for a throwaway account, or name the account that owns the config"
+        );
     }
     Ok(name)
 }
@@ -290,9 +306,20 @@ fn unit_key(
     ))
 }
 
-fn readable_by_others(file: &Path) -> std::io::Result<bool> {
+/// The first of `file` and the directories above it that keeps out an account other than their
+/// owners, with the `chmod` that lets it through; `None` when such an account can read `file`.
+fn closed_to_others(file: &Path) -> std::io::Result<Option<(&Path, &'static str)>> {
     use std::os::unix::fs::PermissionsExt as _;
-    Ok(std::fs::metadata(file)?.permissions().mode() & 0o004 != 0)
+    let mode = |path: &Path| std::fs::metadata(path).map(|meta| meta.permissions().mode());
+    if mode(file)? & 0o004 == 0 {
+        return Ok(Some((file, "o+r")));
+    }
+    for dir in file.ancestors().skip(1) {
+        if !dir.as_os_str().is_empty() && mode(dir)? & 0o001 == 0 {
+            return Ok(Some((dir, "o+x")));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether a file install wrote is at `file`: false when nothing is there, and an error for a file
@@ -457,13 +484,26 @@ mod tests {
     #[test]
     fn a_config_only_root_reads_is_refused_for_a_throwaway_account() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("server.toml");
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("hawse");
+        let file = dir.join("server.toml");
+        std::fs::create_dir(&dir).unwrap();
         std::fs::write(&file, "").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(!readable_by_others(&file).unwrap());
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(readable_by_others(&file).unwrap());
+        mode(&file, 0o600);
+        assert_eq!(
+            closed_to_others(&file).unwrap(),
+            Some((file.as_path(), "o+r"))
+        );
+        mode(&file, 0o644);
+        mode(&dir, 0o750);
+        assert_eq!(
+            closed_to_others(&file).unwrap(),
+            Some((dir.as_path(), "o+x"))
+        );
+        assert_eq!(closed_to_others(Path::new("/etc/hosts")).unwrap(), None);
     }
 
     #[test]
@@ -473,6 +513,12 @@ mod tests {
         assert!(account("").is_err());
         assert!(account("-x").is_err());
         assert!(account("a\nExecStartPre=/bin/true").is_err());
+        assert!(
+            account("root")
+                .unwrap_err()
+                .to_string()
+                .contains("drop --user")
+        );
     }
 
     #[test]

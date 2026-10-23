@@ -56,7 +56,10 @@ sudo hawse service install server
 sudo hawse service install client
 ```
 
-The unit runs under a throwaway account that keeps its key in `/var/lib/hawse`.
+A client's config is the one `sudo hawse join` writes to `/etc/hawse`; run
+without sudo, `join` writes to your own config directory, which the unit does not
+read. The unit runs under a throwaway account that keeps its key in
+`/var/lib/hawse`.
 A server with no config yet runs on the defaults and reads
 `/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
 shows how it stands.

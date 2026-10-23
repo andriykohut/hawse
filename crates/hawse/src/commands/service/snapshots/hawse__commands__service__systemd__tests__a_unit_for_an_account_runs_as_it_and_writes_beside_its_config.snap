@@ -1,6 +1,6 @@
 ---
 source: crates/hawse/src/commands/service/systemd.rs
-assertion_line: 113
+assertion_line: 119
 expression: text
 ---
 # Written by hawse service install. Run it again to update this file, and put changes in a drop-in (systemctl edit hawse-client).
@@ -12,7 +12,7 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/mnt/pool/apps/hawse/hawse client --config /mnt/pool/apps/hawse/client.toml --log pretty
+ExecStart=:/mnt/pool/apps/hawse/hawse client --config /mnt/pool/apps/hawse/client.toml --log pretty
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5s
