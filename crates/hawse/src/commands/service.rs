@@ -322,17 +322,25 @@ fn unit_key(
 
 /// The first of `file` and the directories above it that keeps out an account other than their
 /// owners, with the `chmod` that lets it through; `None` when such an account can read `file`.
-/// A link is followed, and what is named is where it leads.
+/// Where `file` is or passes through a link, both the directories on the path as written and
+/// those where it leads count, the nearest first.
 fn closed_to_others(file: &Path) -> std::io::Result<Option<(PathBuf, &'static str)>> {
     use std::os::unix::fs::PermissionsExt as _;
-    let file = std::fs::canonicalize(file)?;
+    let real = std::fs::canonicalize(file)?;
     let mode = |path: &Path| std::fs::metadata(path).map(|meta| meta.permissions().mode());
-    if mode(&file)? & 0o004 == 0 {
-        return Ok(Some((file, "o+r")));
+    if mode(&real)? & 0o004 == 0 {
+        return Ok(Some((real, "o+r")));
     }
-    for dir in file.ancestors().skip(1) {
-        if mode(dir)? & 0o001 == 0 {
-            return Ok(Some((dir.to_owned(), "o+x")));
+    let written: Vec<&Path> = file.ancestors().skip(1).collect();
+    let resolved: Vec<&Path> = real.ancestors().skip(1).collect();
+    for depth in 0..written.len().max(resolved.len()) {
+        for dir in [written.get(depth), resolved.get(depth)]
+            .into_iter()
+            .flatten()
+        {
+            if !dir.as_os_str().is_empty() && mode(dir)? & 0o001 == 0 {
+                return Ok(Some((dir.to_path_buf(), "o+x")));
+            }
         }
     }
     Ok(None)
@@ -533,8 +541,23 @@ mod tests {
         assert_eq!(closed_to_others(&file).unwrap(), Some((real(&file), "o+r")));
         mode(&file, 0o644);
         mode(&dir, 0o750);
-        assert_eq!(closed_to_others(&file).unwrap(), Some((real(&dir), "o+x")));
+        assert_eq!(closed_to_others(&file).unwrap(), Some((dir.clone(), "o+x")));
         assert_eq!(closed_to_others(Path::new("/etc/hosts")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_config_reached_through_a_closed_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let (open, private) = (root.path().join("open"), root.path().join("private"));
+        for dir in [&open, &private] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        std::fs::write(open.join("server.toml"), "").unwrap();
+        let link = private.join("server.toml");
+        std::os::unix::fs::symlink(open.join("server.toml"), &link).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(closed_to_others(&link).unwrap(), Some((private, "o+x")));
     }
 
     #[test]
