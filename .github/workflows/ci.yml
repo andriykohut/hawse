@@ -6,6 +6,11 @@ on:
   pull_request:
     paths-ignore: ['site/**']
   workflow_call:
+# A push to a pull request supersedes the run for its last one. Every other run has a group of its
+# own, so runs on main and for a release tag neither wait for each other nor are cancelled.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
