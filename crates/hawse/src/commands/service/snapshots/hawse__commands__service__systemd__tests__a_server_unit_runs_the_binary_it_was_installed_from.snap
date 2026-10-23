@@ -21,6 +21,7 @@ RestartSec=5s
 # above.
 ConfigurationDirectory=hawse
 StateDirectory=hawse
+RuntimeDirectory=hawse-server
 DynamicUser=yes
 UMask=0077
 

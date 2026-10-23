@@ -372,6 +372,7 @@ mod tests {
         let (shown, showing) = watch::channel(Shown {
             cfg: cfg(),
             traffic: Arc::new(Traffic::default()),
+            carried: BTreeMap::new(),
         });
         let (model, mut modelled) = watch::channel(Model::default());
         let kept = tokio::spawn(keep(events, forward, showing, model));

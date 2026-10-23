@@ -25,6 +25,8 @@ const SAMPLE: Duration = Duration::from_secs(1);
 pub struct Shown {
     pub cfg: ClientConfig,
     pub traffic: Arc<Traffic>,
+    /// Every finished client's totals, summed by service; `traffic` counts the running one's.
+    pub carried: BTreeMap<String, Counts>,
 }
 
 /// What a `Row::Bound` is drawn from: the server's answer, then the sampled figures.
@@ -342,6 +344,7 @@ mod tests {
         let (shown, showing) = watch::channel(Shown {
             cfg: two,
             traffic: Arc::default(),
+            carried: BTreeMap::new(),
         });
         let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = Arc::clone(&frames);
@@ -407,6 +410,7 @@ mod tests {
         let (_shown, showing) = watch::channel(Shown {
             cfg: cfg(),
             traffic: Arc::clone(&traffic),
+            carried: BTreeMap::new(),
         });
         let draws = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&draws);

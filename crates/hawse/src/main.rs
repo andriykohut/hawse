@@ -6,10 +6,6 @@ mod panel;
 mod paths;
 mod screen;
 mod socket;
-#[expect(
-    dead_code,
-    reason = "`hawse client`, `hawse server` and `hawse status` use the status types"
-)]
 mod status;
 mod terminal;
 

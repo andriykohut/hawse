@@ -18,6 +18,8 @@ use crate::notify;
 use crate::panel::{self, Shown};
 use crate::paths::{self, Role};
 use crate::screen;
+use crate::socket::{self, Bound};
+use crate::status::{self, Status, client::Model};
 use crate::terminal::{self, Style};
 
 /// Reads `file` and no other: a reload that looked the config up again could find one that has
@@ -150,6 +152,35 @@ async fn log(
     (stopped, connects)
 }
 
+/// Answers status requests on `bound` for a process that started at `started`, keeping what
+/// the client's `events` say and passing each on in the receiver it returns.
+fn serve_status(
+    bound: Bound,
+    events: mpsc::Receiver<Event>,
+    showing: &watch::Receiver<Shown>,
+    started: Instant,
+) -> mpsc::Receiver<Event> {
+    let (forward, forwarded) = mpsc::channel(64);
+    let (model, modelled) = watch::channel(Model::default());
+    tokio::spawn(status::client::keep(
+        events,
+        forward,
+        showing.clone(),
+        model,
+    ));
+    let showing = showing.clone();
+    tokio::spawn(bound.serve(move || {
+        let shown = showing.borrow();
+        let mut totals = shown.carried.clone();
+        for (service, counts) in shown.traffic.snapshot() {
+            *totals.entry(service).or_default() += counts;
+        }
+        let (up, now) = (started.elapsed(), tokio::time::Instant::now());
+        Status::Client(modelled.borrow().snapshot(&shown.cfg, &totals, up, now))
+    }));
+    forwarded
+}
+
 /// 2 when a config error stopped the client, the exit of a config that does not load: starting
 /// it again will not fix either.
 pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Result<ExitCode> {
@@ -167,14 +198,20 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     let (shown, showing) = watch::channel(Shown {
         cfg: cfg.clone(),
         traffic: Arc::default(),
+        carried: BTreeMap::new(),
     });
+    // Before systemd hears the unit is ready, so a status asked once it is finds the socket.
+    let bound = socket::bind(Role::Client);
     // Ready once the config is read, and not at the first connect, so a server that is down does
     // not fail the unit's start.
     // shortcut: only the log lines keep the status after this, as a unit's stderr is never a
     // terminal; one run on a terminal under systemd says `connecting` throughout.
     let status =
         notify::socket().map(|socket| notify::Status::ready(socket, "connecting".to_owned()));
-    let (tx, events) = mpsc::channel(64);
+    let (tx, mut events) = mpsc::channel(64);
+    if let Some(bound) = bound {
+        events = serve_status(bound, events, &showing, started);
+    }
     let printer = match terminal {
         Some(style) => tokio::spawn(panel::show(events, showing, style, screen::draw)),
         None => tokio::spawn(log(events, showing, status)),
@@ -184,7 +221,11 @@ pub async fn run(config: Option<PathBuf>, terminal: Option<Style>) -> miette::Re
     loop {
         tracing::info!(key = %identity.public_key(), "client key");
         let client = Client::new(cfg.clone(), identity);
-        shown.send_modify(|shown| shown.traffic = client.traffic());
+        // In one change, so a status never counts a finished client twice.
+        shown.send_modify(|shown| {
+            shown.traffic = client.traffic();
+            shown.carried.clone_from(&carried);
+        });
         let session = cancel.child_token();
         let run = client.run(session.clone(), tx.clone());
         tokio::pin!(run);
@@ -288,6 +329,7 @@ server_key = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         let (shown, showing) = watch::channel(Shown {
             cfg,
             traffic: Arc::default(),
+            carried: BTreeMap::new(),
         });
         let (tx, events) = mpsc::channel(8);
         let status = notify::Status::ready(path.into_os_string(), "connecting".to_owned());

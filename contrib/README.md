@@ -16,7 +16,8 @@ release archives carry them beside the binary.
 Both units run under `DynamicUser=yes`, so there is no account to create and no
 uid to keep track of. systemd creates `/etc/hawse` for the config, which stays
 owned by root, and `/var/lib/hawse` for the key, which the service owns. A config
-that sets no `key` keeps it there.
+that sets no `key` keeps it there. For the socket `hawse status` asks, systemd
+creates `/run/hawse-server` or `/run/hawse-client`.
 
 The running server reads a changed `server.toml` within a second, and
 `systemctl reload` sends either unit the SIGHUP that has it read its config

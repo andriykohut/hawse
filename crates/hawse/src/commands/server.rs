@@ -9,12 +9,15 @@ use hawse_core::server::{Event, Server};
 use miette::{IntoDiagnostic as _, WrapErr as _};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::Reloads;
 use crate::config_file::{self, LoadError};
 use crate::notify;
 use crate::paths::{self, Located, Role};
+use crate::socket;
+use crate::status::{self, Status, server::Keeper};
 use crate::terminal::{self, Style};
 
 /// Reads `file` and no other: a reload that looked the config up again could find one that has
@@ -76,6 +79,21 @@ pub async fn run(
         .into_diagnostic()
         .wrap_err("cannot start the server")?;
     let addr = server.local_addr();
+    // Before systemd hears the unit is ready, so a status asked once it is finds the socket.
+    let answering = socket::bind(Role::Server).map(|bound| {
+        let (keeper, kept) = watch::channel(Keeper::default());
+        tokio::spawn(status::server::keep(server.events(), keeper));
+        let (policy, sessions) = (server.policy(), server.sessions());
+        let (tcp, started) = (cfg.transport.tcp_fallback, Instant::now());
+        tokio::spawn(bound.serve(move || {
+            let live = sessions.live();
+            let up = started.elapsed();
+            let reply =
+                kept.borrow()
+                    .snapshot(&policy.borrow(), &live, addr, tcp, up, Instant::now());
+            Status::Server(reply)
+        }))
+    });
     if let Some(socket) = notify::socket() {
         tokio::spawn(notify::serve(socket, addr, server.events()));
     }
@@ -103,6 +121,11 @@ pub async fn run(
     tokio::select! {
         () = server.serve(cancel) => {}
         () = reload(reloads, listen, &cfg, &located, &policy, terminal) => {}
+    }
+    // The status task's hold on the live sessions keeps the server's events open, and the
+    // printer ends when they close.
+    if let Some(answering) = answering {
+        answering.abort();
     }
     // The sessions the stop ended have said so, and their rows may not be printed yet. The
     // printer ends with the last session; one that did not drain is not waited for.

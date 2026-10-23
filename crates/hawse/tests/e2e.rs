@@ -2,6 +2,8 @@ use std::fs;
 use std::hash::{BuildHasher, RandomState};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv6Addr, TcpListener, TcpStream, UdpSocket};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -24,6 +26,12 @@ fn hawse() -> Command {
     cmd.stdin(Stdio::null()).stderr(Stdio::inherit());
     // Tests read what a child logs, so it logs at its defaults whatever the runner's filter is.
     cmd.env_remove("HAWSE_LOG");
+    // A child's status socket goes in a directory of its own, never where a real server or
+    // client keeps one; under a runner's `NOTIFY_SOCKET` it would place none. The directory
+    // outlives the child, and is left behind.
+    let run = tempfile::tempdir().unwrap().keep();
+    cmd.env("RUNTIME_DIRECTORY", run)
+        .env_remove("NOTIFY_SOCKET");
     cmd
 }
 
@@ -164,6 +172,85 @@ fn echo_round_trip_through_real_binaries() {
     let mut buf = [0u8; 4];
     visitor.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"ping");
+}
+
+/// The reply to a status request on the socket at `path`, or `None` while nothing answers there.
+fn ask_status(path: &Path) -> Option<serde_json::Value> {
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.write_all(b"{\"request\":\"status\"}\n").ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    serde_json::from_str(&line).ok()
+}
+
+#[test]
+fn a_running_server_and_client_each_answer_on_a_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = tempfile::tempdir().unwrap();
+    let server_key = keygen(&dir.path().join("server.key"));
+    let client_key = keygen(&dir.path().join("client.key"));
+    let server_port = free_listen_port();
+    let public_port = free_public_port(Kind::Tcp);
+    let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_addr = echo.local_addr().unwrap();
+
+    fs::write(
+        dir.path().join("server.toml"),
+        format!("listen = \"127.0.0.1:{server_port}\"\n\n[clients.e2e]\nkey = \"{client_key}\"\nports = [\"{public_port}\"]\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("client.toml"),
+        format!("server = \"127.0.0.1:{server_port}\"\nserver_key = \"{server_key}\"\nname = \"e2e\"\n\n[expose.echo]\nlocal = \"{echo_addr}\"\nport = {public_port}\n"),
+    )
+    .unwrap();
+    let _server = Proc(
+        hawse()
+            .args(["server", "--config"])
+            .arg(dir.path().join("server.toml"))
+            .env("RUNTIME_DIRECTORY", run.path())
+            .spawn()
+            .unwrap(),
+    );
+    let _client = Proc(
+        hawse()
+            .args(["client", "--config"])
+            .arg(dir.path().join("client.toml"))
+            .env("RUNTIME_DIRECTORY", run.path())
+            .spawn()
+            .unwrap(),
+    );
+
+    let (server_sock, client_sock) = (
+        run.path().join("server.sock"),
+        run.path().join("client.sock"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !(server_sock.exists() && client_sock.exists()) {
+        assert!(Instant::now() < deadline, "no socket within 15 s");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Up comes before the server answers the bind, and the bind's answer is what is checked.
+    let client = loop {
+        let status = ask_status(&client_sock);
+        if let Some(status) = status.filter(|s| {
+            s["link"]["state"] == "up" && s["services"][0]["answer"]["state"] != "pending"
+        }) {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the client never said it was up");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(client["role"], "client");
+    assert_eq!(
+        client["services"][0]["answer"]["state"], "bound",
+        "{client}"
+    );
+
+    let server = ask_status(&server_sock).expect("the server answers");
+    assert_eq!(server["role"], "server");
+    assert_eq!(server["clients"][0]["state"], "connected", "{server}");
+    assert_eq!(server["clients"][0]["name"], "e2e");
 }
 
 /// Whether a visitor to `port` gets its bytes back, tried until `open` is what it sees.

@@ -56,7 +56,6 @@ pub struct Env {
 }
 
 impl Env {
-    #[expect(dead_code, reason = "`hawse status` calls it to find the socket")]
     pub fn current() -> Env {
         let strategy = etcetera::choose_base_strategy().ok();
         Env {
@@ -164,10 +163,6 @@ enum BindError {
 
 /// Binds the socket for `role` where [`place`] says. Returns `None` when there is no place or the
 /// bind fails, after logging why, since a server or client runs on without its socket.
-#[expect(
-    dead_code,
-    reason = "the server and the client call it once they serve status"
-)]
 pub fn bind(role: Role) -> Option<Bound> {
     let path = match place(role, &Env::current()) {
         Place::At(path) => path,
@@ -245,13 +240,6 @@ impl Bound {
     /// Answers requests until the future is dropped, which also removes the socket file. Each
     /// connection runs in its own task, so a slow caller holds up no other. `status` runs once
     /// per `status` request.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the server and the client call it once they serve status"
-        )
-    )]
     pub async fn serve<S: Serialize>(self, status: impl Fn() -> S + Send + Sync + 'static) {
         let listener = match self.listener.try_clone().and_then(UnixListener::from_std) {
             Ok(listener) => listener,
