@@ -112,7 +112,7 @@ fn install_unit(
     exe: &Path,
     user: Option<&str>,
 ) -> miette::Result<()> {
-    let key = unit_key(role, located, configured, user.is_some())?;
+    let key = unit_key(role, located, configured, user)?;
     let key_dir = key.parent().unwrap_or(Path::new("/"));
     let mut seen = vec![exe, located.file.as_path()];
     if user.is_some() {
@@ -270,29 +270,43 @@ fn account(name: &str) -> miette::Result<&str> {
     Ok(name)
 }
 
-/// The directory a unit's `ProtectHome=` or `PrivateTmp=` hides `path` in, if any.
+/// The directory a unit's `ProtectHome=` or `PrivateTmp=` hides `path` in, if any, as written or
+/// where a link in it leads.
 fn hidden(path: &Path) -> Option<&'static str> {
+    // Both, since on some systems `/home` is itself a link, into `/var/home`.
+    let resolved = std::fs::canonicalize(path).ok();
     ["/home", "/root", "/run/user", "/tmp", "/var/tmp"]
         .into_iter()
-        .find(|dir| path.starts_with(dir))
+        .find(|dir| path.starts_with(dir) || resolved.as_ref().is_some_and(|r| r.starts_with(dir)))
 }
 
 /// The key a unit for the config at `located` uses. With an `account` that is the account's own
-/// default; without one the key has to be in the unit's state directory, since the unit's
-/// throwaway account can neither read root's key nor write anywhere else. The error says how to
-/// fix one that is not.
+/// default, in a directory that has to be there already; without one the key has to be in the
+/// unit's state directory, since the unit's throwaway account can neither read root's key nor
+/// write anywhere else. The error says how to fix a key that is not.
 fn unit_key(
     role: Role,
     located: &Located,
     configured: Option<&Path>,
-    account: bool,
+    account: Option<&str>,
 ) -> miette::Result<PathBuf> {
     let key = match configured {
         Some(key) => located.dir.join(key),
-        None if account => paths::default_key(role, &located.dir, None, false),
+        None if account.is_some() => paths::default_key(role, &located.dir, None, false),
         None => paths::default_key(role, &located.dir, Some(OsStr::new(STATE)), false),
     };
-    if account || key.starts_with(STATE) {
+    if let Some(name) = account {
+        let dir = key.parent().unwrap_or(Path::new("/"));
+        // ReadWritePaths= fails the unit's start on a directory that is not there.
+        if !dir.is_dir() {
+            miette::bail!(
+                "{dir} is not there, and the unit can write a key only to a directory that is; sudo install -d -o {name} {dir} and run this again",
+                dir = dir.display()
+            );
+        }
+        return Ok(key);
+    }
+    if key.starts_with(STATE) {
         return Ok(key);
     }
     if configured.is_some() {
@@ -308,15 +322,17 @@ fn unit_key(
 
 /// The first of `file` and the directories above it that keeps out an account other than their
 /// owners, with the `chmod` that lets it through; `None` when such an account can read `file`.
-fn closed_to_others(file: &Path) -> std::io::Result<Option<(&Path, &'static str)>> {
+/// A link is followed, and what is named is where it leads.
+fn closed_to_others(file: &Path) -> std::io::Result<Option<(PathBuf, &'static str)>> {
     use std::os::unix::fs::PermissionsExt as _;
+    let file = std::fs::canonicalize(file)?;
     let mode = |path: &Path| std::fs::metadata(path).map(|meta| meta.permissions().mode());
-    if mode(file)? & 0o004 == 0 {
+    if mode(&file)? & 0o004 == 0 {
         return Ok(Some((file, "o+r")));
     }
     for dir in file.ancestors().skip(1) {
-        if !dir.as_os_str().is_empty() && mode(dir)? & 0o001 == 0 {
-            return Ok(Some((dir, "o+x")));
+        if mode(dir)? & 0o001 == 0 {
+            return Ok(Some((dir.to_owned(), "o+x")));
         }
     }
     Ok(None)
@@ -453,12 +469,12 @@ mod tests {
             dir: dir.path().into(),
             exists: true,
         };
-        let err = unit_key(Role::Client, &located, None, false)
+        let err = unit_key(Role::Client, &located, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("/var/lib/hawse/"), "{err}");
         assert_eq!(
-            unit_key(Role::Client, &located, None, true).unwrap(),
+            unit_key(Role::Client, &located, None, Some("someone")).unwrap(),
             dir.path().join("client.key")
         );
     }
@@ -472,13 +488,33 @@ mod tests {
             exists: true,
         };
         assert_eq!(
-            unit_key(Role::Server, &located, None, false).unwrap(),
+            unit_key(Role::Server, &located, None, None).unwrap(),
             Path::new("/var/lib/hawse/server.key")
         );
         let var_lib = Path::new("/var/lib/hawse/server.key");
-        assert!(unit_key(Role::Server, &located, Some(var_lib), false).is_ok());
+        assert!(unit_key(Role::Server, &located, Some(var_lib), None).is_ok());
         let beside = Path::new("server.key");
-        assert!(unit_key(Role::Server, &located, Some(beside), false).is_err());
+        assert!(unit_key(Role::Server, &located, Some(beside), None).is_err());
+    }
+
+    #[test]
+    fn an_account_writes_its_key_only_to_a_directory_that_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let located = Located {
+            file: dir.path().join("client.toml"),
+            dir: dir.path().into(),
+            exists: true,
+        };
+        let keys = Path::new("keys/client.key");
+        let err = unit_key(Role::Client, &located, Some(keys), Some("someone"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("install -d -o someone"), "{err}");
+        std::fs::create_dir(dir.path().join("keys")).unwrap();
+        assert_eq!(
+            unit_key(Role::Client, &located, Some(keys), Some("someone")).unwrap(),
+            dir.path().join("keys/client.key")
+        );
     }
 
     #[test]
@@ -492,18 +528,41 @@ mod tests {
         let file = dir.join("server.toml");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(&file, "").unwrap();
+        let real = |path: &Path| std::fs::canonicalize(path).unwrap();
         mode(&file, 0o600);
-        assert_eq!(
-            closed_to_others(&file).unwrap(),
-            Some((file.as_path(), "o+r"))
-        );
+        assert_eq!(closed_to_others(&file).unwrap(), Some((real(&file), "o+r")));
         mode(&file, 0o644);
         mode(&dir, 0o750);
-        assert_eq!(
-            closed_to_others(&file).unwrap(),
-            Some((dir.as_path(), "o+x"))
-        );
+        assert_eq!(closed_to_others(&file).unwrap(), Some((real(&dir), "o+x")));
         assert_eq!(closed_to_others(Path::new("/etc/hosts")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_linked_config_is_judged_where_it_points() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let (open, closed) = (root.path().join("open"), root.path().join("closed"));
+        for dir in [&open, &closed] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        std::fs::write(closed.join("client.toml"), "").unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let link = open.join("client.toml");
+        std::os::unix::fs::symlink(closed.join("client.toml"), &link).unwrap();
+        let found = closed_to_others(&link).unwrap();
+        assert_eq!(
+            found,
+            Some((std::fs::canonicalize(&closed).unwrap(), "o+x"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_into_a_hidden_directory_is_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("hawse");
+        std::os::unix::fs::symlink("/home", &link).unwrap();
+        assert_eq!(hidden(&link), Some("/home"));
     }
 
     #[test]
