@@ -114,8 +114,8 @@ pub async fn watch(role: Option<Role>, style: Style) -> ExitCode {
 }
 
 /// Each of `now`'s services' bytes per second each way since `then`, `elapsed` before, by name.
-/// A service `then` lacks reads as none, and so does one whose total fell, as a client started
-/// again reports it.
+/// A service `then` lacks reads as none, and so does every service when `now` has run for less
+/// time than `then`: it is a client started again, whose totals count from nothing.
 fn rates(
     then: &ClientStatus,
     now: &ClientStatus,
@@ -123,6 +123,7 @@ fn rates(
 ) -> BTreeMap<String, (u64, u64)> {
     now.services
         .iter()
+        .filter(|_| now.up_s >= then.up_s)
         .filter_map(|service| {
             let before = then.services.iter().find(|s| s.name == service.name)?;
             let down = per_second(service.down, before.down, elapsed);
@@ -268,6 +269,14 @@ mod tests {
             rates(&then, &now, Duration::from_secs(2)),
             BTreeMap::from([("web".to_owned(), (1000, 500)), ("db".to_owned(), (0, 0)),])
         );
+    }
+
+    #[test]
+    fn a_client_started_again_has_no_rates_even_past_the_last_total() {
+        let mut then = client(&[("web", 1000, 0)]);
+        then.up_s = 600;
+        let restarted = client(&[("web", 3000, 0)]);
+        assert!(rates(&then, &restarted, Duration::from_secs(1)).is_empty());
     }
 
     #[test]

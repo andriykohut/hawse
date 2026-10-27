@@ -15,10 +15,11 @@ pub fn level(verbose: u8, quiet: bool) -> &'static str {
     }
 }
 
-/// Returns the style of the terminal form when that is what the run prints: a server's or a
-/// client's, which `form` says this is, on a terminal, with nothing asking for more or fewer lines than the default. Its rows stand in for
-/// the lines at info level, so only warnings and errors are logged beside them. `category` names
-/// the run in the unified log under `--log oslog`.
+/// Returns the style of the terminal form when that is what the run prints: a server's, a
+/// client's or a status watch's, which `form` says this is, on a terminal, with nothing asking for more or fewer lines than the default. Its rows stand in for
+/// the lines at info level, so only warnings and errors are logged beside them. A `form` run on a
+/// terminal has its lines written through the screen whatever their format or level, so they land
+/// above what it draws. `category` names the run in the unified log under `--log oslog`.
 pub fn init(
     verbose: u8,
     quiet: bool,
@@ -52,8 +53,9 @@ pub fn init(
         #[cfg(target_os = "macos")]
         LogFormat::Oslog => return oslog(filter, category),
     };
-    // A log line has to land above the client's panel, and only the screen knows where it is.
-    let writer = if terminal {
+    // A log line has to land above the client's panel or a watch, and only the screen knows where
+    // it is.
+    let writer = if form && tty {
         BoxMakeWriter::new(crate::screen::Stderr)
     } else {
         BoxMakeWriter::new(std::io::stderr)
