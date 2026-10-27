@@ -1,17 +1,22 @@
 //! `hawse status`: asks the server and the client running on this host how they stand, over
-//! the sockets they answer on, and prints what they say.
+//! the sockets they answer on, and prints what they say, once or, with `--watch`, every second.
 
+use std::collections::BTreeMap;
 use std::io::{self, BufRead as _, BufReader, IsTerminal as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use miette::IntoDiagnostic as _;
 use serde::Deserialize;
+use tokio::time::MissedTickBehavior;
 
+use crate::panel::per_second;
 use crate::paths::Role;
+use crate::screen;
 use crate::socket::{self, Env, REQUEST_WAIT, Refusal, Request};
-use crate::status::Status;
+use crate::status::{ClientStatus, Status};
 use crate::terminal::{self, Style};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,7 +32,6 @@ enum Reply {
 /// to stdout's width when it is a terminal, or with `json` as the line it came as. Succeeds when
 /// any process answered; otherwise says why there may be none on stderr and fails.
 pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitCode> {
-    let env = Env::current();
     let stdout = io::stdout();
     let width = rustix::termios::tcgetwinsize(&stdout).map_or(0, |size| usize::from(size.ws_col));
     // A link is an escape that a terminal shows as its text and a file keeps as it is.
@@ -35,6 +39,103 @@ pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitC
         links: stdout.is_terminal(),
         ..style
     };
+    let (answers, denied) = ask_each(role);
+    let replies: Vec<String> = answers
+        .into_iter()
+        .map(|(role, line)| {
+            if json {
+                line
+            } else {
+                draw(role, &line, None, style, width)
+            }
+        })
+        .collect();
+    if replies.is_empty() {
+        eprintln!("{}", nothing_answered(!denied.is_empty()));
+        return Ok(ExitCode::FAILURE);
+    }
+    for role in denied {
+        eprintln!("{}", denied_alongside_answer(role));
+    }
+    let between = if json { "\n" } else { "\n\n" };
+    // One write, which a pipe takes whole even when its reader stops at the first line it wants.
+    let text = replies.join(between) + "\n";
+    stdout.lock().write_all(text.as_bytes()).into_diagnostic()?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Asks as [`run`] does once a second and redraws what is said in place on stderr, as the panel
+/// is drawn, until Ctrl-C. A client's services show their bytes per second since the client last
+/// answered. A role that does not answer is left out, and when none does the frame says so and
+/// the asking goes on.
+pub async fn watch(role: Option<Role>, style: Style) -> ExitCode {
+    let mut sampled: Option<(Instant, ClientStatus)> = None;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let interrupted = tokio::signal::ctrl_c();
+    tokio::pin!(interrupted);
+    loop {
+        tokio::select! {
+            _ = &mut interrupted => break,
+            _ = tick.tick() => {}
+        }
+        // shortcut: asked on this task, so a hung process holds off Ctrl-C for up to
+        // REQUEST_WAIT; ask from a blocking task if that bites.
+        let (answers, denied) = ask_each(role);
+        let asked = Instant::now();
+        let (width, height) = screen::size();
+        let mut blocks = Vec::new();
+        for (role, line) in answers {
+            let rates = match serde_json::from_str(&line) {
+                Ok(Status::Client(now)) => {
+                    let rates = sampled
+                        .as_ref()
+                        .map(|(at, then)| rates(then, &now, asked - *at))
+                        .unwrap_or_default();
+                    sampled = Some((asked, now));
+                    Some(rates)
+                }
+                _ => None,
+            };
+            blocks.push(draw(role, &line, rates.as_ref(), style, width));
+        }
+        if blocks.is_empty() {
+            blocks.push(nothing_answered(!denied.is_empty()));
+        }
+        blocks.extend(denied.into_iter().map(denied_alongside_answer));
+        let lines = blocks.join("\n\n").split('\n').map(str::to_owned).collect();
+        screen::draw(
+            terminal::fold(lines, height, style, width.saturating_sub(1)),
+            width,
+        );
+    }
+    screen::release();
+    ExitCode::SUCCESS
+}
+
+/// Each of `now`'s services' bytes per second each way since `then`, `elapsed` before, by name.
+/// A service `then` lacks reads as none, and so does one whose total fell, as a client started
+/// again reports it.
+fn rates(
+    then: &ClientStatus,
+    now: &ClientStatus,
+    elapsed: Duration,
+) -> BTreeMap<String, (u64, u64)> {
+    now.services
+        .iter()
+        .filter_map(|service| {
+            let before = then.services.iter().find(|s| s.name == service.name)?;
+            let down = per_second(service.down, before.down, elapsed);
+            let up = per_second(service.up, before.up, elapsed);
+            Some((service.name.clone(), (down, up)))
+        })
+        .collect()
+}
+
+/// Asks `role`, or the server and then the client: the reply line of each that answered, with
+/// its role, and the roles that did not answer because their socket refused permission.
+fn ask_each(role: Option<Role>) -> (Vec<(Role, String)>, Vec<Role>) {
+    let env = Env::current();
     let roles = role.map_or_else(|| vec![Role::Server, Role::Client], |role| vec![role]);
     let mut replies = Vec::new();
     let mut denied = Vec::new();
@@ -44,11 +145,7 @@ pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitC
         for path in socket::candidates(role, &env) {
             match ask(&path) {
                 Ok(line) => {
-                    replies.push(if json {
-                        line
-                    } else {
-                        draw(role, &line, style, width)
-                    });
+                    replies.push((role, line));
                     answered = true;
                     break;
                 }
@@ -66,18 +163,7 @@ pub fn run(role: Option<Role>, json: bool, style: Style) -> miette::Result<ExitC
             denied.push(role);
         }
     }
-    if replies.is_empty() {
-        eprintln!("{}", nothing_answered(!denied.is_empty()));
-        return Ok(ExitCode::FAILURE);
-    }
-    for role in denied {
-        eprintln!("{}", denied_alongside_answer(role));
-    }
-    let between = if json { "\n" } else { "\n\n" };
-    // One write, which a pipe takes whole even when its reader stops at the first line it wants.
-    let text = replies.join(between) + "\n";
-    stdout.lock().write_all(text.as_bytes()).into_diagnostic()?;
-    Ok(ExitCode::SUCCESS)
+    (replies, denied)
 }
 
 /// The reply line of the process answering at `path`, without its newline. A process that has
@@ -95,16 +181,23 @@ fn ask(path: &Path) -> io::Result<String> {
     Ok(line.trim_end().to_owned())
 }
 
-/// `line` as `role` answered it: its status drawn, or, from a process that runs another version
-/// of hawse than this one, why it could not say.
-fn draw(role: Role, line: &str, style: Style, width: usize) -> String {
+/// `line` as `role` answered it: its status drawn, with `rates` as
+/// [`terminal::status_lines`] takes them, or, from a process that runs another version of hawse
+/// than this one, why it could not say.
+fn draw(
+    role: Role,
+    line: &str,
+    rates: Option<&BTreeMap<String, (u64, u64)>>,
+    style: Style,
+    width: usize,
+) -> String {
     let reply = serde_json::from_str(line).unwrap_or_else(|err| {
         Reply::Refused(Refusal {
             error: format!("its reply does not read as a status: {err}"),
         })
     });
     match reply {
-        Reply::Status(status) => terminal::status_lines(&status, style, width).join("\n"),
+        Reply::Status(status) => terminal::status_lines(&status, rates, style, width).join("\n"),
         Reply::Refused(Refusal { error }) => {
             let name = role.name();
             format!(
@@ -142,6 +235,40 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     use super::*;
+    use crate::status::{Answer, LinkStatus, ServiceStatus};
+
+    fn client(services: &[(&str, u64, u64)]) -> ClientStatus {
+        let service = |&(name, down, up): &(&str, u64, u64)| ServiceStatus {
+            name: name.to_owned(),
+            local: String::new(),
+            port: String::new(),
+            answer: Answer::Pending,
+            open: 0,
+            visitors: 0,
+            down,
+            up,
+            datagrams_down: 0,
+            datagrams_up: 0,
+            dropped: 0,
+        };
+        ClientStatus {
+            version: VERSION.to_owned(),
+            server: String::new(),
+            up_s: 0,
+            link: LinkStatus::Connecting,
+            services: services.iter().map(service).collect(),
+        }
+    }
+
+    #[test]
+    fn a_rate_counts_from_the_last_answer_and_a_fall_or_a_new_service_reads_as_none() {
+        let then = client(&[("web", 1000, 500), ("db", 9000, 0)]);
+        let now = client(&[("web", 3000, 1500), ("db", 100, 0), ("new", 4000, 0)]);
+        assert_eq!(
+            rates(&then, &now, Duration::from_secs(2)),
+            BTreeMap::from([("web".to_owned(), (1000, 500)), ("db".to_owned(), (0, 0)),])
+        );
+    }
 
     #[test]
     fn nothing_answered_says_what_to_do() {
