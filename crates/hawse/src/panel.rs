@@ -29,6 +29,13 @@ pub struct Shown {
     pub carried: BTreeMap<String, Counts>,
 }
 
+/// The bytes per second from a total of `then` to one of `now`, `elapsed` apart. A smaller `now`
+/// reads as none.
+pub fn per_second(now: u64, then: u64, elapsed: Duration) -> u64 {
+    let millis = elapsed.as_millis().max(1);
+    u64::try_from(u128::from(now.saturating_sub(then)) * 1000 / millis).unwrap_or(u64::MAX)
+}
+
 /// What a `Row::Bound` is drawn from: the server's answer, then the sampled figures.
 #[derive(Default)]
 struct State {
@@ -115,18 +122,14 @@ impl State {
     /// Each service's figures from `totals`, read `elapsed` after the last sample. A total
     /// smaller than the last, from a client that started again, reads as no rate.
     fn sample(&mut self, totals: BTreeMap<String, Counts>, elapsed: Duration) {
-        let millis = elapsed.as_millis().max(1);
-        let per_second = |now: u64, then: u64| {
-            u64::try_from(u128::from(now.saturating_sub(then)) * 1000 / millis).unwrap_or(u64::MAX)
-        };
         self.figures = totals
             .iter()
             .map(|(service, now)| {
                 let then = self.counted.get(service).copied().unwrap_or_default();
                 let figures = Counts {
                     open: now.open,
-                    down: per_second(now.down, then.down),
-                    up: per_second(now.up, then.up),
+                    down: per_second(now.down, then.down, elapsed),
+                    up: per_second(now.up, then.up, elapsed),
                     ..Counts::default()
                 };
                 (service.clone(), figures)

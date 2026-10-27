@@ -40,8 +40,8 @@ struct Cli {
     /// at the default level prints rows in place of log lines, and `pretty` keeps the lines.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Auto)]
     log: LogFormat,
-    /// Colored output. `auto` disables color when stderr is not a terminal, or for `status` when
-    /// stdout is not.
+    /// Colored output. `auto` disables color when stderr is not a terminal, or for `status` without
+    /// `--watch` when stdout is not.
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
     /// Number of worker threads. Defaults to the number of CPUs.
@@ -119,6 +119,10 @@ enum Command {
         /// Print each reply as the JSON line it came as, one line per role.
         #[arg(long)]
         json: bool,
+        /// Ask again every second and redraw in place, with each client service's bytes per
+        /// second, until Ctrl-C.
+        #[arg(long, conflicts_with = "json")]
+        watch: bool,
     },
     /// Print the completion script for a shell.
     Completions { shell: clap_complete::Shell },
@@ -177,7 +181,7 @@ fn main() -> ExitCode {
         ColorChoice::Never => false,
         ColorChoice::Auto => {
             let terminal = match cli.command {
-                Command::Status { .. } => std::io::stdout().is_terminal(),
+                Command::Status { watch: false, .. } => std::io::stdout().is_terminal(),
                 _ => std::io::stderr().is_terminal(),
             };
             terminal && std::env::var_os("NO_COLOR").is_none()
@@ -202,7 +206,10 @@ fn main() -> ExitCode {
         cli.quiet,
         cli.log,
         style,
-        matches!(cli.command, Command::Client { .. } | Command::Server { .. }),
+        matches!(
+            cli.command,
+            Command::Client { .. } | Command::Server { .. } | Command::Status { watch: true, .. }
+        ),
         category,
     );
     match run(cli, style, terminal) {
@@ -290,7 +297,10 @@ fn run(
             Command::Upgrade { version, check } => {
                 commands::upgrade::run(version.as_deref(), check).map(|()| ExitCode::SUCCESS)
             }
-            Command::Status { role, json } => commands::status::run(role, json, style),
+            Command::Status {
+                role, watch: true, ..
+            } => Ok(commands::status::watch(role, style).await),
+            Command::Status { role, json, .. } => commands::status::run(role, json, style),
             Command::Completions { shell } => {
                 // `generate` panics on a write that fails, which a reader that has gone away
                 // makes of a write to stdout.

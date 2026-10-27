@@ -403,7 +403,6 @@ pub fn frame(
     let again = style.accent(style.pick("↻", "~"));
     let moving = style.accent(style.pick("●", "*"));
     let idle = style.accent(style.pick("○", "o"));
-    let (toward, from) = (style.pick("↓", "v"), style.pick("↑", "^"));
     let host = split_host_port(&cfg.server)
         .map(|(host, _)| host)
         .unwrap_or_default();
@@ -459,17 +458,7 @@ pub fn frame(
                 let mut fields =
                     service_fields(mark, service, &host, port, &expose.local, widths, style);
                 if matches!(link, Link::Up { .. }) {
-                    if open == 0 && !moved {
-                        fields.push(format!("  {}", style.dim("idle")));
-                    } else {
-                        fields.push(format!("  {}", style.accent(&format!("{open:>counts$}"))));
-                        if moved {
-                            let down = style.accent(&format!("{toward} {:>6}", rate(down)));
-                            let up = style.accent(&format!("{from} {:>6}", rate(up)));
-                            fields.push(format!("  {down}"));
-                            fields.push(format!("  {up}"));
-                        }
-                    }
+                    fields.extend(figures(open, down, up, counts, style));
                 }
                 fields
             }
@@ -484,7 +473,32 @@ pub fn frame(
         lines.push(String::new());
         lines.extend(body);
     }
-    if height > 0 && lines.len() > height {
+    fold(lines, height, style, room)
+}
+
+/// A bound row's figures as the panel draws them while the link is up, from its open count and
+/// its bytes per second each way: `idle` with nothing open or moving, else the count padded to
+/// `counts` columns, then the rates when bytes moved.
+fn figures(open: u64, down: u64, up: u64, counts: usize, style: Style) -> Vec<String> {
+    let moved = down > 0 || up > 0;
+    if open == 0 && !moved {
+        return vec![format!("  {}", style.dim("idle"))];
+    }
+    let mut fields = vec![format!("  {}", style.accent(&format!("{open:>counts$}")))];
+    if moved {
+        let down = style.accent(&format!("{} {:>6}", style.pick("↓", "v"), rate(down)));
+        let up = style.accent(&format!("{} {:>6}", style.pick("↑", "^"), rate(up)));
+        fields.push(format!("  {down}"));
+        fields.push(format!("  {up}"));
+    }
+    fields
+}
+
+/// `lines` folded to `height` lines: a blank first line goes first, then the lines from the last
+/// that fits on, said as `… N more` in `room` columns. A `height` of 0 is a terminal that does
+/// not say, and folds nothing.
+pub fn fold(mut lines: Vec<String>, height: usize, style: Style, room: usize) -> Vec<String> {
+    if height > 0 && lines.len() > height && lines.first().is_some_and(String::is_empty) {
         // The blank line above the header goes before any row does.
         lines.remove(0);
     }
@@ -503,12 +517,18 @@ pub fn frame(
 
 /// A status reply as `hawse status` prints it: a header that opens with a mark and a word for
 /// the state, then a client's services in the panel's rows, or a server's clients and the
-/// unknown keys that knocked. Each line is cut to one column less than `width`, as [`frame`]'s
-/// are; a `width` of 0 cuts nothing.
-pub fn status_lines(status: &Status, style: Style, width: usize) -> Vec<String> {
+/// unknown keys that knocked. With `rates`, each service's bytes per second each way by name, a
+/// client's rows are the panel's, rates in place of totals. Each line is cut to one column less
+/// than `width`, as [`frame`]'s are; a `width` of 0 cuts nothing.
+pub fn status_lines(
+    status: &Status,
+    rates: Option<&BTreeMap<String, (u64, u64)>>,
+    style: Style,
+    width: usize,
+) -> Vec<String> {
     let room = width.saturating_sub(1);
     match status {
-        Status::Client(client) => client_status_lines(client, style, room),
+        Status::Client(client) => client_status_lines(client, rates, style, room),
         Status::Server(server) => server_status_lines(server, style, room),
     }
 }
@@ -578,9 +598,14 @@ fn client_status_header(status: &ClientStatus, style: Style, room: usize) -> Vec
     lines
 }
 
-/// A client's status in `room` columns. A service the server has not answered yet has no row,
-/// as on the panel.
-fn client_status_lines(status: &ClientStatus, style: Style, room: usize) -> Vec<String> {
+/// A client's status in `room` columns, with `rates` as [`status_lines`] takes them. A service the
+/// server has not answered yet has no row, as on the panel.
+fn client_status_lines(
+    status: &ClientStatus,
+    rates: Option<&BTreeMap<String, (u64, u64)>>,
+    style: Style,
+    room: usize,
+) -> Vec<String> {
     let no = style.red(style.pick("✗", "x"));
     let again = style.accent(style.pick("↻", "~"));
     let busy = style.accent(style.pick("●", "*"));
@@ -620,18 +645,27 @@ fn client_status_lines(status: &ClientStatus, style: Style, room: usize) -> Vec<
         let fields = match (&service.answer, bound(service)) {
             (Answer::Refused { reason }, _) => vec![format!("  {no} {name:names$}  {reason}")],
             (_, Some(port)) => {
-                let mark = match (up, service.open) {
+                let rate = rates.map(|rates| rates.get(name).copied().unwrap_or_default());
+                // Without rates nothing says whether bytes move, so an open connection marks it.
+                let busy_now = rate.map_or(service.open > 0, |(down, sent)| down > 0 || sent > 0);
+                let mark = match (up, busy_now) {
                     (false, _) => &again,
-                    (true, 0) => &idle,
-                    (true, _) => &busy,
+                    (true, false) => &idle,
+                    (true, true) => &busy,
                 };
                 let mut fields =
                     service_fields(mark, name, &host, port, &service.local, widths, style);
-                if up {
-                    let figure = |text: String| format!("  {}", style.accent(&text));
-                    fields.push(figure(format!("{:>counts$}", service.open)));
-                    fields.push(figure(format!("{toward} {:>4}", bytes(service.down))));
-                    fields.push(figure(format!("{from} {:>4}", bytes(service.up))));
+                match rate {
+                    Some((down, sent)) if up => {
+                        fields.extend(figures(service.open, down, sent, counts, style));
+                    }
+                    None if up => {
+                        let figure = |text: String| format!("  {}", style.accent(&text));
+                        fields.push(figure(format!("{:>counts$}", service.open)));
+                        fields.push(figure(format!("{toward} {:>4}", bytes(service.down))));
+                        fields.push(figure(format!("{from} {:>4}", bytes(service.up))));
+                    }
+                    _ => {}
                 }
                 fields
             }
@@ -1684,13 +1718,32 @@ port = "51820/udp"
     }
 
     fn drawn(status: &Status, style: Style, width: usize) -> String {
-        status_lines(status, style, width).join("\n")
+        status_lines(status, None, style, width).join("\n")
     }
 
     #[test]
     fn a_connected_client_reads_as_its_panel_at_rest() {
         let status = Status::Client(client_status(connected()));
         insta::assert_snapshot!(drawn(&status, uncoloured(true), 0));
+    }
+
+    #[test]
+    fn a_watched_client_reads_as_its_panel() {
+        let mut client = client_status(connected());
+        // wg has a session open and quiet; jellyfin moves bytes.
+        client.services[1].open = 1;
+        let rates = BTreeMap::from([("jellyfin".to_owned(), (1_258_291, 36_045))]);
+        let lines = status_lines(&Status::Client(client), Some(&rates), uncoloured(true), 0);
+        insta::assert_snapshot!(lines.join("\n"));
+    }
+
+    #[test]
+    fn a_fold_keeps_a_first_line_that_is_not_blank() {
+        let lines = ["head", "", "a", "b"].map(str::to_owned).to_vec();
+        assert_eq!(
+            fold(lines, 3, uncoloured(true), 0),
+            ["head", "", "  … 2 more"]
+        );
     }
 
     #[test]
@@ -1713,7 +1766,7 @@ port = "51820/udp"
             retry_in_s: 0,
             cause: "server stopped answering".to_owned(),
         });
-        let lines = status_lines(&Status::Client(due), uncoloured(true), 0);
+        let lines = status_lines(&Status::Client(due), None, uncoloured(true), 0);
         assert!(lines[0].ends_with("  ·  retrying now"), "{lines:?}");
     }
 
@@ -1728,7 +1781,7 @@ port = "51820/udp"
 
     #[test]
     fn a_down_client_starts_with_a_red_mark() {
-        let lines = status_lines(&Status::Client(client_status(down())), coloured(), 0);
+        let lines = status_lines(&Status::Client(client_status(down())), None, coloured(), 0);
         assert!(lines[0].starts_with("\x1b[31m✗"), "{lines:?}");
     }
 
@@ -1763,7 +1816,7 @@ port = "51820/udp"
             not_connected("laptop", None),
         ]);
         insta::assert_snapshot!(drawn(&status, uncoloured(true), 0));
-        let lines = status_lines(&status, coloured(), 0);
+        let lines = status_lines(&status, None, coloured(), 0);
         assert!(lines[0].starts_with("\x1b[31m✗"), "{lines:?}");
 
         let Status::Server(mut once) = status else {
@@ -1786,7 +1839,7 @@ port = "51820/udp"
             "{out}"
         );
         insta::assert_snapshot!(out);
-        let lines = status_lines(&status, coloured(), 0);
+        let lines = status_lines(&status, None, coloured(), 0);
         assert!(!lines[0].contains("\x1b[31m"), "{lines:?}");
     }
 }

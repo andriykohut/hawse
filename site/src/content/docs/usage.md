@@ -75,7 +75,9 @@ does not say whether the key is authorized.
 
 `hawse status` asks the server and the client running on this host how they
 stand, and `hawse status server` or `client` asks only that one. It exits 0
-when one answered, whatever state it is in, and 1 when none did.
+when one answered, whatever state it is in, and 1 when none did. With
+`--watch` it asks again every second and redraws in place until Ctrl-C, with
+each of a client's services in the panel's rows and its bytes per second.
 
 Both ends read their config again when the file changes, and on SIGHUP. The
 server takes up `[clients.*]` without touching the other sessions: a client
