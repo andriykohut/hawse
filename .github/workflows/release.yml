@@ -18,8 +18,8 @@ jobs:
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
       - id: read
         run: |
           version=$(.github/scripts/version.sh)
@@ -48,17 +48,20 @@ jobs:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-about@0.9.2
-      # cross's own dependencies do not build under the workflow's -D warnings.
+      # cross's own dependencies do not build under the workflow's -D warnings. Dependabot does not
+      # follow a git install, so the commit is moved by hand.
       - if: runner.os == 'Linux'
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        run: >-
+          cargo install cross --git https://github.com/cross-rs/cross
+          --rev 5f05d13dc37c0db79f4448642c68e108b977a9e1 --locked
         env:
           RUSTFLAGS: ""
       - if: runner.os == 'Linux'
@@ -69,7 +72,7 @@ jobs:
           cargo about generate --fail --locked -c about.toml -m crates/hawse/Cargo.toml
           --target "$TARGET" ${{ matrix.features }} -o target/notices.txt about.hbs
       - run: .github/scripts/package.sh "$TARGET" "$VERSION" target/notices.txt dist
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hawse-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -78,9 +81,9 @@ jobs:
   crates-check:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo package --workspace
 
   image:
@@ -89,20 +92,20 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: hawse-*-linux-*
           path: dist
           merge-multiple: true
       - run: .github/scripts/image-context.sh dist "$VERSION" context
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: context
           file: .github/docker/Dockerfile
           platforms: linux/amd64,linux/arm64,linux/arm/v7
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: context
           file: .github/docker/Dockerfile
@@ -132,15 +135,15 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
       - id: pending
         run: |
           crates=$(.github/scripts/unpublished-crates.sh "$VERSION" hawse-proto hawse-core hawse | paste -sd' ' -)
           echo "crates=$crates" >> "$GITHUB_OUTPUT"
       - if: steps.pending.outputs.crates != ''
         id: auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - if: steps.pending.outputs.crates != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
@@ -162,14 +165,14 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: hawse-*
           path: dist
           merge-multiple: true
       - working-directory: dist
         run: sha256sum hawse-*.tar.gz > SHA256SUMS
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/hawse-*.tar.gz
       - env:
@@ -194,26 +197,26 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: hawse-*-linux-*
           path: dist
           merge-multiple: true
       - run: .github/scripts/image-context.sh dist "$VERSION" context
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: type=semver,pattern={{version}}
       - id: push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: context
           file: .github/docker/Dockerfile
@@ -221,7 +224,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
