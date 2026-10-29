@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Installs both units on a runner with systemd, checks the client connects, then removes them.
 set -euo pipefail
-bin=/usr/local/bin/hawse
+# Not /usr/local/bin, which the runner image makes writable by everyone and service install refuses.
+bin=/usr/local/sbin/hawse
 me=$(id -un)
-sudo install -m755 target/debug/hawse "$bin"
+sudo install -D -m755 target/debug/hawse "$bin"
 server_key=$(sudo "$bin" service install server | sed -n 's/^server key: //p')
 test -n "$server_key"
 # hawse upgrade finds the binary a unit runs as systemd reports it.

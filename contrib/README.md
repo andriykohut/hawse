@@ -42,7 +42,8 @@ config it is given, where `/usr/local/bin` or `/etc` is not a good home. On
 TrueNAS SCALE, for example, put both the binary and the config on a pool, and
 run the unit as the account that owns the config, which keeps the key beside
 it. The binary goes in a directory only root can write, since root runs it to
-install and to upgrade, and both refuse one another account could replace:
+install and to upgrade, and both refuse one another account could replace. From
+the directory the release archive unpacked to:
 
 ```sh
 sudo install -D -m755 hawse /mnt/pool/hawse-bin/hawse

@@ -90,7 +90,7 @@ root runs it to install and to upgrade, and both refuse one another account
 could replace:
 
 ```sh
-sudo install -D -m755 hawse /mnt/pool/hawse-bin/hawse
+sudo install -D -m755 hawse-0.12.0-x86_64-unknown-linux-musl/hawse /mnt/pool/hawse-bin/hawse
 sudo /mnt/pool/hawse-bin/hawse service install client \
   --config /mnt/pool/apps/hawse/client.toml --user someone
 ```
