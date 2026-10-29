@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,10 @@ impl Bucket {
 pub struct Limiter {
     per_minute: u32,
     buckets: HashMap<IpAddr, Bucket>,
+    /// Attempts let through by `begin` and not yet over, per key. A failure is counted only once
+    /// its attempt ends, up to a handshake timeout later, so until then each one stands in for the
+    /// token it may cost. Bounded by the caller's own cap on attempts in flight.
+    pending: HashMap<IpAddr, u32>,
     full_warned: bool,
     last_sweep: Option<Instant>,
 }
@@ -53,19 +58,48 @@ impl Limiter {
         Self {
             per_minute,
             buckets: HashMap::new(),
+            pending: HashMap::new(),
             full_warned: false,
             last_sweep: None,
         }
     }
 
+    /// Whether `ip` has a token left over the attempts it already has under way.
     pub fn permits(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if self.per_minute == 0 {
+            return true;
+        }
         let capacity = f64::from(self.per_minute);
-        match self.buckets.get_mut(&key(ip)) {
+        let key = key(ip);
+        let tokens = match self.buckets.get_mut(&key) {
             Some(bucket) => {
                 bucket.refill(capacity, now);
-                bucket.tokens >= 1.0
+                bucket.tokens
             }
-            None => true,
+            None => capacity,
+        };
+        let pending = self.pending.get(&key).copied().unwrap_or(0);
+        tokens - f64::from(pending) >= 1.0
+    }
+
+    /// [`Limiter::permits`], and on a yes sets one of the address's tokens aside until
+    /// [`Limiter::end`].
+    pub fn begin(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let permitted = self.permits(ip, now);
+        if permitted && self.per_minute != 0 {
+            *self.pending.entry(key(ip)).or_default() += 1;
+        }
+        permitted
+    }
+
+    /// Ends an attempt `begin` let through. A failed one is reported to `failed` first, so the
+    /// address has no moment in which it holds neither.
+    pub fn end(&mut self, ip: IpAddr) {
+        if let Entry::Occupied(mut pending) = self.pending.entry(key(ip)) {
+            *pending.get_mut() -= 1;
+            if *pending.get() == 0 {
+                pending.remove();
+            }
         }
     }
 
@@ -311,12 +345,31 @@ mod tests {
     }
 
     #[test]
+    fn attempts_under_way_hold_their_tokens() {
+        let now = Instant::now();
+        let mut limiter = Limiter::new(2);
+        let addr = ip("192.0.2.1");
+        assert!(limiter.begin(addr, now));
+        assert!(limiter.begin(addr, now));
+        assert!(!limiter.begin(addr, now));
+        assert!(limiter.permits(ip("192.0.2.2"), now));
+
+        limiter.failed(addr, now);
+        limiter.end(addr);
+        assert!(!limiter.permits(addr, now));
+        limiter.end(addr);
+        assert!(limiter.begin(addr, now));
+        assert!(!limiter.permits(addr, now));
+    }
+
+    #[test]
     fn zero_disables_it() {
         let now = Instant::now();
         let mut limiter = Limiter::new(0);
         let addr = ip("192.0.2.1");
         for _ in 0..100 {
             assert_eq!(limiter.failed(addr, now), Failure::Disabled);
+            assert!(limiter.begin(addr, now));
         }
         assert!(limiter.permits(addr, now));
     }

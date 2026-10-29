@@ -9,6 +9,18 @@ use crate::port::Kind;
 
 pub const ALPN: &[u8] = b"hawse/2";
 
+/// The most of a peer's free text that [`printable`] keeps, in characters.
+const PRINTABLE: usize = 128;
+
+/// `text` from a peer, safe to show a person: without the control characters a terminal or a
+/// systemd status line acts on, and cut at 128 characters.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(PRINTABLE)
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMessage {
     Hello {
@@ -303,6 +315,15 @@ mod tests {
         let bytes = crate::frame::encode(&open).unwrap();
         assert_eq!(&bytes[..], &[1, 7]);
         assert_eq!(crate::frame::decode::<StreamOpen>(&bytes).unwrap(), open);
+    }
+
+    #[test]
+    fn printable_drops_control_characters_and_caps_the_length() {
+        assert_eq!(
+            printable("hawse/0.11.0\x1b]52;c;aGk=\x07\nSTOPPING=1\u{9b}"),
+            "hawse/0.11.0]52;c;aGk=STOPPING=1"
+        );
+        assert_eq!(printable(&"é".repeat(1000)), "é".repeat(128));
     }
 
     #[test]

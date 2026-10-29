@@ -2,7 +2,7 @@
 //! the sockets they answer on, and prints what they say, once or, with `--watch`, every second.
 
 use std::collections::BTreeMap;
-use std::io::{self, BufRead as _, BufReader, IsTerminal as _, Write as _};
+use std::io::{self, BufRead as _, BufReader, IsTerminal as _, Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
@@ -20,6 +20,8 @@ use crate::status::{ClientStatus, Status};
 use crate::terminal::{self, Style};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The most of a reply that is read; a longer one is cut there and fails to parse.
+const REPLY_LIMIT: u64 = 1 << 20;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -176,7 +178,8 @@ fn ask(path: &Path) -> io::Result<String> {
     let request = serde_json::to_string(&Request::Status).expect("a unit variant serializes");
     stream.write_all(format!("{request}\n").as_bytes())?;
     let mut line = String::new();
-    if BufReader::new(stream).read_line(&mut line)? == 0 {
+    // The socket can belong to a service account, which is not to make a root caller read forever.
+    if BufReader::new(stream.take(REPLY_LIMIT)).read_line(&mut line)? == 0 {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
     Ok(line.trim_end().to_owned())

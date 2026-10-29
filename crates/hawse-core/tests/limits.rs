@@ -11,7 +11,10 @@ use common::{
 use hawse_core::client::{ClientError, Event};
 use hawse_core::config::{Prefer, ServerConfig};
 use hawse_core::identity::Identity;
-use hawse_core::transport::quic::QuicError;
+use hawse_core::tls;
+use hawse_core::transport::TransportError;
+use hawse_core::transport::quic::{QuicError, Tuning};
+use hawse_core::transport::tcp::{self, TcpTransport};
 use hawse_proto::key::PublicKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -137,6 +140,45 @@ async fn refused_tcp_connections_give_back_their_handshake_permit() {
             .expect("closed within 5 s");
         assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
     }
+
+    let mut known = start_client(
+        client_config_over(
+            at(&server, Ipv6Addr::LOCALHOST),
+            server.key,
+            &[],
+            Prefer::Tcp,
+        ),
+        client_id,
+    );
+    assert!(matches!(
+        next_event(&mut known.events).await,
+        Event::Connected { .. }
+    ));
+    known.cancel.cancel();
+    server.cancel.cancel();
+}
+
+/// A stranger over the fallback that finishes TLS with a key of its own and says nothing more.
+async fn silent(to: SocketAddr, server_key: PublicKey) -> Result<TcpTransport, TransportError> {
+    let (cert, key) = Identity::generate().unwrap().certificate().unwrap();
+    let tls = tls::client_config(cert, key, server_key, tls::provider()).unwrap();
+    let connect = tcp::connect(to, tls, Tuning::CLIENT);
+    tokio::time::timeout(Duration::from_secs(5), connect)
+        .await
+        .expect("answered within 5 s")
+}
+
+#[tokio::test]
+async fn strangers_waiting_to_say_hello_hold_their_address_back() {
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let server = start_server(&dual_stack(client_id.public_key(), 2), &server_id);
+    let v4 = at(&server, Ipv4Addr::LOCALHOST);
+    let _held = [
+        silent(v4, server.key).await.unwrap(),
+        silent(v4, server.key).await.unwrap(),
+    ];
+    assert!(silent(v4, server.key).await.is_err());
 
     let mut known = start_client(
         client_config_over(

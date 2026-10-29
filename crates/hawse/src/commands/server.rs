@@ -7,6 +7,7 @@ use hawse_core::identity::Identity;
 use hawse_core::server::policy::Policy;
 use hawse_core::server::{Event, Server};
 use miette::{IntoDiagnostic as _, WrapErr as _};
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -51,11 +52,36 @@ async fn show(mut events: broadcast::Receiver<Event>, mut names: usize, style: S
     }
 }
 
+/// The descriptor limit to set in place of `limit`: the hard limit as the soft one too, or `None`
+/// when the soft one is that high already. On macOS the soft limit stops at `OPEN_MAX`, the most
+/// it accepts.
+fn raised(limit: Rlimit) -> Option<Rlimit> {
+    const OPEN_MAX: u64 = 10240;
+    let ceiling = if cfg!(target_os = "macos") {
+        Some(limit.maximum.map_or(OPEN_MAX, |max| max.min(OPEN_MAX)))
+    } else {
+        limit.maximum
+    };
+    // `None` is unlimited.
+    let most = |value: Option<u64>| value.unwrap_or(u64::MAX);
+    (most(ceiling) > most(limit.current)).then_some(Rlimit {
+        current: ceiling,
+        maximum: limit.maximum,
+    })
+}
+
 pub async fn run(
     config: Option<PathBuf>,
     listen: Option<SocketAddr>,
     terminal: Option<Style>,
 ) -> miette::Result<()> {
+    // Each visitor and each connection on its way in holds a descriptor, and systemd starts a
+    // service at 1024, which a few hundred idle visitors fill for every client at once.
+    if let Some(limit) = raised(getrlimit(Resource::Nofile))
+        && let Err(err) = setrlimit(Resource::Nofile, limit)
+    {
+        tracing::warn!(%err, "cannot raise the descriptor limit");
+    }
     let located = paths::locate(Role::Server, config);
     let reloads = Reloads::new(located.file.clone());
     let (cfg, _) = load(&located.file, listen)?;
@@ -171,5 +197,38 @@ async fn reload(
         if let Some(style) = terminal {
             terminal::print(&terminal::note("config reloaded", style));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limit(current: Option<u64>, maximum: Option<u64>) -> Rlimit {
+        Rlimit { current, maximum }
+    }
+
+    #[test]
+    fn the_soft_descriptor_limit_rises_to_the_hard_one() {
+        let hard = Some(524_288);
+        let to = if cfg!(target_os = "macos") {
+            Some(10240)
+        } else {
+            hard
+        };
+        assert_eq!(raised(limit(Some(1024), hard)), Some(limit(to, hard)));
+        assert_eq!(raised(limit(Some(524_288), hard)), None);
+        assert_eq!(raised(limit(Some(1024), Some(1024))), None);
+        assert_eq!(raised(limit(None, None)), None);
+    }
+
+    #[test]
+    fn an_unlimited_hard_limit_lifts_the_soft_one_as_far_as_the_system_takes() {
+        let to = if cfg!(target_os = "macos") {
+            Some(10240)
+        } else {
+            None
+        };
+        assert_eq!(raised(limit(Some(256), None)), Some(limit(to, None)));
     }
 }
