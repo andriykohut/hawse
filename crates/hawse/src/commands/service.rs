@@ -108,6 +108,7 @@ fn install_unit(
     exe: &Path,
     user: Option<&str>,
 ) -> miette::Result<()> {
+    only_root_writes(exe)?;
     let key = unit_key(role, located, configured, user)?;
     let key_dir = key.parent().unwrap_or(Path::new("/"));
     let mut seen = vec![exe, located.file.as_path()];
@@ -365,6 +366,31 @@ fn closed_to_others(file: &Path) -> std::io::Result<Option<(PathBuf, &'static st
     Ok(None)
 }
 
+/// Refuses `exe`, a resolved path, when an account other than root could replace it: when it or a
+/// directory above it is not root's, or is writable by its group or by others. Root runs it to
+/// install a unit and to upgrade, and a POSTINIT script runs it as root at every boot.
+pub(crate) fn only_root_writes(exe: &Path) -> miette::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    for path in exe.ancestors() {
+        let meta = std::fs::metadata(path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("cannot read {}", path.display()))?;
+        let why = if meta.uid() != 0 {
+            "is not root's"
+        } else if meta.mode() & 0o022 != 0 {
+            "is writable by its group or by others"
+        } else {
+            continue;
+        };
+        miette::bail!(
+            "{} {why}, so another account could replace {}, which root runs; move hawse to a directory only root can write, such as /usr/local/bin",
+            path.display(),
+            exe.display()
+        );
+    }
+    Ok(())
+}
+
 /// Whether a file install wrote is at `file`: false when nothing is there, and an error for a file
 /// install did not write, which it neither replaces nor removes.
 fn installed(file: &Path) -> miette::Result<bool> {
@@ -570,6 +596,28 @@ mod tests {
         mode(&dir, 0o750);
         assert_eq!(closed_to_others(&file).unwrap(), Some((dir.clone(), "o+x")));
         assert_eq!(closed_to_others(Path::new("/etc/hosts")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_binary_only_root_can_replace_is_accepted() {
+        // Root's from the file to `/` on macOS and on Linux, where it resolves to `/usr/bin/dash`.
+        let sh = std::fs::canonicalize("/bin/sh").unwrap();
+        only_root_writes(&sh).unwrap();
+    }
+
+    #[test]
+    fn a_binary_another_account_could_replace_is_refused() {
+        if paths::is_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let exe = std::fs::canonicalize(dir.path()).unwrap().join("hawse");
+        std::fs::write(&exe, "").unwrap();
+        let err = only_root_writes(&exe).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!("{} is not root's", exe.display())),
+            "{err}"
+        );
     }
 
     #[test]

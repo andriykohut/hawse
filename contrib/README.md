@@ -40,11 +40,13 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 `hawse service install` writes the unit for the binary that runs it and the
 config it is given, where `/usr/local/bin` or `/etc` is not a good home. On
 TrueNAS SCALE, for example, put both the binary and the config on a pool, and
-run the unit as the account that owns them, which keeps the key beside the
-config:
+run the unit as the account that owns the config, which keeps the key beside
+it. The binary goes in a directory only root can write, since root runs it to
+install and to upgrade, and both refuse one another account could replace:
 
 ```sh
-sudo /mnt/pool/apps/hawse/hawse service install client \
+sudo install -D -m755 hawse /mnt/pool/hawse-bin/hawse
+sudo /mnt/pool/hawse-bin/hawse service install client \
   --config /mnt/pool/apps/hawse/client.toml --user someone
 ```
 

@@ -85,10 +85,13 @@ first, and a change to an installed unit belongs in a drop-in made with
 
 `--user NAME` runs the unit as that account instead and keeps the key beside the
 config, for a config kept where the throwaway account cannot write, such as a
-pool on TrueNAS SCALE:
+pool on TrueNAS SCALE. The binary goes in a directory only root can write, since
+root runs it to install and to upgrade, and both refuse one another account
+could replace:
 
 ```sh
-sudo /mnt/pool/apps/hawse/hawse service install client \
+sudo install -D -m755 hawse /mnt/pool/hawse-bin/hawse
+sudo /mnt/pool/hawse-bin/hawse service install client \
   --config /mnt/pool/apps/hawse/client.toml --user someone
 ```
 
