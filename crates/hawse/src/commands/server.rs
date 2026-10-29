@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hawse_core::config::ServerConfig;
+use hawse_core::config::{ConfigError, ServerConfig};
 use hawse_core::identity::Identity;
 use hawse_core::server::policy::Policy;
 use hawse_core::server::{Event, Server};
@@ -161,6 +161,19 @@ pub async fn run(
     Ok(())
 }
 
+/// The policy a reload of `new` puts in force over `started`, the config the server started with.
+/// Only the clients and their `bind` change, so the grants are checked against the listen port and
+/// pool the server still runs with, not the ones `new` names.
+fn reloaded(started: &ServerConfig, new: &ServerConfig) -> Result<Policy, ConfigError> {
+    let in_force = ServerConfig {
+        clients: new.clients.clone(),
+        bind: new.bind,
+        ..started.clone()
+    };
+    in_force.validate()?;
+    Ok(Policy::from_config(&in_force))
+}
+
 /// Reads the config again each time it changes and puts its `[clients.*]` in force. `started` is
 /// what the server is running on, and stays what every reload is compared with.
 async fn reload(
@@ -192,7 +205,13 @@ async fn reload(
                 "a setting outside [clients.*] and `bind` changed, and takes effect at the next start"
             );
         }
-        policy.send_replace(Policy::from_config(&cfg));
+        match reloaded(started, &cfg) {
+            Ok(new) => policy.send_replace(new),
+            Err(err) => {
+                super::not_reloaded(&LoadError::Invalid(err).into());
+                continue;
+            }
+        };
         tracing::info!(clients = cfg.clients.len(), "config reloaded");
         if let Some(style) = terminal {
             terminal::print(&terminal::note("config reloaded", style));
@@ -202,7 +221,40 @@ async fn reload(
 
 #[cfg(test)]
 mod tests {
+    use hawse_core::config::ClientPolicy;
+    use hawse_proto::key::PublicKey;
+
     use super::*;
+
+    #[test]
+    fn a_reload_checks_its_grants_against_the_pool_the_server_runs_with() {
+        let started = ServerConfig {
+            dynamic_ports: "40000-41000".parse().unwrap(),
+            ..Default::default()
+        };
+        let granting = |port: &str| {
+            let mut new = ServerConfig {
+                dynamic_ports: "42000-43000".parse().unwrap(),
+                ..Default::default()
+            };
+            new.clients.insert(
+                "laptop".into(),
+                ClientPolicy {
+                    key: PublicKey::from_bytes([1; 32]),
+                    ports: vec![port.parse().unwrap()],
+                    bind: None,
+                    allow: vec![],
+                },
+            );
+            reloaded(&started, &new)
+        };
+        assert!(matches!(
+            granting("40500"),
+            Err(ConfigError::GrantInPool(..))
+        ));
+        let policy = granting("42500").unwrap();
+        assert!(policy.lookup(&PublicKey::from_bytes([1; 32])).is_some());
+    }
 
     fn limit(current: Option<u64>, maximum: Option<u64>) -> Rlimit {
         Rlimit { current, maximum }
