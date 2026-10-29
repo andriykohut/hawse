@@ -7,7 +7,9 @@
 
 use std::fs::{DirBuilder, Permissions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt as _, FileTypeExt as _, PermissionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _,
+};
 use std::os::unix::net::{UnixListener as StdListener, UnixStream as StdStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -152,6 +154,8 @@ impl Drop for Bound {
 enum BindError {
     /// The socket's directory is missing and cannot be made.
     NoDir(io::Error),
+    /// The socket's directory belongs to another account.
+    Foreign,
     /// A live process already answers on the path.
     Taken,
     Io(io::Error),
@@ -182,6 +186,13 @@ pub fn bind(role: Role) -> Option<Bound> {
             tracing::debug!(path = %path.display(), %err, "no directory for a status socket");
             None
         }
+        Err(BindError::Foreign) => {
+            tracing::warn!(
+                path = %path.display(),
+                "the status socket's directory belongs to another account, so this process has none"
+            );
+            None
+        }
         Err(BindError::Taken) => {
             tracing::warn!(
                 path = %path.display(),
@@ -197,7 +208,7 @@ pub fn bind(role: Role) -> Option<Bound> {
 }
 
 /// Binds `path` for its owner only, making its directory (also for the owner only) if missing and
-/// replacing a socket left by a process that is gone.
+/// replacing a socket left by a process that is gone. A directory another account owns is refused.
 fn bind_at(path: &Path) -> Result<Bound, BindError> {
     if let Some(dir) = path.parent() {
         DirBuilder::new()
@@ -205,6 +216,12 @@ fn bind_at(path: &Path) -> Result<Bound, BindError> {
             .mode(0o700)
             .create(dir)
             .map_err(BindError::NoDir)?;
+        // Its owner could swap the socket for a link between the bind and the chmod below, which
+        // follows it: root running by hand meets a directory a `--user` unit's account owns.
+        let owner = std::fs::metadata(dir).map_err(BindError::Io)?.uid();
+        if owner != rustix::process::geteuid().as_raw() {
+            return Err(BindError::Foreign);
+        }
     }
     // Only a refused connection proves the socket is stale: a bind over a live one would steal
     // its callers.
@@ -477,6 +494,18 @@ mod tests {
         assert!(matches!(
             bind_at(&file.join("client.sock")),
             Err(BindError::NoDir(_))
+        ));
+    }
+
+    #[test]
+    fn a_directory_another_account_owns_is_refused() {
+        // `/` is root's, and root owns it.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        assert!(matches!(
+            bind_at(Path::new("/hawse.sock")),
+            Err(BindError::Foreign)
         ));
     }
 

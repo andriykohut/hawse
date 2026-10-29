@@ -14,7 +14,7 @@ use hawse_proto::key::PublicKey;
 use hawse_proto::port::Port;
 use quinn::{Endpoint, VarInt};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, broadcast, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -35,9 +35,11 @@ const EVENTS: usize = 256;
 const DRAIN: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// How many TCP sockets may be mid-handshake at once. Nothing is authenticated until the TLS
-/// handshake finishes, and each one holds a descriptor for up to `idle_timeout`, so an unbounded
-/// accept lets a stranger reach EMFILE and take every public port's `accept` down with it. A real
+/// How many TCP connections may be on their way in at once, from the accept until the policy names
+/// the key their TLS handshake proved. TLS admits any key, so until then a connection can be a
+/// stranger's, and each one holds a descriptor for up to `idle_timeout` and then the wait for its
+/// Hello, so an unbounded accept lets a stranger reach EMFILE and take every public port's
+/// `accept` down with it. A real
 /// deployment has one connection per configured client and reconnects them one at a time, so this
 /// is several orders of magnitude of headroom; past it the sockets wait in the kernel's backlog,
 /// where they cost this process nothing.
@@ -120,6 +122,39 @@ impl Shared {
             .lock()
             .expect("limiter lock")
             .failed(ip, Instant::now());
+    }
+
+    /// `permits` for a TCP connection holding `slot`, which also sets one of the address's tokens
+    /// aside until the returned hold drops: otherwise each of an address's connections passes the
+    /// check, and their failures are counted only when they end, up to a handshake timeout later.
+    fn admit(self: &Arc<Self>, ip: IpAddr, slot: OwnedSemaphorePermit) -> Option<Unproven> {
+        let begun = self
+            .limiter
+            .lock()
+            .expect("limiter lock")
+            .begin(ip, Instant::now());
+        begun.then(|| Unproven {
+            _slot: slot,
+            shared: Arc::clone(self),
+            ip,
+        })
+    }
+}
+
+/// What a TCP connection holds until the policy names its key: one of the `TCP_HANDSHAKES` slots
+/// and one of its address's tokens.
+pub(crate) struct Unproven {
+    _slot: OwnedSemaphorePermit,
+    shared: Arc<Shared>,
+    ip: IpAddr,
+}
+
+impl Drop for Unproven {
+    fn drop(&mut self) {
+        // This runs during an unwind as well, where a second panic would abort the process.
+        if let Ok(mut limiter) = self.shared.limiter.lock() {
+            limiter.end(self.ip);
+        }
     }
 }
 
@@ -320,8 +355,8 @@ impl Server {
                             // A completed handshake proves `remote`: the peer received the
                             // server's handshake packets there.
                             Ok(conn) => {
-                                session::run(Arc::new(QuicTransport(conn)), remote, shared, cancel)
-                                    .await;
+                                let transport = Arc::new(QuicTransport(conn));
+                                session::run(transport, remote, shared, cancel, None).await;
                             }
                             Err(err) => {
                                 // An unvalidated source can be forged, and counting it would let a
@@ -371,21 +406,19 @@ impl Server {
                     };
                     // Dropped here, with its permit and before TLS: a limited address costs one
                     // accept.
-                    if !self.shared.permits(remote.ip()) {
+                    let Some(unproven) = self.shared.admit(remote.ip(), permit) else {
                         continue;
-                    }
+                    };
                     let shared = Arc::clone(&self.shared);
                     let cancel = cancel.child_token();
                     let tls = Arc::clone(&self.tls);
                     let tuning = self.tuning;
                     sessions.spawn(async move {
-                        let accepted = tcp::accept(socket, tls, tuning).await;
-                        // Released here rather than with the task: what is bounded is the
-                        // unauthenticated part, and a session that got this far is authenticated.
-                        drop(permit);
-                        match accepted {
+                        match tcp::accept(socket, tls, tuning).await {
                             Ok(transport) => {
-                                session::run(Arc::new(transport), remote, shared, cancel).await;
+                                let transport = Arc::new(transport);
+                                session::run(transport, remote, shared, cancel, Some(unproven))
+                                    .await;
                             }
                             Err(err) => {
                                 // The TCP handshake has already proved this address.

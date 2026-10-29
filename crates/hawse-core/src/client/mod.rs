@@ -10,7 +10,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen, reset};
+use hawse_proto::msg::{
+    ALPN, BindFailure, ClientMessage, ServerMessage, StreamOpen, printable, reset,
+};
 use hawse_proto::port::{Kind, Port, PortRequest};
 use quinn::Endpoint;
 use tokio::sync::{mpsc, watch};
@@ -583,7 +585,7 @@ impl Client {
             }
             ServerMessage::Ping { nonce } => Ok(Some(ClientMessage::Pong { nonce })),
             ServerMessage::Pong { .. } => Ok(None),
-            ServerMessage::Shutdown { reason } => Err(ClientError::Shutdown(reason)),
+            ServerMessage::Shutdown { reason } => Err(ClientError::Shutdown(printable(&reason))),
             ServerMessage::Welcome { .. } | ServerMessage::Denied { .. } => {
                 Err(ClientError::Protocol("a second greeting"))
             }
@@ -652,7 +654,9 @@ impl Client {
         )
         .await?;
         match control.next::<ServerMessage>().await {
-            Some(ServerMessage::Welcome { agent, client_name }) => Ok((agent, client_name)),
+            Some(ServerMessage::Welcome { agent, client_name }) => {
+                Ok((printable(&agent), printable(&client_name)))
+            }
             Some(ServerMessage::Denied { key, .. }) => {
                 emit(events, Event::Denied { key });
                 transport.close(CloseReason::Denied);

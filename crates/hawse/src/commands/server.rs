@@ -2,11 +2,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hawse_core::config::ServerConfig;
+use hawse_core::config::{ConfigError, ServerConfig};
 use hawse_core::identity::Identity;
 use hawse_core::server::policy::Policy;
 use hawse_core::server::{Event, Server};
 use miette::{IntoDiagnostic as _, WrapErr as _};
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -51,11 +52,36 @@ async fn show(mut events: broadcast::Receiver<Event>, mut names: usize, style: S
     }
 }
 
+/// The descriptor limit to set in place of `limit`: the hard limit as the soft one too, or `None`
+/// when the soft one is that high already. On macOS the soft limit stops at `OPEN_MAX`, the most
+/// it accepts.
+fn raised(limit: Rlimit) -> Option<Rlimit> {
+    const OPEN_MAX: u64 = 10240;
+    let ceiling = if cfg!(target_os = "macos") {
+        Some(limit.maximum.map_or(OPEN_MAX, |max| max.min(OPEN_MAX)))
+    } else {
+        limit.maximum
+    };
+    // `None` is unlimited.
+    let most = |value: Option<u64>| value.unwrap_or(u64::MAX);
+    (most(ceiling) > most(limit.current)).then_some(Rlimit {
+        current: ceiling,
+        maximum: limit.maximum,
+    })
+}
+
 pub async fn run(
     config: Option<PathBuf>,
     listen: Option<SocketAddr>,
     terminal: Option<Style>,
 ) -> miette::Result<()> {
+    // Each visitor and each connection on its way in holds a descriptor, and systemd starts a
+    // service at 1024, which a few hundred idle visitors fill for every client at once.
+    if let Some(limit) = raised(getrlimit(Resource::Nofile))
+        && let Err(err) = setrlimit(Resource::Nofile, limit)
+    {
+        tracing::warn!(%err, "cannot raise the descriptor limit");
+    }
     let located = paths::locate(Role::Server, config);
     let reloads = Reloads::new(located.file.clone());
     let (cfg, _) = load(&located.file, listen)?;
@@ -135,6 +161,19 @@ pub async fn run(
     Ok(())
 }
 
+/// The policy a reload of `new` puts in force over `started`, the config the server started with.
+/// Only the clients and their `bind` change, so the grants are checked against the listen port and
+/// pool the server still runs with, not the ones `new` names.
+fn reloaded(started: &ServerConfig, new: &ServerConfig) -> Result<Policy, ConfigError> {
+    let in_force = ServerConfig {
+        clients: new.clients.clone(),
+        bind: new.bind,
+        ..started.clone()
+    };
+    in_force.validate()?;
+    Ok(Policy::from_config(&in_force))
+}
+
 /// Reads the config again each time it changes and puts its `[clients.*]` in force. `started` is
 /// what the server is running on, and stays what every reload is compared with.
 async fn reload(
@@ -166,10 +205,82 @@ async fn reload(
                 "a setting outside [clients.*] and `bind` changed, and takes effect at the next start"
             );
         }
-        policy.send_replace(Policy::from_config(&cfg));
+        match reloaded(started, &cfg) {
+            Ok(new) => policy.send_replace(new),
+            Err(err) => {
+                super::not_reloaded(&LoadError::Invalid(err).into());
+                continue;
+            }
+        };
         tracing::info!(clients = cfg.clients.len(), "config reloaded");
         if let Some(style) = terminal {
             terminal::print(&terminal::note("config reloaded", style));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hawse_core::config::ClientPolicy;
+    use hawse_proto::key::PublicKey;
+
+    use super::*;
+
+    #[test]
+    fn a_reload_checks_its_grants_against_the_pool_the_server_runs_with() {
+        let started = ServerConfig {
+            dynamic_ports: "40000-41000".parse().unwrap(),
+            ..Default::default()
+        };
+        let granting = |port: &str| {
+            let mut new = ServerConfig {
+                dynamic_ports: "42000-43000".parse().unwrap(),
+                ..Default::default()
+            };
+            new.clients.insert(
+                "laptop".into(),
+                ClientPolicy {
+                    key: PublicKey::from_bytes([1; 32]),
+                    ports: vec![port.parse().unwrap()],
+                    bind: None,
+                    allow: vec![],
+                },
+            );
+            reloaded(&started, &new)
+        };
+        assert!(matches!(
+            granting("40500"),
+            Err(ConfigError::GrantInPool(..))
+        ));
+        let policy = granting("42500").unwrap();
+        assert!(policy.lookup(&PublicKey::from_bytes([1; 32])).is_some());
+    }
+
+    fn limit(current: Option<u64>, maximum: Option<u64>) -> Rlimit {
+        Rlimit { current, maximum }
+    }
+
+    #[test]
+    fn the_soft_descriptor_limit_rises_to_the_hard_one() {
+        let hard = Some(524_288);
+        let to = if cfg!(target_os = "macos") {
+            Some(10240)
+        } else {
+            hard
+        };
+        assert_eq!(raised(limit(Some(1024), hard)), Some(limit(to, hard)));
+        assert_eq!(raised(limit(Some(524_288), hard)), None);
+        assert_eq!(raised(limit(Some(1024), Some(1024))), None);
+        assert_eq!(raised(limit(None, None)), None);
+    }
+
+    #[test]
+    fn an_unlimited_hard_limit_lifts_the_soft_one_as_far_as_the_system_takes() {
+        let to = if cfg!(target_os = "macos") {
+            Some(10240)
+        } else {
+            None
+        };
+        assert_eq!(raised(limit(Some(256), None)), Some(limit(to, None)));
     }
 }

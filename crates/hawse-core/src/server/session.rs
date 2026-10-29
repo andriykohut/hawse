@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_proto::key::PublicKey;
-use hawse_proto::msg::{BindFailure, ClientMessage, DenyReason, ServerMessage, reset};
+use hawse_proto::msg::{self, BindFailure, ClientMessage, DenyReason, ServerMessage, reset};
 use hawse_proto::name;
 use hawse_proto::port::{Kind, Port};
 use ipnet::IpNet;
@@ -17,7 +17,7 @@ use tracing::Instrument as _;
 
 use super::policy::{Grant, Policy};
 use super::udp::{self, UdpService, UdpServices};
-use super::{AGENT, Event, Live, Shared, listener};
+use super::{AGENT, Event, Live, Shared, Unproven, listener};
 use crate::allow::AllowList;
 use crate::control::Control;
 use crate::error::chain;
@@ -39,12 +39,14 @@ const UNBIND_WAIT: Duration = Duration::from_secs(2);
 
 /// `remote` is the address the handshake proved, not the connection's current one: a QUIC path
 /// can migrate to a new, unproven source before it is validated, and a failure charged there would
-/// limit whoever that source names.
+/// limit whoever that source names. `unproven` is let go once the policy names the key, and held
+/// to the end by a stranger.
 pub async fn run(
     transport: Arc<dyn Transport>,
     remote: SocketAddr,
     shared: Arc<Shared>,
     cancel: CancellationToken,
+    unproven: Option<Unproven>,
 ) {
     let Some(key) = transport.peer_key() else {
         shared.auth_failed(remote.ip());
@@ -82,6 +84,7 @@ pub async fn run(
         transport.close(CloseReason::BadHello);
         return;
     };
+    let agent = msg::printable(&agent);
 
     // Subscribed before the grant is looked up, so the session hears of every reload after it.
     let mut policy = shared.policy.subscribe();
@@ -104,6 +107,7 @@ pub async fn run(
         transport.close(CloseReason::Denied);
         return;
     };
+    drop(unproven);
 
     let span = tracing::info_span!("session", client = %grant.name, %remote);
     async move {
@@ -1062,6 +1066,7 @@ mod tests {
             lost.remote_address(),
             Arc::new(Shared::for_tests()),
             CancellationToken::new(),
+            None,
         )
         .await;
         assert_eq!(lost.closed.get(), Some(&CloseReason::NoHello));

@@ -56,7 +56,9 @@ hawse client
 
 The `ssh` service binds port 2222 on the server and forwards to port 22 on the
 client. The `dev` service sets no `port`, so the server assigns one from its
-`dynamic_ports` range and the client logs which port it got.
+`dynamic_ports` range and the client logs which port it got. Any client may take
+a port from that range, so the server refuses a config that grants one inside
+it.
 
 When the server is unreachable or ends the session, the client reconnects on
 its own. It waits about a second after the first failure and doubles the wait

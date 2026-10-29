@@ -241,6 +241,10 @@ pub enum ConfigError {
     ListenInPool(u16),
     #[error("client `{0}` is granted the listen port {1}; a grant cannot name it")]
     ListenGranted(String, u16),
+    #[error(
+        "client `{0}` is granted {1}, inside dynamic_ports, where any client can take it first; move the pool or the grant"
+    )]
+    GrantInPool(String, PortRange),
     #[error("transport buffer must be between 1 KiB and 1 GiB, not {0} bytes")]
     Buffer(u64),
     #[error("transport stream_window must be at least 1 byte and under 4 GiB, not {0} bytes")]
@@ -327,6 +331,14 @@ impl ServerConfig {
                 .any(|r| r.first <= listen && listen <= r.last)
             {
                 return Err(ConfigError::ListenGranted(name.clone(), listen));
+            }
+            let pool = self.dynamic_ports;
+            if let Some(range) = policy
+                .ports
+                .iter()
+                .find(|r| r.first <= pool.last && pool.first <= r.last)
+            {
+                return Err(ConfigError::GrantInPool(name.clone(), *range));
             }
         }
         validate_transport(
@@ -611,6 +623,38 @@ prefer = "tcp"
             ..Default::default()
         };
         assert_eq!(cfg.validate(), Err(ConfigError::ListenInPool(40500)));
+    }
+
+    #[test]
+    fn a_grant_reaching_into_the_dynamic_pool_is_rejected() {
+        let grant = |ports: &str| {
+            let mut cfg = ServerConfig {
+                dynamic_ports: "40000-41000".parse().unwrap(),
+                ..Default::default()
+            };
+            cfg.clients.insert(
+                "laptop".into(),
+                ClientPolicy {
+                    key: sample_key(),
+                    ports: vec!["8080".parse().unwrap(), ports.parse().unwrap()],
+                    bind: None,
+                    allow: vec![],
+                },
+            );
+            cfg.validate()
+        };
+        for ports in ["39000-40000", "40500/udp", "41000-42000"] {
+            assert_eq!(
+                grant(ports),
+                Err(ConfigError::GrantInPool(
+                    "laptop".into(),
+                    ports.parse().unwrap()
+                )),
+                "{ports}"
+            );
+        }
+        assert_eq!(grant("39000-39999"), Ok(()));
+        assert_eq!(grant("41001/udp"), Ok(()));
     }
 
     #[test]
