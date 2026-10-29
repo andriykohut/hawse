@@ -56,12 +56,9 @@ jobs:
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-about@0.9.2
-      # cross's own dependencies do not build under the workflow's -D warnings. Dependabot does not
-      # follow a git install, so the commit is moved by hand.
+      # cross's own dependencies do not build under the workflow's -D warnings.
       - if: runner.os == 'Linux'
-        run: >-
-          cargo install cross --git https://github.com/cross-rs/cross
-          --rev 5f05d13dc37c0db79f4448642c68e108b977a9e1 --locked
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
         env:
           RUSTFLAGS: ""
       - if: runner.os == 'Linux'
