@@ -58,6 +58,11 @@ pub fn run(version: Option<&str>, check: bool) -> miette::Result<()> {
             exe.display()
         );
     }
+    // Staged beside the binary, where an account that can write the directory could swap the new
+    // one between its checksum and its first run.
+    if paths::is_root() {
+        service::only_root_writes(&exe)?;
+    }
     let found = services(&exe);
     let services: Vec<&Service> = found
         .iter()
