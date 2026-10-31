@@ -71,9 +71,10 @@ pub struct Limits {
     /// connection and one per UDP service. A visitor past it is reset. `streams_in_effect` is
     /// what the server goes by.
     ///
-    /// Costs 256 KiB of receive window per stream on the TCP fallback, where yamux guarantees
-    /// every stream that much and the connection window has to cover the whole guarantee: the
-    /// default 4096 reserves ~1 GiB per session against QUIC's 64 MiB for the same config.
+    /// Costs 512 KiB of receive window per stream on the TCP fallback, where yamux guarantees
+    /// every stream 256 KiB, its stream limit is twice this one, and the connection window has to
+    /// cover the whole guarantee: the default 4096 reserves ~2.06 GiB per session, counting
+    /// `connection_window`, against QUIC's 64 MiB for the same config.
     pub streams_per_client: u32,
     pub udp_sessions_per_service: u32,
 }
