@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::test]
-async fn a_stream_the_client_opens_is_reset_and_the_session_lives_on() {
+async fn the_client_cannot_open_a_stream_past_its_control_stream_and_the_session_lives_on() {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
     let server = start_server(
@@ -27,16 +27,8 @@ async fn a_stream_the_client_opens_is_reset_and_the_session_lives_on() {
     );
     let mut raw = raw_client(&server, &client_id).await;
 
-    let (mut send, mut recv) = raw.conn.open_bi().await.unwrap();
-    send.write_all(b"extra").await.unwrap();
-    let mut buf = [0u8; 8];
-    let read = tokio::time::timeout(Duration::from_secs(5), recv.read(&mut buf))
-        .await
-        .expect("an answer within 5 s");
-    assert!(
-        matches!(read, Err(quinn::ReadError::Reset(code)) if code == VarInt::from_u32(reset::UNEXPECTED_STREAM)),
-        "{read:?}"
-    );
+    let opened = tokio::time::timeout(Duration::from_millis(500), raw.conn.open_bi()).await;
+    assert!(opened.is_err(), "{opened:?}");
 
     assert!(matches!(
         raw.bind_udp("dns", None).await,

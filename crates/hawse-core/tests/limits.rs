@@ -2,6 +2,8 @@ mod common;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::{
@@ -13,11 +15,12 @@ use hawse_core::config::{Prefer, ServerConfig};
 use hawse_core::identity::Identity;
 use hawse_core::tls;
 use hawse_core::transport::TransportError;
-use hawse_core::transport::quic::{QuicError, Tuning};
+use hawse_core::transport::quic::{self, QuicError, Tuning};
 use hawse_core::transport::tcp::{self, TcpTransport};
 use hawse_proto::key::PublicKey;
+use quinn::Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 
 /// Listens on `[::]`, so one test reaches the server from two addresses: `127.0.0.1` and `::1`.
 fn dual_stack(known: PublicKey, per_minute: u32) -> ServerConfig {
@@ -220,6 +223,118 @@ async fn a_client_still_connects_with_quic_retry_on() {
     assert_eq!(&buf, b"hello");
 
     client.cancel.cancel();
+    server.cancel.cancel();
+}
+
+/// A UDP relay in front of a server: it passes on what reaches it, and the server's answers go back
+/// to the last sender when `answer` is set and nowhere otherwise, as for a forged source address.
+struct Relay {
+    addr: SocketAddr,
+    forwarded: Arc<AtomicUsize>,
+    retries: Arc<AtomicUsize>,
+}
+
+async fn relay(server: SocketAddr, answer: bool) -> Relay {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let retries = Arc::new(AtomicUsize::new(0));
+    let (forwarding, retrying) = (Arc::clone(&forwarded), Arc::clone(&retries));
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut peer = None;
+        loop {
+            let (n, from) = socket.recv_from(&mut buf).await.unwrap();
+            if from == server {
+                // A long header whose type bits are 0b11: header protection leaves them readable.
+                if buf[0] & 0xf0 == 0xf0 {
+                    retrying.fetch_add(1, Ordering::Relaxed);
+                }
+                if let (true, Some(peer)) = (answer, peer) {
+                    let _ = socket.send_to(&buf[..n], peer).await;
+                }
+            } else {
+                peer = Some(from);
+                forwarding.fetch_add(1, Ordering::Relaxed);
+                let _ = socket.send_to(&buf[..n], server).await;
+            }
+        }
+    });
+    Relay {
+        addr,
+        forwarded,
+        retries,
+    }
+}
+
+/// Completes a QUIC handshake with a key of its own through `via`, and counts the Retries it took.
+async fn handshake(server: &RunningServer) -> (Connection, usize) {
+    let via = relay(server.addr, true).await;
+    let (cert, key) = Identity::generate().unwrap().certificate().unwrap();
+    let endpoint = quic::dialer(
+        tls::client_config(cert, key, server.key, tls::provider()).unwrap(),
+        Tuning::CLIENT,
+        via.addr,
+    )
+    .unwrap();
+    let conn = tokio::time::timeout(Duration::from_secs(5), quic::connect(&endpoint, via.addr))
+        .await
+        .expect("a handshake within 5 s")
+        .unwrap();
+    (conn, via.retries.load(Ordering::Relaxed))
+}
+
+// More handshakes in flight than the server's QUIC_HANDSHAKES.
+const FLOOD: usize = 300;
+
+#[tokio::test]
+async fn past_the_quic_handshake_cap_an_unproven_address_is_retried() {
+    let server_id = Identity::generate().unwrap();
+    let server = start_server(&server_config(&[]), &server_id);
+
+    let hole = relay(server.addr, false).await;
+    let (cert, key) = Identity::generate().unwrap().certificate().unwrap();
+    let flood = quic::dialer(
+        tls::client_config(cert, key, server.key, tls::provider()).unwrap(),
+        Tuning::CLIENT,
+        hole.addr,
+    )
+    .unwrap();
+    let _pending: Vec<_> = (0..FLOOD)
+        .map(|_| {
+            let connecting = flood.connect(hole.addr, "hawse").unwrap();
+            tokio::spawn(connecting)
+        })
+        .collect();
+    // The server takes datagrams in the order they reach its socket, so once the flood's are
+    // there, the probe's Initial finds every slot taken.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hole.forwarded.load(Ordering::Relaxed) < FLOOD {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the flood sent within 5 s");
+
+    let (_conn, retries) = handshake(&server).await;
+    assert!(retries > 0);
+    server.cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_completed_quic_handshake_gives_back_its_slot() {
+    let server_id = Identity::generate().unwrap();
+    let mut cfg = server_config(&[]);
+    // Every stranger here is denied, and the limiter would refuse the address long before the end.
+    cfg.limits.auth_failures_per_minute = 0;
+    let server = start_server(&cfg, &server_id);
+
+    let mut held = Vec::new();
+    for _ in 0..FLOOD {
+        let (conn, retries) = handshake(&server).await;
+        assert_eq!(retries, 0);
+        held.push(conn);
+    }
     server.cancel.cancel();
 }
 
