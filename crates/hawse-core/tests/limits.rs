@@ -230,16 +230,14 @@ async fn a_client_still_connects_with_quic_retry_on() {
 /// to the last sender when `answer` is set and nowhere otherwise, as for a forged source address.
 struct Relay {
     addr: SocketAddr,
-    forwarded: Arc<AtomicUsize>,
     retries: Arc<AtomicUsize>,
 }
 
 async fn relay(server: SocketAddr, answer: bool) -> Relay {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = socket.local_addr().unwrap();
-    let forwarded = Arc::new(AtomicUsize::new(0));
     let retries = Arc::new(AtomicUsize::new(0));
-    let (forwarding, retrying) = (Arc::clone(&forwarded), Arc::clone(&retries));
+    let retrying = Arc::clone(&retries);
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65536];
         let mut peer = None;
@@ -255,16 +253,11 @@ async fn relay(server: SocketAddr, answer: bool) -> Relay {
                 }
             } else {
                 peer = Some(from);
-                forwarding.fetch_add(1, Ordering::Relaxed);
                 let _ = socket.send_to(&buf[..n], server).await;
             }
         }
     });
-    Relay {
-        addr,
-        forwarded,
-        retries,
-    }
+    Relay { addr, retries }
 }
 
 /// Completes a QUIC handshake with a key of its own through `via`, and counts the Retries it took.
@@ -284,9 +277,6 @@ async fn handshake(server: &RunningServer) -> (Connection, usize) {
     (conn, via.retries.load(Ordering::Relaxed))
 }
 
-// More handshakes in flight than the server's QUIC_HANDSHAKES.
-const FLOOD: usize = 300;
-
 #[tokio::test]
 async fn past_the_quic_handshake_cap_an_unproven_address_is_retried() {
     let server_id = Identity::generate().unwrap();
@@ -300,21 +290,18 @@ async fn past_the_quic_handshake_cap_an_unproven_address_is_retried() {
         hole.addr,
     )
     .unwrap();
-    let _pending: Vec<_> = (0..FLOOD)
-        .map(|_| {
-            let connecting = flood.connect(hole.addr, "hawse").unwrap();
-            tokio::spawn(connecting)
-        })
-        .collect();
-    // The server takes datagrams in the order they reach its socket, so once the flood's are
-    // there, the probe's Initial finds every slot taken.
+    // Until the server retries the flood itself: a count of what was sent would not say how many
+    // handshakes the server holds, as a datagram can be lost on the way in. The flood's hold their
+    // slots until `idle_timeout`, so the probe's Initial finds every one taken.
+    let mut pending = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while hole.forwarded.load(Ordering::Relaxed) < FLOOD {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        while hole.retries.load(Ordering::Relaxed) == 0 {
+            pending.push(tokio::spawn(flood.connect(hole.addr, "hawse").unwrap()));
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
-    .expect("the flood sent within 5 s");
+    .expect("the flood retried within 5 s");
 
     let (_conn, retries) = handshake(&server).await;
     assert!(retries > 0);
@@ -330,7 +317,8 @@ async fn a_completed_quic_handshake_gives_back_its_slot() {
     let server = start_server(&cfg, &server_id);
 
     let mut held = Vec::new();
-    for _ in 0..FLOOD {
+    // More than the server's QUIC_HANDSHAKES.
+    for _ in 0..300 {
         let (conn, retries) = handshake(&server).await;
         assert_eq!(retries, 0);
         held.push(conn);
