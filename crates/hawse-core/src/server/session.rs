@@ -217,8 +217,9 @@ impl Drop for Claim {
     }
 }
 
-/// Our client opens no stream after the control stream. One that arrives anyway is refused at once,
-/// so it neither waits unread nor holds a slot in the stream budget.
+/// Our client opens no stream after the control stream. Over QUIC the server allows it no other,
+/// and over the TCP fallback one that arrives anyway is refused at once, so it neither waits unread
+/// nor holds a slot in the stream budget.
 async fn refuse_streams(transport: Arc<dyn Transport>, cancel: CancellationToken) {
     let mut logged = false;
     loop {

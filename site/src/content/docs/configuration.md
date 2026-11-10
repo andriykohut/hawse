@@ -121,7 +121,10 @@ unlimited, and the log says so. `0` turns the limit off.
 `quic_retry = true` makes a QUIC client prove its address with one extra round
 trip before the server spends anything on a handshake. It also lets a failed
 QUIC handshake count against the limit above; without it only failures after
-the handshake do, since an unproven source address can be forged.
+the handshake do, since an unproven source address can be forged. Without it the
+server still asks for that proof once 256 QUIC handshakes are in flight, so a
+flood of Initials from forged addresses cannot pile up handshakes; while it
+lasts, a client connects one round trip later.
 
 Client settings: `server` and `server_key` are required, `key` defaults as
 above, and each `[expose.NAME]` table needs a `local` address.

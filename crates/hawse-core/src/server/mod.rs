@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use hawse_proto::key::PublicKey;
 use hawse_proto::port::Port;
-use quinn::{Endpoint, VarInt};
+use quinn::{Endpoint, Incoming, VarInt};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -44,6 +44,13 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// is several orders of magnitude of headroom; past it the sockets wait in the kernel's backlog,
 /// where they cost this process nothing.
 const TCP_HANDSHAKES: usize = 256;
+
+/// How many QUIC handshakes may be in flight before an address QUIC has not validated gets a
+/// Retry first, as `quic_retry` would give it. Such an address can be forged, so the limiter never
+/// charges it, and a handshake nobody answers keeps its connection's state until `idle_timeout`.
+/// Past the cap a forged address costs one Retry packet and no state, and a real client pays one
+/// round trip. A validated handshake goes ahead past the cap. The headroom is `TCP_HANDSHAKES`'s.
+const QUIC_HANDSHAKES: usize = 256;
 
 /// The only accept failure worth pausing for. `accept` also reports a connection the peer reset
 /// between the SYN and the accept — `ECONNABORTED`, `EPROTO` — and pausing on those would let a
@@ -246,10 +253,17 @@ impl Server {
         // Cloned rather than minted twice, so both listeners present the same certificate and not
         // just the same key.
         let (cert, key) = identity.certificate()?;
+        // A client opens the control stream and nothing more. quinn sets aside a slot for every
+        // stream a peer may open as soon as its Initial arrives, so allowing more would cost every
+        // handshake memory in proportion, a forged source's included. The TCP fallback keeps
+        // `tuning`: yamux has one stream limit for both directions, and the server opens many.
         let endpoint = quic::listen(
             cfg.listen,
             tls::server_config(cert.clone(), key.clone_key(), tls::provider())?,
-            tuning,
+            Tuning {
+                max_streams: 1,
+                ..tuning
+            },
         )?;
         // Both listeners must answer on one address, and only the bound endpoint knows which:
         // `listen` may have fallen back to IPv4, and a port of 0 is decided by the kernel.
@@ -324,6 +338,7 @@ impl Server {
         let sessions = TaskTracker::new();
         let tcp = self.tcp.as_ref();
         let handshakes = Arc::new(Semaphore::new(TCP_HANDSHAKES));
+        let quic_handshakes = Arc::new(Semaphore::new(QUIC_HANDSHAKES));
         // An instant, not a duration: the arm holding it is rebuilt every time another arm wins,
         // and a relative sleep would restart from zero each time and never elapse.
         let mut resume_tcp: Option<tokio::time::Instant> = None;
@@ -333,41 +348,7 @@ impl Server {
                 () = cancel.cancelled() => break,
                 incoming = self.endpoint.accept() => {
                     let Some(incoming) = incoming else { break };
-                    let remote = incoming.remote_address();
-                    if !self.shared.permits(remote.ip()) {
-                        incoming.refuse();
-                        continue;
-                    }
-                    let validated = incoming.remote_address_validated();
-                    if self.quic_retry && !validated {
-                        // Defensive: quinn refuses a retry only for an Initial that already
-                        // carried a retry token, and such an address counts as validated, so this
-                        // branch cannot normally run.
-                        if let Err(err) = incoming.retry() {
-                            err.into_incoming().ignore();
-                        }
-                        continue;
-                    }
-                    let shared = Arc::clone(&self.shared);
-                    let cancel = cancel.child_token();
-                    sessions.spawn(async move {
-                        match incoming.await {
-                            // A completed handshake proves `remote`: the peer received the
-                            // server's handshake packets there.
-                            Ok(conn) => {
-                                let transport = Arc::new(QuicTransport(conn));
-                                session::run(transport, remote, shared, cancel, None).await;
-                            }
-                            Err(err) => {
-                                // An unvalidated source can be forged, and counting it would let a
-                                // stranger limit the address it names.
-                                if validated {
-                                    shared.auth_failed(remote.ip());
-                                }
-                                tracing::debug!(err = %chain(&err), "handshake failed");
-                            }
-                        }
-                    });
+                    self.accept_quic(incoming, &quic_handshakes, &sessions, &cancel);
                 }
                 // The pause waits inside this arm rather than in its body, so a descriptor
                 // shortage on the TCP side cannot stall QUIC, which needs no descriptor of its own.
@@ -440,6 +421,55 @@ impl Server {
             shutdown.as_str().as_bytes(),
         );
         self.endpoint.wait_idle().await;
+    }
+
+    /// Starts `incoming`'s handshake and the session after it on `sessions`, unless its address is
+    /// limited, which refuses it, or it is unvalidated and `quic_retry` is set or every one of
+    /// `slots` is taken, which sends it a Retry.
+    fn accept_quic(
+        &self,
+        incoming: Incoming,
+        slots: &Arc<Semaphore>,
+        sessions: &TaskTracker,
+        cancel: &CancellationToken,
+    ) {
+        let remote = incoming.remote_address();
+        if !self.shared.permits(remote.ip()) {
+            incoming.refuse();
+            return;
+        }
+        let validated = incoming.remote_address_validated();
+        let slot = Arc::clone(slots).try_acquire_owned().ok();
+        if !validated && (self.quic_retry || slot.is_none()) {
+            // Defensive: quinn refuses a retry only for an Initial that already carried a retry
+            // token, and such an address counts as validated, so this branch cannot normally run.
+            if let Err(err) = incoming.retry() {
+                err.into_incoming().ignore();
+            }
+            return;
+        }
+        let shared = Arc::clone(&self.shared);
+        let cancel = cancel.child_token();
+        sessions.spawn(async move {
+            let handshake = incoming.await;
+            drop(slot);
+            match handshake {
+                // A completed handshake proves `remote`: the peer received the server's handshake
+                // packets there.
+                Ok(conn) => {
+                    let transport = Arc::new(QuicTransport(conn));
+                    session::run(transport, remote, shared, cancel, None).await;
+                }
+                Err(err) => {
+                    // An unvalidated source can be forged, and counting it would let a stranger
+                    // limit the address it names.
+                    if validated {
+                        shared.auth_failed(remote.ip());
+                    }
+                    tracing::debug!(err = %chain(&err), "handshake failed");
+                }
+            }
+        });
     }
 }
 
