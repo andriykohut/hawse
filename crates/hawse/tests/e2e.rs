@@ -177,6 +177,7 @@ fn echo_round_trip_through_real_binaries() {
 /// The reply to a status request on the socket at `path`, or `None` while nothing answers there.
 fn ask_status(path: &Path) -> Option<serde_json::Value> {
     let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     stream.write_all(b"{\"request\":\"status\"}\n").ok()?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).ok()?;

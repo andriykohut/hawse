@@ -31,6 +31,7 @@ pub struct Keeper {
 }
 
 struct Session {
+    remote: SocketAddr,
     transport: TransportKind,
     agent: String,
     since: Instant,
@@ -51,13 +52,14 @@ impl Keeper {
         match event {
             Event::Connected {
                 client,
+                remote,
                 transport,
                 agent,
-                ..
             } => {
                 self.sessions.insert(
                     client.clone(),
                     Session {
+                        remote: *remote,
                         transport: *transport,
                         agent: agent.clone(),
                         since: now,
@@ -105,7 +107,8 @@ impl Keeper {
 
     /// The reply for a server that has run for `up`: one entry per grant in `policy`, by name,
     /// connected exactly when its key is among the `live` sessions. A live session this keeper
-    /// did not see connect has the live remote and no details.
+    /// did not see connect, which its record's address tells apart from the session before it,
+    /// has the live remote and no details.
     pub fn snapshot(
         &self,
         policy: &Policy,
@@ -121,7 +124,8 @@ impl Keeper {
                 let name = &grant.name;
                 let presence = match live.iter().find(|(live_key, _)| live_key == key) {
                     Some((_, remote)) => {
-                        let session = self.sessions.get(name);
+                        // Each connect dials from a fresh socket, so a new session has a new address.
+                        let session = self.sessions.get(name).filter(|s| s.remote == *remote);
                         Presence::Connected {
                             remote: remote.to_string(),
                             transport: session.map(|s| s.transport.to_string()),
@@ -178,10 +182,10 @@ pub async fn keep(mut events: broadcast::Receiver<Event>, keeper: watch::Sender<
     loop {
         match events.recv().await {
             Ok(event) => keeper.send_modify(|keeper| keeper.apply(&event, Instant::now())),
-            // shortcut: a lag loses a knock, and one that drops a reconnect's Connected leaves the
-            // previous session's transport, agent, up time and services showing as current; only
-            // who is connected comes from live sessions and stays right. Rebuild from the core if
-            // those details go stale in practice.
+            // shortcut: a lag loses a knock, a time last seen, or a service's bind or unbind. One
+            // that drops a reconnect's Connected only hides the session's details, as `snapshot`
+            // tells the previous session's record apart by its address. Rebuild from the core if
+            // what a lag loses matters in practice.
             Err(RecvError::Lagged(_)) => {}
             Err(RecvError::Closed) => return,
         }
@@ -376,6 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn a_session_whose_connect_was_missed_shows_nothing_of_the_one_before() {
+        let t0 = Instant::now();
+        let mut keeper = Keeper::default();
+        keeper.apply(&connected("nas", "203.0.113.7:1111"), t0);
+        keeper.apply(&bound("nas", "jellyfin", "8096"), t0);
+        // The reconnect from :2222 was lost to a lag.
+        let live = [(NAS, addr("203.0.113.7:2222"))];
+        let got = snapshot(&keeper, &both(), &live, t0);
+        assert_eq!(
+            got.clients[1].presence,
+            Presence::Connected {
+                remote: "203.0.113.7:2222".into(),
+                transport: None,
+                agent: None,
+                up_s: None,
+                services: vec![],
+            }
+        );
+    }
+
+    #[test]
     fn unknown_keys_keep_the_16_latest_newest_first() {
         let t0 = Instant::now();
         let mut keeper = Keeper::default();
@@ -428,5 +453,20 @@ mod tests {
         drop(tx);
         task.await.unwrap();
         assert_eq!(kept.borrow().knocks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn keep_goes_on_after_a_lag() {
+        let (tx, events) = broadcast::channel(1);
+        tx.send(denied(1)).unwrap();
+        // Overwrites the first before `keep` reads it.
+        tx.send(denied(2)).unwrap();
+        let (keeper, kept) = watch::channel(Keeper::default());
+        let task = tokio::spawn(keep(events, keeper));
+        drop(tx);
+        task.await.unwrap();
+        let knocks = &kept.borrow().knocks;
+        assert_eq!(knocks.len(), 1);
+        assert_eq!(knocks[0].key, PublicKey::from_bytes([2; 32]));
     }
 }
