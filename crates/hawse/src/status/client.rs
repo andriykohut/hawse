@@ -181,6 +181,9 @@ pub async fn keep(
             }
             event = events.recv() => {
                 let Some(event) = event else { break };
+                // shortcut: an answer still queued when a reload changes its service is recorded
+                // against the new settings and shows until the new answer replaces it, as in the
+                // panel; events that carry the bind they answer would end it.
                 model.send_modify(|model| {
                     model.apply(&event, &showing.borrow().cfg, Instant::now());
                 });

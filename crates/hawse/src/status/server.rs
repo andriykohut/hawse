@@ -124,7 +124,8 @@ impl Keeper {
                 let name = &grant.name;
                 let presence = match live.iter().find(|(live_key, _)| live_key == key) {
                     Some((_, remote)) => {
-                        // Each connect dials from a fresh socket, so a new session has a new address.
+                        // Each connect dials from a fresh socket, so a new session has a new address
+                        // unless the system happens to give it the last one's port again.
                         let session = self.sessions.get(name).filter(|s| s.remote == *remote);
                         Presence::Connected {
                             remote: remote.to_string(),
