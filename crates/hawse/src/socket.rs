@@ -18,6 +18,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::task::JoinSet;
 use tokio::time::{Instant, timeout_at};
 
 use crate::paths::{Role, is_root};
@@ -251,9 +252,9 @@ fn bind_at(path: &Path) -> Result<Bound, BindError> {
 }
 
 impl Bound {
-    /// Answers requests until the future is dropped, which also removes the socket file. Each
-    /// connection runs in its own task, so a slow caller holds up no other. `status` runs once
-    /// per `status` request.
+    /// Answers requests until the future is dropped, which also removes the socket file and ends
+    /// every request still in progress. Each connection runs in its own task, so a slow caller
+    /// holds up no other. `status` runs once per `status` request.
     pub async fn serve<S: Serialize>(self, status: impl Fn() -> S + Send + Sync + 'static) {
         let listener = match self.listener.try_clone().and_then(UnixListener::from_std) {
             Ok(listener) => listener,
@@ -263,11 +264,15 @@ impl Bound {
             }
         };
         let status = Arc::new(status);
+        // Aborted when dropped: a request left running would keep what `status` holds alive for
+        // up to REQUEST_WAIT after the socket stops.
+        let mut requests = JoinSet::new();
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    while requests.try_join_next().is_some() {}
                     let status = Arc::clone(&status);
-                    tokio::spawn(async move { answer(stream, &*status).await });
+                    requests.spawn(async move { answer(stream, &*status).await });
                 }
                 Err(err) => {
                     // EMFILE and ENFILE fail again at once; waiting keeps this from spinning.
@@ -324,8 +329,11 @@ fn refusal(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
+
     use super::*;
     use serde_json::json;
+    use tokio::time::timeout;
 
     fn none() -> Env {
         Env {
@@ -580,15 +588,58 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_caller_that_sends_nothing_is_dropped_after_5_s() {
+    async fn a_caller_that_sends_nothing_is_dropped_at_5_s() {
         let (_dir, path) = serving();
-        let mut silent = UnixStream::connect(&path).await.unwrap();
+        let silent = StdStream::connect(&path).unwrap();
+        silent.set_nonblocking(true).unwrap();
+        // Answered after the silent caller was taken in, so its 5 s have started.
         let (reply, _) = ask(&path, b"{\"request\":\"status\"}\n").await;
         assert_eq!(reply, "{\"role\":\"client\"}\n");
-        tokio::time::sleep(REQUEST_WAIT).await;
+        tokio::time::sleep(REQUEST_WAIT.saturating_sub(Duration::from_millis(1))).await;
+        let open = (&silent).read(&mut [0; 1]).unwrap_err();
+        assert_eq!(open.kind(), io::ErrorKind::WouldBlock);
+        let mut silent = UnixStream::from_std(silent).unwrap();
         let mut rest = Vec::new();
-        silent.read_to_end(&mut rest).await.unwrap();
+        timeout(Duration::from_millis(2), silent.read_to_end(&mut rest))
+            .await
+            .expect("still open past 5 s")
+            .unwrap();
         assert_eq!(rest, b"");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_caller_that_stays_open_after_an_over_long_request_is_read_until_the_deadline() {
+        let (_dir, path) = serving();
+        let mut caller = UnixStream::connect(&path).await.unwrap();
+        caller.write_all(&[b'a'; 5000]).await.unwrap();
+        let mut reply = String::new();
+        BufReader::new(&mut caller)
+            .read_line(&mut reply)
+            .await
+            .unwrap();
+        assert!(serde_json::from_str::<Refusal>(&reply).is_ok(), "{reply}");
+        tokio::time::sleep(REQUEST_WAIT.saturating_sub(Duration::from_millis(1))).await;
+        caller.write_all(b"more").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let gone = caller.write_all(b"more").await.unwrap_err();
+        assert_eq!(gone.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_the_socket_ends_the_requests_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client.sock");
+        let (held, mut released) = tokio::sync::mpsc::channel::<()>(1);
+        let serving = tokio::spawn(bind_at(&path).unwrap().serve(move || {
+            let _held = &held;
+            json!({"role": "client"})
+        }));
+        let _silent = UnixStream::connect(&path).await.unwrap();
+        // Answered after the silent caller was taken in, whose request now holds `status`.
+        ask(&path, b"{\"request\":\"status\"}\n").await;
+        serving.abort();
+        let held = timeout(Duration::from_secs(1), released.recv()).await;
+        assert!(held.expect("a request still holds status").is_none());
     }
 
     #[tokio::test(start_paused = true)]

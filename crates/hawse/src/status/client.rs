@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hawse_core::client::Event;
-use hawse_core::config::ClientConfig;
+use hawse_core::config::{ClientConfig, Expose};
 use hawse_core::traffic::Counts;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -24,12 +24,20 @@ pub struct Model {
     agent: String,
     /// Why the last session ended, as the log says it.
     cause: String,
-    answers: BTreeMap<String, Answer>,
+    /// The server's answer to each service's bind, with the settings it was asked for.
+    answers: BTreeMap<String, (Expose, Answer)>,
 }
 
 impl Model {
-    /// Takes in `event`, moving the link as the panel's does.
-    pub fn apply(&mut self, event: &Event, now: Instant) {
+    /// Takes in `event`, moving the link as the panel's does. `cfg` is the config in force, whose
+    /// settings a bind's answer is recorded against.
+    pub fn apply(&mut self, event: &Event, cfg: &ClientConfig, now: Instant) {
+        let mut answer = |service: &String, answer| {
+            if let Some(expose) = cfg.expose.get(service) {
+                self.answers
+                    .insert(service.clone(), (expose.clone(), answer));
+            }
+        };
         match event {
             Event::Connected {
                 transport,
@@ -53,12 +61,11 @@ impl Model {
             }
             Event::Bound { service, port } => {
                 let port = port.to_string();
-                self.answers.insert(service.clone(), Answer::Bound { port });
+                answer(service, Answer::Bound { port });
             }
             Event::BindFailed { service, reason } => {
                 let reason = reason.to_string();
-                self.answers
-                    .insert(service.clone(), Answer::Refused { reason });
+                answer(service, Answer::Refused { reason });
             }
             Event::Denied { .. } => {}
             Event::Disconnected { cause, retry_in } => {
@@ -83,7 +90,8 @@ impl Model {
     }
 
     /// The reply for a client that has run for `up`. Services come in `cfg`'s order, each with
-    /// its figures from `totals` (zero when absent) and its answer, `Pending` when it has none.
+    /// its figures from `totals` (zero when absent) and its answer, `Pending` when it has none or
+    /// a reload has since changed the settings it was for.
     /// A client that has stopped for good reads as `Down` with no retry; it has no start time
     /// for the outage, so `down_s` is 0.
     pub fn snapshot(
@@ -125,7 +133,11 @@ impl Model {
                     name: name.clone(),
                     local: expose.local.clone(),
                     port: expose.port.to_string(),
-                    answer: self.answers.get(name).cloned().unwrap_or(Answer::Pending),
+                    answer: self
+                        .answers
+                        .get(name)
+                        .filter(|(given, _)| given == expose)
+                        .map_or(Answer::Pending, |(_, answer)| answer.clone()),
                     open: counts.open,
                     visitors: counts.visitors,
                     down: counts.down,
@@ -169,7 +181,12 @@ pub async fn keep(
             }
             event = events.recv() => {
                 let Some(event) = event else { break };
-                model.send_modify(|model| model.apply(&event, Instant::now()));
+                // shortcut: an answer still queued when a reload changes its service is recorded
+                // against the new settings and shows until the new answer replaces it, as in the
+                // panel; events that carry the bind they answer would end it.
+                model.send_modify(|model| {
+                    model.apply(&event, &showing.borrow().cfg, Instant::now());
+                });
                 // A printer that has gone leaves the model still worth keeping.
                 let _ = forward.send(event).await;
             }
@@ -237,13 +254,14 @@ mod tests {
     fn a_connected_client_reports_its_link_and_each_services_answer() {
         let t0 = Instant::now();
         let mut model = Model::default();
-        model.apply(&connected(), t0);
-        model.apply(&bound("jellyfin", 8096), t0);
+        model.apply(&connected(), &cfg(), t0);
+        model.apply(&bound("jellyfin", 8096), &cfg(), t0);
         model.apply(
             &Event::BindFailed {
                 service: "ssh".to_owned(),
                 reason: BindFailure::NotGranted,
             },
+            &cfg(),
             t0,
         );
         let totals = BTreeMap::from([(
@@ -321,11 +339,12 @@ mod tests {
     fn a_ping_updates_the_round_trip() {
         let t0 = Instant::now();
         let mut model = Model::default();
-        model.apply(&connected(), t0);
+        model.apply(&connected(), &cfg(), t0);
         model.apply(
             &Event::RoundTrip {
                 round_trip: Duration::from_millis(52),
             },
+            &cfg(),
             t0,
         );
         let LinkStatus::Up { round_trip_ms, .. } = snapshot(&model, t0).link else {
@@ -342,8 +361,8 @@ mod tests {
             cause: DisconnectCause::Unresponsive,
             retry_in: Some(secs(8)),
         };
-        model.apply(&lost, t0);
-        model.apply(&lost, t0 + secs(60));
+        model.apply(&lost, &cfg(), t0);
+        model.apply(&lost, &cfg(), t0 + secs(60));
         assert_eq!(
             snapshot(&model, t0 + secs(62)).link,
             LinkStatus::Down {
@@ -358,11 +377,30 @@ mod tests {
     fn a_reconnect_starts_the_answers_again() {
         let t0 = Instant::now();
         let mut model = Model::default();
-        model.apply(&connected(), t0);
-        model.apply(&bound("jellyfin", 8096), t0);
-        model.apply(&connected(), t0);
+        model.apply(&connected(), &cfg(), t0);
+        model.apply(&bound("jellyfin", 8096), &cfg(), t0);
+        model.apply(&connected(), &cfg(), t0);
         let status = snapshot(&model, t0);
         assert!(status.services.iter().all(|s| s.answer == Answer::Pending));
+    }
+
+    #[test]
+    fn a_reload_that_changes_a_service_waits_for_its_new_answer() {
+        let t0 = Instant::now();
+        let mut model = Model::default();
+        model.apply(&connected(), &cfg(), t0);
+        model.apply(&bound("jellyfin", 8096), &cfg(), t0);
+        model.apply(&bound("ssh", 2222), &cfg(), t0);
+        let mut reloaded = cfg();
+        reloaded.expose.get_mut("jellyfin").unwrap().local = "127.0.0.1:8097".to_owned();
+        let status = model.snapshot(&reloaded, &BTreeMap::new(), Duration::ZERO, t0);
+        assert_eq!(status.services[0].answer, Answer::Pending);
+        assert_eq!(
+            status.services[1].answer,
+            Answer::Bound {
+                port: "2222".into()
+            }
+        );
     }
 
     #[tokio::test]
@@ -399,7 +437,7 @@ mod tests {
     fn a_status_survives_a_round_trip_through_json() {
         let t0 = Instant::now();
         let mut model = Model::default();
-        model.apply(&connected(), t0);
+        model.apply(&connected(), &cfg(), t0);
         let status = Status::Client(snapshot(&model, t0));
         let text = serde_json::to_string(&status).unwrap();
         assert_eq!(serde_json::from_str::<Status>(&text).unwrap(), status);

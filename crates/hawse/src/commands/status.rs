@@ -213,15 +213,19 @@ fn draw(
 }
 
 /// What to say when no process answered: that none did, which is not that none runs, and the
-/// likeliest reason.
+/// likeliest reason where there is one.
 fn nothing_answered(denied: bool) -> String {
-    let why = if denied {
-        "run it as root, or as the user the service runs as"
+    let none = "no hawse server or client answered here";
+    if denied {
+        format!("{none}\nrun it as root, or as the user the service runs as")
+    } else if cfg!(target_os = "linux") {
+        format!(
+            "{none}\none started from a unit hawse 0.10.0 wrote has no socket until `sudo hawse \
+             service install` is run again, with the --config and --user it was installed with"
+        )
     } else {
-        "one started from a unit hawse 0.10.0 wrote has no socket until `sudo hawse service \
-         install` is run again, with the --config and --user it was installed with"
-    };
-    format!("no hawse server or client answered here\n{why}")
+        none.to_owned()
+    }
 }
 
 /// What to say on stderr when `role`'s socket refused permission while the other role answered.
@@ -285,8 +289,47 @@ mod tests {
     #[test]
     fn nothing_answered_says_what_to_do() {
         assert!(nothing_answered(true).contains("run it as root"));
-        assert!(nothing_answered(false).contains("hawse service install"));
-        assert!(nothing_answered(false).contains("--config and --user"));
+        let hint = nothing_answered(false);
+        // A LaunchAgent written by 0.10.0 needs no rewrite to answer.
+        assert_eq!(
+            hint.contains("hawse service install") && hint.contains("--config and --user"),
+            cfg!(target_os = "linux"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_is_not_a_status_says_to_restart_after_an_upgrade() {
+        let style = Style {
+            color: false,
+            unicode: true,
+            accent: None,
+            links: false,
+        };
+        let restart = format!(
+            "restart the client after an upgrade, so that it runs hawse {VERSION} as this does"
+        );
+        let refused = draw(
+            Role::Client,
+            r#"{"error":"hawse 0.11.0: cannot read this request"}"#,
+            None,
+            style,
+            0,
+        );
+        assert_eq!(
+            refused,
+            format!(
+                "the client cannot answer this hawse: hawse 0.11.0: cannot read this request\n{restart}"
+            )
+        );
+        let unread = draw(Role::Client, r#"{"role":"client"}"#, None, style, 0);
+        assert!(
+            unread.starts_with(
+                "the client cannot answer this hawse: its reply does not read as a status: "
+            ),
+            "{unread}"
+        );
+        assert!(unread.ends_with(&restart), "{unread}");
     }
 
     #[test]
