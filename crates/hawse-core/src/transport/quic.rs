@@ -7,7 +7,8 @@ use futures_util::future::BoxFuture;
 use hawse_proto::key::PublicKey;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
-    ClientConfig, Connection, Endpoint, IdleTimeout, ServerConfig, TransportConfig, VarInt,
+    ClientConfig, Connection, Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime,
+    TransportConfig, VarInt,
 };
 use rustls::pki_types::CertificateDer;
 
@@ -95,15 +96,51 @@ pub fn listen(
     let crypto = QuicServerConfig::try_from(tls)?;
     let mut cfg = ServerConfig::with_crypto(Arc::new(crypto));
     cfg.transport_config(Arc::new(transport_config(tuning)?));
-    match Endpoint::server(cfg.clone(), addr) {
+    let server = |addr: SocketAddr| -> std::io::Result<Endpoint> {
+        let socket = bind(addr)?;
+        Endpoint::new(
+            EndpointConfig::default(),
+            Some(cfg.clone()),
+            socket,
+            Arc::new(TokioRuntime),
+        )
+    };
+    match server(addr) {
         Ok(endpoint) => Ok(endpoint),
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Err(QuicError::Bind(err)),
         Err(err) if addr.is_ipv6() && addr.ip().is_unspecified() => {
             let v4 = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), addr.port());
-            Endpoint::server(cfg, v4).map_err(|_| QuicError::Bind(err))
+            server(v4).map_err(|_| QuicError::Bind(err))
         }
         Err(err) => Err(QuicError::Bind(err)),
     }
+}
+
+/// What the server asks the kernel to buffer for its QUIC socket. The usual Linux default,
+/// 208 KiB, overflows under a client's bursts and the kernel drops the rest (#46). Linux grants at
+/// most `net.core.rmem_max`.
+const RECEIVE_BUFFER: usize = 7 * 1024 * 1024;
+
+/// Binds a UDP socket at `addr` that asks for [`RECEIVE_BUFFER`]. A buffer the kernel caps or
+/// refuses is logged and the socket kept, since a smaller buffer costs drops and nothing else.
+fn bind(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = std::net::UdpSocket::bind(addr)?;
+    let sized = socket2::SockRef::from(&socket);
+    // Linux reports twice what it was asked for, so a grant up to the limit still reads as at
+    // least `RECEIVE_BUFFER`.
+    match sized
+        .set_recv_buffer_size(RECEIVE_BUFFER)
+        .and_then(|()| sized.recv_buffer_size())
+    {
+        Ok(granted) if granted < RECEIVE_BUFFER => tracing::warn!(
+            granted,
+            wanted = RECEIVE_BUFFER,
+            "the QUIC socket's receive buffer is capped; raise net.core.rmem_max"
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(%err, "cannot size the QUIC socket's receive buffer"),
+    }
+    Ok(socket)
 }
 
 pub fn dialer(
@@ -281,6 +318,19 @@ mod tests {
         let err = connect(&client, addr).await.unwrap_err();
         assert_matches!(err, QuicError::Connection(_));
         assert!(accept.await.unwrap());
+    }
+
+    #[test]
+    fn the_server_socket_buffers_more_than_the_default() {
+        let size = |s: &std::net::UdpSocket| socket2::SockRef::from(s).recv_buffer_size().unwrap();
+        let plain = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sized = bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        assert!(
+            size(&sized) > size(&plain),
+            "{} vs {}",
+            size(&sized),
+            size(&plain)
+        );
     }
 
     #[tokio::test]

@@ -208,3 +208,11 @@ are accepted, validated and then ignored.
 
 `--threads` sets the number of worker threads and defaults to the number of
 CPUs.
+
+The server asks for a 7 MiB receive buffer on its QUIC socket. Linux grants
+at most `net.core.rmem_max`, 208 KiB on most distributions, and the server
+logs a warning when the buffer is capped: at that size a client's bursts
+overflow it and the kernel drops what does not fit
+([Measurements](/hawse/measurements/)). `sysctl -w net.core.rmem_max=7500000`
+raises the limit, and the same line in a file under `/etc/sysctl.d/` keeps it
+across reboots.
