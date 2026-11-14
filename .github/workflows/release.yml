@@ -11,7 +11,7 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  CARGO_BUILD_WARNINGS: deny
 jobs:
   version:
     runs-on: ubuntu-26.04
@@ -56,11 +56,8 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-about@0.9.2
-      # cross's own dependencies do not build under the workflow's -D warnings.
       - if: runner.os == 'Linux'
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
-        env:
-          RUSTFLAGS: ""
       - if: runner.os == 'Linux'
         run: cross build --release --target "$TARGET" -p hawse ${{ matrix.features }}
       - if: runner.os == 'macOS'
