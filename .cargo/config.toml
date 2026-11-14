@@ -1,0 +1,4 @@
+# insta otherwise runs `cargo metadata` from the first snapshot test to find the workspace, and a
+# process spawned mid-run can hold another test's socket open (see `spawning` in main.rs).
+[env]
+INSTA_WORKSPACE_ROOT = { value = "", relative = true }

@@ -315,7 +315,24 @@ fn run(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
     use super::*;
+
+    /// On macOS a socket closed while another thread spawns a process stays open until the
+    /// spawn's exec completes, a few milliseconds, so a test that checks a socket closes can see
+    /// it still answer. A test holds [`spawning`] while it spawns processes, and
+    /// [`not_spawning`] while it checks that a socket closes. A test that panics holding a guard
+    /// does not fail the tests waiting on it.
+    static SPAWNS: RwLock<()> = RwLock::new(());
+
+    pub(crate) fn spawning() -> RwLockWriteGuard<'static, ()> {
+        SPAWNS.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn not_spawning() -> RwLockReadGuard<'static, ()> {
+        SPAWNS.read().unwrap_or_else(PoisonError::into_inner)
+    }
 
     #[test]
     fn the_version_reads_as_upgrade_tries_a_release() {

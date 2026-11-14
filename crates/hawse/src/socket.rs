@@ -459,6 +459,7 @@ mod tests {
 
     #[test]
     fn a_socket_left_by_a_dead_process_is_replaced() {
+        let _not_spawning = crate::tests::not_spawning();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("client.sock");
         drop(StdListener::bind(&path).unwrap());
@@ -582,8 +583,13 @@ mod tests {
         is_refused(&request).await;
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the guard holds off other tests, which run on runtimes of their own"
+    )]
     #[tokio::test(start_paused = true)]
     async fn a_caller_that_sends_nothing_is_dropped_at_5_s() {
+        let _not_spawning = crate::tests::not_spawning();
         let (_dir, path) = serving();
         let silent = StdStream::connect(&path).unwrap();
         silent.set_nonblocking(true).unwrap();
@@ -602,8 +608,13 @@ mod tests {
         assert_eq!(rest, b"");
     }
 
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the guard holds off other tests, which run on runtimes of their own"
+    )]
     #[tokio::test(start_paused = true)]
     async fn a_caller_that_stays_open_after_an_over_long_request_is_read_until_the_deadline() {
+        let _not_spawning = crate::tests::not_spawning();
         let (_dir, path) = serving();
         let mut caller = UnixStream::connect(&path).await.unwrap();
         caller.write_all(&[b'a'; 5000]).await.unwrap();
