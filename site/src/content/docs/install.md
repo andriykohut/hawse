@@ -20,9 +20,9 @@ curl -fsSL https://raw.githubusercontent.com/andriykohut/hawse/main/install.sh |
 The same by hand, for one version and one target:
 
 ```sh
-curl -LO https://github.com/andriykohut/hawse/releases/download/v0.13.0/hawse-0.13.0-x86_64-unknown-linux-musl.tar.gz
-tar -xzf hawse-0.13.0-x86_64-unknown-linux-musl.tar.gz
-install -m755 hawse-0.13.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
+curl -LO https://github.com/andriykohut/hawse/releases/download/v0.14.0/hawse-0.14.0-x86_64-unknown-linux-musl.tar.gz
+tar -xzf hawse-0.14.0-x86_64-unknown-linux-musl.tar.gz
+install -m755 hawse-0.14.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
 ```
 
 `SHA256SUMS` in the same release covers every archive, and
@@ -64,7 +64,9 @@ A server with no config yet runs on the defaults and reads
 `/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
 shows how it stands. `sudo hawse status` shows more: the clients and their
 ports, the services and their totals, and the keys that knocked. `--json`
-prints the same for scripts.
+prints the same for scripts. On most distributions the server also needs
+`net.core.rmem_max` raised, or its QUIC socket drops datagrams under load;
+[Configuration](/hawse/configuration/) has the line for `/etc/sysctl.d/`.
 
 On macOS it writes a LaunchAgent, which starts when you log in, so it runs as
 you, without sudo:
@@ -90,7 +92,7 @@ root runs it to install and to upgrade, and both refuse one another account
 could replace:
 
 ```sh
-sudo install -D -m755 hawse-0.13.0-x86_64-unknown-linux-musl/hawse /mnt/pool/hawse-bin/hawse
+sudo install -D -m755 hawse-0.14.0-x86_64-unknown-linux-musl/hawse /mnt/pool/hawse-bin/hawse
 sudo /mnt/pool/hawse-bin/hawse service install client \
   --config /mnt/pool/apps/hawse/client.toml --user someone
 ```
@@ -151,8 +153,11 @@ them, and Docker only forwards ports named when the container starts:
 ```sh
 docker run -d --name hawse-server --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
-  ghcr.io/andriykohut/hawse:0.13.0 server
+  ghcr.io/andriykohut/hawse:0.14.0 server
 ```
+
+With host networking the server gets the host's `net.core.rmem_max`, so raise
+it on the host as [Configuration](/hawse/configuration/) shows.
 
 The client needs host networking too when a `local` address points at the host.
 On a Compose network it can name other services instead, as in
@@ -161,7 +166,7 @@ On a Compose network it can name other services instead, as in
 ```sh
 docker run -d --name hawse-client --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
-  ghcr.io/andriykohut/hawse:0.13.0 client
+  ghcr.io/andriykohut/hawse:0.14.0 client
 ```
 
 `keygen --out /var/lib/hawse/client.key` with the same volume creates the
