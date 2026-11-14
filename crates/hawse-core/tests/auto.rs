@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -58,14 +59,12 @@ async fn auto_falls_back_to_tcp_when_quic_does_not_answer() {
     assert_eq!(cfg.transport.prefer, Prefer::Auto);
     let mut client = start(Client::new(cfg, client_id).with_fallback_after(AFTER));
 
-    assert!(
-        matches!(
-            next_event(&mut client.events).await,
-            Event::Connected {
-                transport: TransportKind::Tcp,
-                ..
-            }
-        ),
+    assert_matches!(
+        next_event(&mut client.events).await,
+        Event::Connected {
+            transport: TransportKind::Tcp,
+            ..
+        },
         "auto did not land on the fallback"
     );
     let port = expect_bound(&mut client.events, "echo").await;
@@ -97,10 +96,7 @@ async fn auto_reports_both_failures_when_the_server_has_no_fallback() {
         .await
         .expect("both dials end within 10 s")
         .unwrap();
-    assert!(
-        matches!(result, Err(ClientError::NoTransport { .. })),
-        "{result:?}"
-    );
+    assert_matches!(result, Err(ClientError::NoTransport { .. }));
     server.cancel.cancel();
 }
 
@@ -122,13 +118,13 @@ async fn falling_back_where_udp_is_blocked_never_counts_against_the_client() {
         let cfg = client_config(relay, server.key, &[]);
         let identity = Identity::from_pem(&pem).unwrap();
         let mut client = start(Client::new(cfg, identity).with_fallback_after(AFTER));
-        assert!(matches!(
+        assert_matches!(
             next_event(&mut client.events).await,
             Event::Connected {
                 transport: TransportKind::Tcp,
                 ..
             }
-        ));
+        );
         client.cancel.cancel();
         assert!(client.task.await.unwrap().is_ok());
     }

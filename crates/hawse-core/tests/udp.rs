@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -301,19 +302,19 @@ mod rogue {
         let (send, recv) = conn.accept_bi().await.unwrap();
         let mut control = FramedWrite::new(send, codec());
         let mut control_rx = FramedRead::new(recv, codec());
-        assert!(matches!(
+        assert_matches!(
             decode::<ClientMessage>(&control_rx.next().await.unwrap().unwrap()).unwrap(),
             ClientMessage::Hello { .. }
-        ));
+        );
         let welcome = ServerMessage::Welcome {
             agent: "rogue".into(),
             client_name: "test".into(),
         };
         control.send(encode(&welcome).unwrap()).await.unwrap();
-        assert!(matches!(
+        assert_matches!(
             decode::<ClientMessage>(&control_rx.next().await.unwrap().unwrap()).unwrap(),
             ClientMessage::Bind { .. }
-        ));
+        );
         Session {
             conn,
             control,
@@ -371,12 +372,10 @@ mod rogue {
             .unwrap();
 
         let refusal = tokio::time::timeout(Duration::from_secs(8), recv.read_to_end(16)).await;
-        assert!(
-            matches!(
-                &refusal,
-                Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))))
-                    if *code == quinn::VarInt::from_u32(reset::UNKNOWN_SERVICE)
-            ),
+        assert_matches!(
+            &refusal,
+            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(code))))
+                if *code == quinn::VarInt::from_u32(reset::UNKNOWN_SERVICE),
             "client did not reset the stream as an unknown service: {refusal:?}"
         );
         session.client.cancel.cancel();

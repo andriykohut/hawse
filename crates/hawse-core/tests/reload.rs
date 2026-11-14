@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::time::Duration;
 
 use common::{
@@ -40,7 +41,7 @@ async fn a_client_a_reload_no_longer_names_is_told_and_then_denied() {
     };
     assert!(reason.contains("no longer authorized"), "{reason}");
     let mut again = raw_hello(&server, &client_id).await;
-    assert!(matches!(again.reply().await, ServerMessage::Denied { .. }));
+    assert_matches!(again.reply().await, ServerMessage::Denied { .. });
     server.cancel.cancel();
 }
 
@@ -54,10 +55,10 @@ async fn a_port_a_reload_takes_out_of_a_grant_is_unbound_and_the_session_goes_on
         &server_id,
     );
     let mut client = raw_client(&server, &client_id).await;
-    assert!(matches!(
+    assert_matches!(
         client.bind_udp("fixed", Some(granted)).await,
         ServerMessage::Bound { .. }
-    ));
+    );
     client.bound_udp("dynamic").await;
 
     server
@@ -240,17 +241,17 @@ async fn an_answer_to_a_bind_a_reload_has_replaced_binds_nothing() {
         })
         .unwrap()
     };
-    assert!(matches!(heard().await, ClientMessage::Hello { .. }));
+    assert_matches!(heard().await, ClientMessage::Hello { .. });
     let welcome = ServerMessage::Welcome {
         agent: "slow".into(),
         client_name: "test".into(),
     };
     tx.send(encode(&welcome).unwrap()).await.unwrap();
     // The first bind goes unanswered until the reload's unbind and bind have come in after it.
-    assert!(matches!(heard().await, ClientMessage::Bind { .. }));
+    assert_matches!(heard().await, ClientMessage::Bind { .. });
     expose.send_replace(after.expose);
-    assert!(matches!(heard().await, ClientMessage::Unbind { .. }));
-    assert!(matches!(heard().await, ClientMessage::Bind { .. }));
+    assert_matches!(heard().await, ClientMessage::Unbind { .. });
+    assert_matches!(heard().await, ClientMessage::Bind { .. });
 
     let visit = async |service_id| {
         let (send, recv) = conn.open_bi().await.unwrap();

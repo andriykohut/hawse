@@ -223,6 +223,7 @@ async fn reload(
 mod tests {
     use hawse_core::config::ClientPolicy;
     use hawse_proto::key::PublicKey;
+    use std::assert_matches;
 
     use super::*;
 
@@ -248,10 +249,7 @@ mod tests {
             );
             reloaded(&started, &new)
         };
-        assert!(matches!(
-            granting("40500"),
-            Err(ConfigError::GrantInPool(..))
-        ));
+        assert_matches!(granting("40500"), Err(ConfigError::GrantInPool(..)));
         let policy = granting("42500").unwrap();
         assert!(policy.lookup(&PublicKey::from_bytes([1; 32])).is_some());
     }

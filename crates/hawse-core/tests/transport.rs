@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::future::poll_fn;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -302,14 +303,14 @@ async fn tcp_transport_has_no_datagrams() {
     let client = &pair.client;
 
     assert!(client.max_datagram_size().is_none());
-    assert!(matches!(
+    assert_matches!(
         client.send_datagram(Bytes::from_static(b"x")),
         Err(TransportError::NoDatagrams)
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         client.recv_datagram().await,
         Err(TransportError::NoDatagrams)
-    ));
+    );
 }
 
 #[tokio::test]

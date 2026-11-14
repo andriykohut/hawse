@@ -240,6 +240,7 @@ mod tests {
     use rustls::pki_types::ServerName;
     use rustls::sign::{CertifiedKey, SingleCertAndKey};
     use rustls::{ClientConnection, ServerConnection};
+    use std::assert_matches;
 
     #[test]
     fn sha256_is_the_standard_one() {
@@ -364,17 +365,14 @@ mod tests {
             .unwrap()
             .self_signed(&kp)
             .unwrap();
-        assert!(matches!(
-            peer_key(cert.der()),
-            Err(PeerKeyError::Algorithm(_))
-        ));
+        assert_matches!(peer_key(cert.der()), Err(PeerKeyError::Algorithm(_)));
     }
 
     #[test]
     fn peer_key_rejects_a_truncated_certificate() {
         let (cert, _) = Identity::generate().unwrap().certificate().unwrap();
         let cut = CertificateDer::from(&cert[..cert.len() - 1]);
-        assert!(matches!(peer_key(&cut), Err(PeerKeyError::Der)));
+        assert_matches!(peer_key(&cut), Err(PeerKeyError::Der));
     }
 
     #[test]
@@ -382,10 +380,7 @@ mod tests {
         let algorithm = der(0x30, &ED25519_OID_DER);
         for len in [31, 33] {
             let cert = cert_around(&spki(&algorithm, &vec![7; len], &[]));
-            assert!(
-                matches!(peer_key(&cert), Err(PeerKeyError::Length)),
-                "{len}"
-            );
+            assert_matches!(peer_key(&cert), Err(PeerKeyError::Length), "{len}");
         }
     }
 
@@ -393,14 +388,14 @@ mod tests {
     fn peer_key_rejects_bytes_trailing_the_key() {
         let algorithm = der(0x30, &ED25519_OID_DER);
         let cert = cert_around(&spki(&algorithm, &[7; 32], &[0x05, 0x00]));
-        assert!(matches!(peer_key(&cert), Err(PeerKeyError::Encoding)));
+        assert_matches!(peer_key(&cert), Err(PeerKeyError::Encoding));
     }
 
     #[test]
     fn peer_key_rejects_algorithm_parameters() {
         let algorithm = der(0x30, &[&ED25519_OID_DER[..], &[0x05, 0x00]].concat());
         let cert = cert_around(&spki(&algorithm, &[7; 32], &[]));
-        assert!(matches!(peer_key(&cert), Err(PeerKeyError::Encoding)));
+        assert_matches!(peer_key(&cert), Err(PeerKeyError::Encoding));
     }
 
     #[test]
@@ -444,12 +439,9 @@ mod tests {
         let mut server = server(&s);
         let mut client = client(&c, other.public_key());
         let err = handshake(&mut client, &mut server).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
-            ),
-            "{err:?}"
+        assert_matches!(
+            err,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
         );
     }
 
@@ -471,10 +463,7 @@ mod tests {
         let mut client =
             ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap();
         let err = handshake(&mut client, &mut server).unwrap_err();
-        assert!(
-            matches!(err, rustls::Error::NoCertificatesPresented),
-            "{err:?}"
-        );
+        assert_matches!(err, rustls::Error::NoCertificatesPresented);
     }
 
     #[test]
@@ -500,12 +489,9 @@ mod tests {
         let mut client =
             ClientConnection::new(Arc::new(cfg), ServerName::try_from("hawse").unwrap()).unwrap();
         let err = handshake(&mut client, &mut server).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
-            ),
-            "{err:?}"
+        assert_matches!(
+            err,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
         );
     }
 

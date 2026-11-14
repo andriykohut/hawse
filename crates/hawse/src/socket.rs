@@ -329,6 +329,7 @@ fn refusal(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::io::Read as _;
 
     use super::*;
@@ -470,7 +471,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("client.sock");
         let _live = StdListener::bind(&path).unwrap();
-        assert!(matches!(bind_at(&path), Err(BindError::Taken)));
+        assert_matches!(bind_at(&path), Err(BindError::Taken));
         assert!(path.exists());
     }
 
@@ -499,10 +500,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("file");
         std::fs::write(&file, "").unwrap();
-        assert!(matches!(
-            bind_at(&file.join("client.sock")),
-            Err(BindError::NoDir(_))
-        ));
+        assert_matches!(bind_at(&file.join("client.sock")), Err(BindError::NoDir(_)));
     }
 
     #[test]
@@ -511,10 +509,7 @@ mod tests {
         if rustix::process::geteuid().is_root() {
             return;
         }
-        assert!(matches!(
-            bind_at(Path::new("/hawse.sock")),
-            Err(BindError::Foreign)
-        ));
+        assert_matches!(bind_at(Path::new("/hawse.sock")), Err(BindError::Foreign));
     }
 
     #[test]
@@ -529,7 +524,7 @@ mod tests {
     fn a_path_too_long_for_a_socket_is_an_error_not_a_panic() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a".repeat(200));
-        assert!(matches!(bind_at(&path), Err(BindError::Io(_))));
+        assert_matches!(bind_at(&path), Err(BindError::Io(_)));
     }
 
     /// Serves `json!({"role": "client"})` on a fresh socket; the returned `TempDir` guard keeps the socket's directory alive.

@@ -933,6 +933,7 @@ async fn send_msg(control: &mut Control, msg: &ClientMessage) -> Result<(), Clie
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::cell::RefCell;
 
     use hawse_proto::frame::FrameError;
@@ -1039,15 +1040,12 @@ mod tests {
             quic: Box::new(timed_out()),
             tcp: Box::new(no_protocol_alert()),
         };
-        assert!(matches!(versioned(both), ClientError::Version));
+        assert_matches!(versioned(both), ClientError::Version);
         let neither = ClientError::NoTransport {
             quic: Box::new(timed_out()),
             tcp: Box::new(timed_out()),
         };
-        assert!(matches!(
-            versioned(neither),
-            ClientError::NoTransport { .. }
-        ));
+        assert_matches!(versioned(neither), ClientError::NoTransport { .. });
     }
 
     #[test]
@@ -1059,7 +1057,7 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("server stopped answering"), "{text}");
         assert!(text.contains("control stream closed"), "{text}");
-        assert!(matches!(classify(&err), DisconnectCause::Transport(_)));
+        assert_matches!(classify(&err), DisconnectCause::Transport(_));
     }
 
     #[test]
@@ -1068,12 +1066,12 @@ mod tests {
             quic: Box::new(ClientError::Window),
             tcp: Box::new(ClientError::Window),
         };
-        assert!(matches!(classify(&both), DisconnectCause::Config(_)));
+        assert_matches!(classify(&both), DisconnectCause::Config(_));
         let one = ClientError::NoTransport {
             quic: Box::new(ClientError::Window),
             tcp: Box::new(ClientError::ControlClosed),
         };
-        assert!(matches!(classify(&one), DisconnectCause::Transport(_)));
+        assert_matches!(classify(&one), DisconnectCause::Transport(_));
     }
 
     #[test]
@@ -1081,19 +1079,16 @@ mod tests {
         assert!(wrong_version(&no_protocol_alert()));
         let timed_out = ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
         assert!(!wrong_version(&timed_out));
-        assert!(matches!(
-            versioned(no_protocol_alert()),
-            ClientError::Version
-        ));
-        assert!(matches!(versioned(timed_out), ClientError::Quic(_)));
+        assert_matches!(versioned(no_protocol_alert()), ClientError::Version);
+        assert_matches!(versioned(timed_out), ClientError::Quic(_));
     }
 
     #[test]
     fn a_version_mismatch_is_worth_retrying() {
-        assert!(matches!(
+        assert_matches!(
             classify(&ClientError::Version),
             DisconnectCause::Transport(_)
-        ));
+        );
     }
 
     #[test]
@@ -1101,19 +1096,16 @@ mod tests {
         let resolve =
             ClientError::Resolve("example.invalid:443".to_owned(), std::io::Error::other("x"));
         let no_address = ClientError::NoAddress("example.invalid:443".to_owned());
-        assert!(matches!(classify(&resolve), DisconnectCause::Transport(_)));
-        assert!(matches!(
-            classify(&no_address),
-            DisconnectCause::Transport(_)
-        ));
+        assert_matches!(classify(&resolve), DisconnectCause::Transport(_));
+        assert_matches!(classify(&no_address), DisconnectCause::Transport(_));
     }
 
     #[test]
     fn a_dial_that_reached_nobody_is_worth_retrying() {
         let quic = ClientError::Quic(QuicError::Connection(quinn::ConnectionError::TimedOut));
         let tcp = ClientError::Transport(TransportError::Io(std::io::Error::other("x")));
-        assert!(matches!(classify(&quic), DisconnectCause::Transport(_)));
-        assert!(matches!(classify(&tcp), DisconnectCause::Transport(_)));
+        assert_matches!(classify(&quic), DisconnectCause::Transport(_));
+        assert_matches!(classify(&tcp), DisconnectCause::Transport(_));
     }
 
     #[test]
@@ -1127,10 +1119,7 @@ mod tests {
             ClientError::Encode(FrameError::TooLarge(0)),
         ];
         for err in cases {
-            assert!(
-                matches!(classify(&err), DisconnectCause::Config(_)),
-                "{err:?}"
-            );
+            assert_matches!(classify(&err), DisconnectCause::Config(_), "{err:?}");
         }
     }
 

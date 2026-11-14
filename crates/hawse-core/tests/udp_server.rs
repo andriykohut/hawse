@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -159,17 +160,17 @@ async fn a_fixed_udp_port_is_free_again_once_its_session_ends() {
     );
 
     let mut first = raw_client(&server, &client_id).await;
-    assert!(matches!(
+    assert_matches!(
         first.bind_udp("wg", Some(port)).await,
         ServerMessage::Bound { .. }
-    ));
+    );
     first.conn.close(0u32.into(), b"");
 
     let mut second = raw_client(&server, &client_id).await;
-    assert!(matches!(
+    assert_matches!(
         second.bind_udp("wg", Some(port)).await,
         ServerMessage::Bound { port: bound, .. } if bound == port
-    ));
+    );
     server.cancel.cancel();
 }
 

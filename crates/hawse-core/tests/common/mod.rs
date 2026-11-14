@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 use std::io;
@@ -339,10 +340,7 @@ pub struct RawClient {
 
 pub async fn raw_client(server: &RunningServer, identity: &Identity) -> RawClient {
     let mut client = raw_hello(server, identity).await;
-    assert!(matches!(
-        client.reply().await,
-        ServerMessage::Welcome { .. }
-    ));
+    assert_matches!(client.reply().await, ServerMessage::Welcome { .. });
     client
 }
 

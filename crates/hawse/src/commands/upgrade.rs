@@ -581,6 +581,7 @@ fn says(output: &str, version: Version) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     /// Lays out a release of `version` under `root`, whose binary is the shell script `binary`,
     /// and returns the base URL curl fetches it from.
@@ -707,35 +708,35 @@ mod tests {
     #[test]
     fn a_version_below_the_floor_or_the_running_one_downloads_nothing() {
         let running = Version(0, 10, 0);
-        assert!(matches!(
+        assert_matches!(
             decide(running, running, false, false),
             Ok(Decision::Current)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decide(running, Version(0, 11, 0), false, true),
             Ok(Decision::Check { .. })
-        ));
+        );
         let err = decide(Version(0, 11, 0), Version(0, 9, 0), true, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("by hand") && err.contains("key"), "{err}");
         assert!(!err.contains("ready"), "0.9.0 does tell systemd: {err}");
-        assert!(matches!(
+        assert_matches!(
             decide(running, Version(0, 11, 0), false, false),
             Ok(Decision::Install { to }) if to == Version(0, 11, 0)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decide(Version(0, 11, 0), running, true, false),
             Ok(Decision::Install { .. })
-        ));
+        );
     }
 
     #[test]
     fn a_build_newer_than_the_latest_is_not_taken_back_unasked() {
-        assert!(matches!(
+        assert_matches!(
             decide(Version(0, 11, 0), Version(0, 10, 0), false, false),
             Ok(Decision::Newer { latest }) if latest == Version(0, 10, 0)
-        ));
+        );
     }
 
     #[test]

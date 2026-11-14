@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -261,7 +262,7 @@ async fn abort_resets_the_stream_for_the_peer() {
         .await
         .expect("peer never observed the reset")
         .unwrap();
-    assert!(matches!(peer_err, quinn::ReadError::Reset(_)));
+    assert_matches!(peer_err, quinn::ReadError::Reset(_));
 }
 
 #[tokio::test]
@@ -320,7 +321,7 @@ async fn a_stream_the_peer_resets_aborts_the_socket() {
         .expect("the pump ends once its stream is reset")
         .unwrap()
         .unwrap_err();
-    assert!(matches!(err, PumpError::Stream(_)), "{err:?}");
+    assert_matches!(err, PumpError::Stream(_));
     assert_eq!(err.reset_code(), Some(reset::LOCAL_REFUSED));
     assert!(aborted.load(Ordering::Relaxed));
 }
@@ -359,7 +360,7 @@ async fn a_stream_the_peer_stops_aborts_the_socket() {
         .expect("the pump ends once its stream is stopped")
         .unwrap()
         .unwrap_err();
-    assert!(matches!(err, PumpError::Stream(_)), "{err:?}");
+    assert_matches!(err, PumpError::Stream(_));
     assert_eq!(err.reset_code(), Some(reset::LOCAL_REFUSED));
     assert!(aborted.load(Ordering::Relaxed));
     sending.abort();

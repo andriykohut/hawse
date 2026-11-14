@@ -42,6 +42,7 @@ mod tests {
     use super::*;
     use crate::msg::ClientMessage;
     use futures_util::{SinkExt, StreamExt};
+    use std::assert_matches;
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     #[test]
@@ -50,16 +51,16 @@ mod tests {
             name: None,
             agent: "x".repeat(MAX_FRAME),
         };
-        assert!(matches!(encode(&big), Err(FrameError::TooLarge(_))));
+        assert_matches!(encode(&big), Err(FrameError::TooLarge(_)));
     }
 
     #[test]
     fn rejects_truncated_bytes() {
         let bytes = encode(&ClientMessage::Ping { nonce: 42 }).unwrap();
-        assert!(matches!(
+        assert_matches!(
             decode::<ClientMessage>(&bytes[..bytes.len() - 1]),
             Err(FrameError::Decode(_))
-        ));
+        );
     }
 
     #[tokio::test]

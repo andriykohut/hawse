@@ -86,6 +86,7 @@ pub fn decode_from(packet: &[u8]) -> Result<(DatagramHeader, SocketAddr, &[u8]),
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::assert_matches;
 
     const WIDEST: DatagramHeader = DatagramHeader {
         service_id: u16::MAX,
@@ -100,10 +101,10 @@ mod tests {
 
     #[test]
     fn a_packet_past_the_frame_limit_is_refused() {
-        assert!(matches!(
+        assert_matches!(
             encode(WIDEST, &vec![0u8; MAX_FRAME]),
             Err(FrameError::TooLarge(_))
-        ));
+        );
     }
 
     #[test]
@@ -200,17 +201,14 @@ mod tests {
                 7, 9, 0x06, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0,
             ],
         ] {
-            assert!(
-                matches!(decode_from(packet), Err(FrameError::Visitor)),
-                "{packet:?}"
-            );
+            assert_matches!(decode_from(packet), Err(FrameError::Visitor), "{packet:?}");
         }
     }
 
     #[test]
     fn an_address_that_pushes_a_packet_past_the_frame_limit_is_refused() {
         let payload = vec![0u8; MAX_FRAME - 2 - 7 + 1];
-        assert!(matches!(
+        assert_matches!(
             encode_from(
                 DatagramHeader {
                     service_id: 7,
@@ -220,7 +218,7 @@ mod tests {
                 &payload
             ),
             Err(FrameError::TooLarge(_))
-        ));
+        );
     }
 
     proptest! {

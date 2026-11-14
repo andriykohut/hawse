@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,10 +25,10 @@ async fn control_round_trips_a_hello() {
 
     let (ss, sr) = pair.server.accept_bi().await.unwrap();
     let mut server = Control::new(SendHalf::Quic(ss), RecvHalf::Quic(sr));
-    assert!(matches!(
+    assert_matches!(
         server.next::<ClientMessage>().await,
         Some(ClientMessage::Hello { .. })
-    ));
+    );
 }
 
 /// Taking `self` here would not compile, which is the guard: consuming the `Control` drops an
@@ -45,10 +46,10 @@ async fn finishing_the_send_half_leaves_the_peers_reply_readable() {
 
     let (ss, sr) = pair.server.accept_bi().await.unwrap();
     let mut server = Control::new(SendHalf::Quic(ss), RecvHalf::Quic(sr));
-    assert!(matches!(
+    assert_matches!(
         server.next::<ClientMessage>().await,
         Some(ClientMessage::Ping { .. })
-    ));
+    );
     server.finish().await;
 
     client
@@ -58,10 +59,7 @@ async fn finishing_the_send_half_leaves_the_peers_reply_readable() {
     let reply = tokio::time::timeout(Duration::from_secs(5), server.next::<ClientMessage>())
         .await
         .expect("a reply within 5 s");
-    assert!(
-        matches!(reply, Some(ClientMessage::Pong { nonce: 7 })),
-        "{reply:?}"
-    );
+    assert_matches!(reply, Some(ClientMessage::Pong { nonce: 7 }));
 }
 
 /// What the server's `Control` reads next once the client has written `bytes` on a new stream and,
@@ -91,9 +89,9 @@ async fn a_length_prefix_over_the_limit_is_an_error(
 ) {
     let over = u32::try_from(MAX_FRAME + 1).unwrap();
     let read = reads(client, server, &over.to_le_bytes(), false).await;
-    assert!(
-        matches!(read, Err(FrameError::TooLarge(len)) if len == MAX_FRAME + 1),
-        "{read:?}"
+    assert_matches!(
+        read,
+        Err(FrameError::TooLarge(len)) if len == MAX_FRAME + 1
     );
 }
 
@@ -117,7 +115,7 @@ async fn a_stream_that_ends_mid_frame_is_the_end(
     // A prefix promising eight bytes, and two of them.
     let cut_short = [8, 0, 0, 0, 1, 2];
     let read = reads(client, server, &cut_short, true).await;
-    assert!(matches!(read, Ok(None)), "{read:?}");
+    assert_matches!(read, Ok(None));
 }
 
 #[tokio::test]

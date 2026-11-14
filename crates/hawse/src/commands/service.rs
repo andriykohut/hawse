@@ -484,10 +484,11 @@ fn bootout(label: &str) -> miette::Result<()> {
 mod tests {
     use super::*;
     use crate::paths::Located;
+    use std::assert_matches;
 
     #[test]
     fn the_service_manager_follows_the_system_and_the_user() {
-        assert!(matches!(manager("linux", true, true), Ok(Manager::Systemd)));
+        assert_matches!(manager("linux", true, true), Ok(Manager::Systemd));
         assert!(
             manager("linux", false, true)
                 .unwrap_err()
@@ -500,10 +501,7 @@ mod tests {
                 .to_string()
                 .contains("not running systemd")
         );
-        assert!(matches!(
-            manager("macos", false, false),
-            Ok(Manager::Launchd)
-        ));
+        assert_matches!(manager("macos", false, false), Ok(Manager::Launchd));
         assert!(
             manager("macos", true, false)
                 .unwrap_err()
