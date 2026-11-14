@@ -87,6 +87,9 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
 
+[workspace.lints.cargo]
+unused_dependencies = "warn"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
