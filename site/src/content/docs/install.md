@@ -29,7 +29,7 @@ install -m755 hawse-0.13.0-x86_64-unknown-linux-musl/hawse /usr/local/bin/hawse
 `gh attestation verify FILE --repo andriykohut/hawse` checks that an archive was
 built by this repository's release workflow.
 
-With a Rust toolchain, `cargo install --locked hawse` builds from source and
+With Rust 1.100 or later, `cargo install hawse` builds from source and
 `cargo binstall hawse` downloads the release binary.
 
 `hawse completions SHELL` prints the completion script for bash, zsh, fish,

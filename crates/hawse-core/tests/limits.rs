@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -40,14 +41,8 @@ async fn denied(to: SocketAddr, server_key: PublicKey, prefer: Prefer) {
         client_config_over(to, server_key, &[], prefer),
         Identity::generate().unwrap(),
     );
-    assert!(matches!(
-        next_event(&mut stranger.events).await,
-        Event::Denied { .. }
-    ));
-    assert!(matches!(
-        stranger.task.await.unwrap(),
-        Err(ClientError::Denied(_))
-    ));
+    assert_matches!(next_event(&mut stranger.events).await, Event::Denied { .. });
+    assert_matches!(stranger.task.await.unwrap(), Err(ClientError::Denied(_)));
 }
 
 async fn an_address_past_its_limit_is_refused(prefer: Prefer) {
@@ -67,19 +62,13 @@ async fn an_address_past_its_limit_is_refused(prefer: Prefer) {
         .expect("refused within 5 s")
         .unwrap();
     if prefer == Prefer::Tcp {
-        assert!(
-            matches!(result, Err(ClientError::Transport(_))),
-            "{result:?}"
-        );
+        assert_matches!(result, Err(ClientError::Transport(_)));
     } else {
-        assert!(
-            matches!(
-                &result,
-                Err(ClientError::Quic(QuicError::Connection(
-                    quinn::ConnectionError::ConnectionClosed(close)
-                ))) if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED
-            ),
-            "{result:?}"
+        assert_matches!(
+            &result,
+            Err(ClientError::Quic(QuicError::Connection(
+                quinn::ConnectionError::ConnectionClosed(close)
+            ))) if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED
         );
     }
 
@@ -87,10 +76,7 @@ async fn an_address_past_its_limit_is_refused(prefer: Prefer) {
         client_config_over(at(&server, Ipv6Addr::LOCALHOST), server.key, &[], prefer),
         client_id,
     );
-    assert!(matches!(
-        next_event(&mut known.events).await,
-        Event::Connected { .. }
-    ));
+    assert_matches!(next_event(&mut known.events).await, Event::Connected { .. });
     known.cancel.cancel();
     server.cancel.cancel();
 }
@@ -116,10 +102,10 @@ async fn a_known_client_reconnecting_never_counts_against_its_address() {
             client_config(at(&server, Ipv4Addr::LOCALHOST), server.key, &[]),
             Identity::from_pem(&pem).unwrap(),
         );
-        assert!(matches!(
+        assert_matches!(
             next_event(&mut client.events).await,
             Event::Connected { .. }
-        ));
+        );
         client.cancel.cancel();
         assert!(client.task.await.unwrap().is_ok());
     }
@@ -141,7 +127,7 @@ async fn refused_tcp_connections_give_back_their_handshake_permit() {
         let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf))
             .await
             .expect("closed within 5 s");
-        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+        assert_matches!(read, Ok(0) | Err(_));
     }
 
     let mut known = start_client(
@@ -153,10 +139,7 @@ async fn refused_tcp_connections_give_back_their_handshake_permit() {
         ),
         client_id,
     );
-    assert!(matches!(
-        next_event(&mut known.events).await,
-        Event::Connected { .. }
-    ));
+    assert_matches!(next_event(&mut known.events).await, Event::Connected { .. });
     known.cancel.cancel();
     server.cancel.cancel();
 }
@@ -192,10 +175,7 @@ async fn strangers_waiting_to_say_hello_hold_their_address_back() {
         ),
         client_id,
     );
-    assert!(matches!(
-        next_event(&mut known.events).await,
-        Event::Connected { .. }
-    ));
+    assert_matches!(next_event(&mut known.events).await, Event::Connected { .. });
     known.cancel.cancel();
     server.cancel.cancel();
 }

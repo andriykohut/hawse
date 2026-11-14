@@ -92,8 +92,7 @@ pub async fn watch(role: Option<Role>, style: Style) -> ExitCode {
                 Ok(Status::Client(now)) => {
                     let rates = sampled
                         .as_ref()
-                        .map(|(at, then)| rates(then, &now, asked - *at))
-                        .unwrap_or_default();
+                        .map_or_default(|(at, then)| rates(then, &now, asked - *at));
                     sampled = Some((asked, now));
                     Some(rates)
                 }

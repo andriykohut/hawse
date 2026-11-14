@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,10 +31,7 @@ async fn the_client_cannot_open_a_stream_past_its_control_stream_and_the_session
     let opened = tokio::time::timeout(Duration::from_millis(500), raw.conn.open_bi()).await;
     assert!(opened.is_err(), "{opened:?}");
 
-    assert!(matches!(
-        raw.bind_udp("dns", None).await,
-        ServerMessage::Bound { .. }
-    ));
+    assert_matches!(raw.bind_udp("dns", None).await, ServerMessage::Bound { .. });
     server.cancel.cancel();
 }
 
@@ -61,10 +59,10 @@ async fn a_stream_the_client_opens_over_tcp_is_reset_and_the_session_lives_on() 
         })
         .await
         .unwrap();
-    assert!(matches!(
+    assert_matches!(
         control.next::<ServerMessage>().await,
         Some(ServerMessage::Welcome { .. })
-    ));
+    );
 
     let (mut send, mut recv) = transport.open_bi().await.unwrap();
     send.write_all(b"extra").await.unwrap();
@@ -111,13 +109,10 @@ async fn a_server_shutting_down_is_not_held_by_the_stream_refuser() {
     let closed = tokio::time::timeout(Duration::from_secs(4), raw.conn.closed())
         .await
         .expect("the session closes within 4 s");
-    assert!(
-        matches!(
-            &closed,
-            quinn::ConnectionError::ApplicationClosed(end)
-                if end.error_code == VarInt::from_u32(close::SHUTDOWN)
-        ),
-        "{closed:?}"
+    assert_matches!(
+        &closed,
+        quinn::ConnectionError::ApplicationClosed(end)
+            if end.error_code == VarInt::from_u32(close::SHUTDOWN)
     );
 }
 
@@ -150,22 +145,16 @@ async fn a_session_waiting_to_supersede_another_stops_when_the_server_does() {
     let _stream = first.conn.accept_bi().await.unwrap();
 
     let second = raw_hello(&server, &client_id).await;
-    assert!(matches!(
-        first.reply().await,
-        ServerMessage::Shutdown { .. }
-    ));
+    assert_matches!(first.reply().await, ServerMessage::Shutdown { .. });
 
     server.cancel.cancel();
     let closed = tokio::time::timeout(Duration::from_secs(2), second.conn.closed())
         .await
         .expect("the waiting session closes within 2 s");
-    assert!(
-        matches!(
-            &closed,
-            quinn::ConnectionError::ApplicationClosed(end)
-                if end.error_code == VarInt::from_u32(close::SHUTDOWN)
-        ),
-        "{closed:?}"
+    assert_matches!(
+        &closed,
+        quinn::ConnectionError::ApplicationClosed(end)
+            if end.error_code == VarInt::from_u32(close::SHUTDOWN)
     );
 }
 
@@ -200,13 +189,10 @@ async fn a_client_that_cannot_be_welcomed_is_told_its_control_stream_closed() {
     let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
         .await
         .expect("the server closes within 5 s");
-    assert!(
-        matches!(
-            &closed,
-            quinn::ConnectionError::ApplicationClosed(end)
-                if end.error_code == VarInt::from_u32(close::CONTROL_CLOSED)
-        ),
-        "{closed:?}"
+    assert_matches!(
+        &closed,
+        quinn::ConnectionError::ApplicationClosed(end)
+            if end.error_code == VarInt::from_u32(close::CONTROL_CLOSED)
     );
     server.cancel.cancel();
 }
@@ -234,10 +220,10 @@ async fn a_length_prefix_over_the_limit_ends_the_session_as_a_closed_control_str
         agent: "raw".to_owned(),
     };
     write_frame(&mut send, &hello).await.unwrap();
-    assert!(matches!(
+    assert_matches!(
         read_frame::<ServerMessage>(&mut recv).await,
         Ok(ServerMessage::Welcome { .. })
-    ));
+    );
 
     let over = u32::try_from(MAX_FRAME + 1).unwrap();
     send.write_all(&over.to_le_bytes()).await.unwrap();
@@ -245,13 +231,10 @@ async fn a_length_prefix_over_the_limit_ends_the_session_as_a_closed_control_str
     let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
         .await
         .expect("the server closes within 5 s");
-    assert!(
-        matches!(
-            &closed,
-            quinn::ConnectionError::ApplicationClosed(end)
-                if end.error_code == VarInt::from_u32(close::CONTROL_CLOSED)
-        ),
-        "{closed:?}"
+    assert_matches!(
+        &closed,
+        quinn::ConnectionError::ApplicationClosed(end)
+            if end.error_code == VarInt::from_u32(close::CONTROL_CLOSED)
     );
     server.cancel.cancel();
 }

@@ -685,6 +685,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::future::Future as _;
     use std::net::Ipv4Addr;
     use std::pin::pin;
@@ -820,13 +821,10 @@ mod tests {
         let closed = tokio::time::timeout(Duration::from_secs(5), peer.conn.closed())
             .await
             .expect("the session closes within 5 s");
-        assert!(
-            matches!(
-                &closed,
-                quinn::ConnectionError::ApplicationClosed(end)
-                    if end.error_code == quinn::VarInt::from_u32(reason.code())
-            ),
-            "{closed:?}"
+        assert_matches!(
+            &closed,
+            quinn::ConnectionError::ApplicationClosed(end)
+                if end.error_code == quinn::VarInt::from_u32(reason.code())
         );
     }
 
@@ -1103,14 +1101,11 @@ mod tests {
 
         // Port 1 is outside the grant, and a bind that fails takes no id.
         let refused = peer.bind("refused", Kind::Tcp, Some(1)).await;
-        assert!(
-            matches!(refused, ServerMessage::BindFailed { .. }),
-            "{refused:?}"
-        );
+        assert_matches!(refused, ServerMessage::BindFailed { .. });
         let last = peer.bind("last", Kind::Udp, None).await;
-        assert!(
-            matches!(last, ServerMessage::Bound { service_id, .. } if service_id == u16::MAX),
-            "{last:?}"
+        assert_matches!(
+            last,
+            ServerMessage::Bound { service_id, .. } if service_id == u16::MAX
         );
 
         // Its id is free again and still not given out.
@@ -1119,7 +1114,7 @@ mod tests {
         };
         peer.control.send(&unbind).await.unwrap();
         let ended = peer.bind("more", Kind::Udp, None).await;
-        assert!(matches!(ended, ServerMessage::Shutdown { .. }), "{ended:?}");
+        assert_matches!(ended, ServerMessage::Shutdown { .. });
         expect_closed(&peer, CloseReason::Shutdown).await;
     }
 }

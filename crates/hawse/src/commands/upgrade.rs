@@ -251,7 +251,7 @@ fn output(command: &mut Command) -> Option<String> {
     let out = command.output().ok()?;
     out.status
         .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        .then(|| String::from_utf8_lossy_owned(out.stdout))
 }
 
 /// Where [`replace`] keeps the binary at `exe` that it replaces: beside it, `.old` after its name.
@@ -470,7 +470,7 @@ fn replace(
             .wrap_err_with(|| format!("cannot read {}", path.display()))
     };
     let got = hex(&hawse_core::tls::sha256(&read(&archive)?));
-    let sums = String::from_utf8_lossy(&read(&sums)?).into_owned();
+    let sums = String::from_utf8_lossy_owned(read(&sums)?);
     if sum(&sums, &format!("{name}.tar.gz")) != Some(got.as_str()) {
         miette::bail!("{name}.tar.gz does not match the release's SHA256SUMS");
     }
@@ -501,7 +501,7 @@ fn replace(
         .into_iter()
         .map(|role| {
             let unit = unpacked.join(format!("contrib/hawse-{}.service", role.name()));
-            Ok((role, String::from_utf8_lossy(&read(&unit)?).into_owned()))
+            Ok((role, String::from_utf8_lossy_owned(read(&unit)?)))
         })
         .collect::<miette::Result<Vec<_>>>()?;
     swap(exe, &new, &stage.0)?;
@@ -581,6 +581,7 @@ fn says(output: &str, version: Version) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     /// Lays out a release of `version` under `root`, whose binary is the shell script `binary`,
     /// and returns the base URL curl fetches it from.
@@ -707,35 +708,35 @@ mod tests {
     #[test]
     fn a_version_below_the_floor_or_the_running_one_downloads_nothing() {
         let running = Version(0, 10, 0);
-        assert!(matches!(
+        assert_matches!(
             decide(running, running, false, false),
             Ok(Decision::Current)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decide(running, Version(0, 11, 0), false, true),
             Ok(Decision::Check { .. })
-        ));
+        );
         let err = decide(Version(0, 11, 0), Version(0, 9, 0), true, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("by hand") && err.contains("key"), "{err}");
         assert!(!err.contains("ready"), "0.9.0 does tell systemd: {err}");
-        assert!(matches!(
+        assert_matches!(
             decide(running, Version(0, 11, 0), false, false),
             Ok(Decision::Install { to }) if to == Version(0, 11, 0)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decide(Version(0, 11, 0), running, true, false),
             Ok(Decision::Install { .. })
-        ));
+        );
     }
 
     #[test]
     fn a_build_newer_than_the_latest_is_not_taken_back_unasked() {
-        assert!(matches!(
+        assert_matches!(
             decide(Version(0, 11, 0), Version(0, 10, 0), false, false),
             Ok(Decision::Newer { latest }) if latest == Version(0, 10, 0)
-        ));
+        );
     }
 
     #[test]

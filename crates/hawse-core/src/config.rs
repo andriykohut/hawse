@@ -451,6 +451,7 @@ fn parse_port(text: &str) -> Option<u16> {
 mod tests {
     use super::*;
     use hawse_proto::port::{Kind, Port};
+    use std::assert_matches;
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
@@ -725,27 +726,24 @@ prefer = "tcp"
         let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
         let dup = cfg.clients["homelab"].clone();
         cfg.clients.insert("copy".into(), dup);
-        assert!(matches!(
-            cfg.validate(),
-            Err(ConfigError::DuplicateKey(_, _))
-        ));
+        assert_matches!(cfg.validate(), Err(ConfigError::DuplicateKey(_, _)));
 
         let mut cfg: ServerConfig = toml::from_str(SERVER).unwrap();
         let entry = cfg.clients.remove("laptop").unwrap();
         cfg.clients.insert("Bad Name".into(), entry);
-        assert!(matches!(cfg.validate(), Err(ConfigError::ClientName(_, _))));
+        assert_matches!(cfg.validate(), Err(ConfigError::ClientName(_, _)));
 
         let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         cfg.expose.get_mut("dev").unwrap().local = "localhost".into();
-        assert!(matches!(cfg.validate(), Err(ConfigError::LocalAddr(_, _))));
+        assert_matches!(cfg.validate(), Err(ConfigError::LocalAddr(_, _)));
 
         let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         cfg.server = ":4433".into();
-        assert!(matches!(cfg.validate(), Err(ConfigError::ServerAddr(_))));
+        assert_matches!(cfg.validate(), Err(ConfigError::ServerAddr(_)));
 
         let mut cfg: ClientConfig = toml::from_str(CLIENT).unwrap();
         cfg.name = Some("Home Lab".into());
-        assert!(matches!(cfg.validate(), Err(ConfigError::Name(_))));
+        assert_matches!(cfg.validate(), Err(ConfigError::Name(_)));
     }
 
     #[test]

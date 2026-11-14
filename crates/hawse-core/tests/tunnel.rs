@@ -1,5 +1,6 @@
 mod common;
 
+use std::assert_matches;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,10 +80,10 @@ async fn a_server_lists_a_connected_client_until_it_leaves() {
     let client_key = client_id.public_key();
     let mut server = start_server(&server_config(&[("test", client_key, &[])]), &server_id);
     let mut client = start_client(client_config(server.addr, server.key, &[]), client_id);
-    assert!(matches!(
+    assert_matches!(
         next_event(&mut client.events).await,
         Event::Connected { .. }
-    ));
+    );
     let live = server.sessions.live();
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].0, client_key);
@@ -122,8 +123,9 @@ async fn echo_through_the_tunnel(prefer: Prefer, expected: TransportKind) {
         client_id,
     );
 
-    assert!(
-        matches!(next_event(&mut client.events).await, Event::Connected { name, transport, .. } if name == "test" && transport == expected)
+    assert_matches!(
+        next_event(&mut client.events).await,
+        Event::Connected { name, transport, .. } if name == "test" && transport == expected
     );
     let port = expect_bound(&mut client.events, "echo").await;
     assert!(DYNAMIC_PORTS.contains(&port.number));
@@ -165,10 +167,10 @@ async fn a_client_given_localhost_reaches_a_server_listening_on_ipv4_only() {
     cfg.server = format!("localhost:{}", server.addr.port());
     let mut client = start_client(cfg, client_id);
 
-    assert!(matches!(
+    assert_matches!(
         next_event(&mut client.events).await,
         Event::Connected { remote, .. } if remote == server.addr
-    ));
+    );
 
     client.cancel.cancel();
     assert!(client.task.await.unwrap().is_ok());
@@ -191,16 +193,13 @@ async fn a_server_without_the_fallback_accepts_no_tcp_client() {
         .await
         .expect("the TCP dial ends within 5 s")
         .unwrap();
-    assert!(
-        matches!(result, Err(ClientError::Transport(_))),
-        "{result:?}"
-    );
+    assert_matches!(result, Err(ClientError::Transport(_)));
 
     let mut over_quic = start_client(client_config(server.addr, server.key, &[]), client_id);
-    assert!(matches!(
+    assert_matches!(
         next_event(&mut over_quic.events).await,
         Event::Connected { .. }
-    ));
+    );
     over_quic.cancel.cancel();
     server.cancel.cancel();
 }
@@ -310,10 +309,7 @@ async fn transfers_intact(prefer: Prefer, total: usize) {
         // The echo ended the stream once it had it all, so the visitor must read that end and not
         // a reset: the pump aborts its socket unless both directions finished.
         let end = rd.read(&mut buf).await;
-        assert!(
-            matches!(end, Ok(0)),
-            "the transfer did not end cleanly: {end:?}"
-        );
+        assert_matches!(end, Ok(0), "the transfer did not end cleanly: {end:?}");
         writer.await.unwrap();
         server.cancel.cancel();
     };
@@ -443,7 +439,7 @@ async fn unknown_key_is_denied_with_its_own_key() {
         next_event(&mut client.events).await,
         Event::Denied { key: expected }
     );
-    assert!(matches!(client.task.await.unwrap(), Err(ClientError::Denied(k)) if k == expected));
+    assert_matches!(client.task.await.unwrap(), Err(ClientError::Denied(k)) if k == expected);
     server.cancel.cancel();
 }
 
@@ -464,7 +460,7 @@ async fn a_server_tells_of_a_denied_key_and_of_a_session_from_connect_to_end() {
         &server_id,
     );
     let knock = start_client(client_config(server.addr, server.key, &[]), stranger);
-    assert!(matches!(told(&mut server).await, Told::Denied { key, .. } if key == unknown));
+    assert_matches!(told(&mut server).await, Told::Denied { key, .. } if key == unknown);
     assert!(knock.task.await.unwrap().is_err());
 
     let echo = echo_server().await;
@@ -481,16 +477,16 @@ async fn a_server_tells_of_a_denied_key_and_of_a_session_from_connect_to_end() {
     client.cancel.cancel();
     client.task.await.unwrap().unwrap();
 
-    assert!(matches!(
+    assert_matches!(
         told(&mut server).await,
         Told::Connected { client, transport: TransportKind::Tcp, .. } if client == "test"
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         told(&mut server).await,
         Told::Bound { client, service, port: bound, .. }
             if client == "test" && service == "echo" && bound == port
-    ));
-    assert!(matches!(told(&mut server).await, Told::Ended { client, .. } if client == "test"));
+    );
+    assert_matches!(told(&mut server).await, Told::Ended { client, .. } if client == "test");
     // The end says it for the session's services: no `Unbound` follows for each.
     assert!(server.events.try_recv().is_err());
     server.cancel.cancel();
@@ -516,16 +512,13 @@ async fn wrong_server_key_fails_before_any_control_message() {
     let Err(ClientError::NoTransport { quic, tcp }) = result else {
         panic!("{result:?}");
     };
-    assert!(
-        matches!(
-            *quic,
-            ClientError::Quic(QuicError::Connection(
-                quinn::ConnectionError::TransportError(_)
-            ))
-        ),
-        "{quic:?}"
+    assert_matches!(
+        *quic,
+        ClientError::Quic(QuicError::Connection(
+            quinn::ConnectionError::TransportError(_)
+        ))
     );
-    assert!(matches!(*tcp, ClientError::Transport(_)), "{tcp:?}");
+    assert_matches!(*tcp, ClientError::Transport(_));
     assert!(client.events.try_recv().is_err());
     server.cancel.cancel();
 }
@@ -533,12 +526,10 @@ async fn wrong_server_key_fails_before_any_control_message() {
 /// The client answered on this stream by resetting it with `code`.
 async fn expect_reset(r: &mut quinn::RecvStream, code: u32, what: &str) {
     let refusal = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(16)).await;
-    assert!(
-        matches!(
-            &refusal,
-            Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(got))))
-                if *got == quinn::VarInt::from_u32(code)
-        ),
+    assert_matches!(
+        &refusal,
+        Ok(Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(got))))
+            if *got == quinn::VarInt::from_u32(code),
         "client did not reset {what} with {code:#x}: {refusal:?}"
     );
 }
@@ -579,10 +570,10 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     let (send, recv) = conn.accept_bi().await.unwrap();
     let mut tx = FramedWrite::new(send, codec());
     let mut rx = FramedRead::new(recv, codec());
-    assert!(matches!(
+    assert_matches!(
         decode::<ClientMessage>(&rx.next().await.unwrap().unwrap()).unwrap(),
         ClientMessage::Hello { .. }
-    ));
+    );
     tx.send(
         encode(&ServerMessage::Welcome {
             agent: "rogue".into(),
@@ -592,10 +583,10 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
     )
     .await
     .unwrap();
-    assert!(matches!(
+    assert_matches!(
         decode::<ClientMessage>(&rx.next().await.unwrap().unwrap()).unwrap(),
         ClientMessage::Bind { .. }
-    ));
+    );
     tx.send(
         encode(&ServerMessage::Bound {
             service: "svc".into(),
@@ -824,10 +815,10 @@ async fn a_client_turned_away_at_the_greeting_closes_before_it_returns() {
     let conn = confused.accept().await.unwrap().await.unwrap();
     let (send, recv) = conn.accept_bi().await.unwrap();
     let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
-    assert!(matches!(
+    assert_matches!(
         control.next::<ClientMessage>().await,
         Some(ClientMessage::Hello { .. })
-    ));
+    );
     let no_greeting = ServerMessage::Pong { nonce: 0 };
     control.send(&no_greeting).await.unwrap();
 
@@ -835,19 +826,13 @@ async fn a_client_turned_away_at_the_greeting_closes_before_it_returns() {
     let closed = tokio::time::timeout(Duration::from_secs(5), conn.closed())
         .await
         .expect("the client closes within 5 s");
-    assert!(
-        matches!(
-            &closed,
-            quinn::ConnectionError::ApplicationClosed(end)
-                if end.error_code == quinn::VarInt::from_u32(close::SHUTDOWN)
-        ),
-        "{closed:?}"
+    assert_matches!(
+        &closed,
+        quinn::ConnectionError::ApplicationClosed(end)
+            if end.error_code == quinn::VarInt::from_u32(close::SHUTDOWN)
     );
     let result = left.join().unwrap();
-    assert!(
-        matches!(result, Err(ClientError::Protocol(_))),
-        "{result:?}"
-    );
+    assert_matches!(result, Err(ClientError::Protocol(_)));
 }
 
 #[tokio::test]
@@ -875,29 +860,29 @@ async fn a_server_that_goes_quiet_is_reported_at_the_deadline_and_not_a_tick_lat
     let transport = tcp::accept(socket, tls, Tuning::SERVER).await.unwrap();
     let (send, recv) = transport.accept_bi().await.unwrap();
     let mut control = Control::new(send, recv);
-    assert!(matches!(
+    assert_matches!(
         control.next::<ClientMessage>().await,
         Some(ClientMessage::Hello { .. })
-    ));
+    );
     let welcome = ServerMessage::Welcome {
         agent: "quiet".to_owned(),
         client_name: "test".to_owned(),
     };
     control.send(&welcome).await.unwrap();
-    assert!(matches!(
+    assert_matches!(
         next_event(&mut client.events).await,
         Event::Connected { .. }
-    ));
+    );
 
     // Out of step with the ping tick, as a server's last word is: the deadline then falls between
     // two ticks.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let ping = ServerMessage::Ping { nonce: 1 };
     control.send(&ping).await.unwrap();
-    assert!(matches!(
+    assert_matches!(
         control.next::<ClientMessage>().await,
         Some(ClientMessage::Pong { nonce: 1 })
-    ));
+    );
 
     // Paused only for the wait: a paused clock runs ahead of whatever is still on a real socket.
     tokio::time::pause();
@@ -908,10 +893,7 @@ async fn a_server_that_goes_quiet_is_reported_at_the_deadline_and_not_a_tick_lat
         .unwrap();
     let took = heard.elapsed();
     tokio::time::resume();
-    assert!(
-        matches!(result, Err(ClientError::Unresponsive)),
-        "{result:?}"
-    );
+    assert_matches!(result, Err(ClientError::Unresponsive));
     // The client heard that ping a moment before the clock stopped, and the tick after the
     // deadline is nearly 15 s past it.
     assert!(
@@ -1005,10 +987,7 @@ async fn a_second_session_for_the_same_key_supersedes_the_first(prefer: Prefer) 
         .await
         .expect("the first session ends within 10 s")
         .unwrap();
-    assert!(
-        matches!(outcome, Err(ClientError::Shutdown(_))),
-        "{outcome:?}"
-    );
+    assert_matches!(outcome, Err(ClientError::Shutdown(_)));
     second.cancel.cancel();
     server.cancel.cancel();
 }
@@ -1098,7 +1077,7 @@ async fn an_old_server_is_reported_as_a_version_mismatch_over_quic() {
         .await
         .expect("the dial ends within 5 s")
         .unwrap();
-    assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
+    assert_matches!(result, Err(ClientError::Version));
 }
 
 #[tokio::test]
@@ -1124,7 +1103,7 @@ async fn an_old_server_is_reported_as_a_version_mismatch_over_tcp() {
         .await
         .expect("the dial ends within 5 s")
         .unwrap();
-    assert!(matches!(result, Err(ClientError::Version)), "{result:?}");
+    assert_matches!(result, Err(ClientError::Version));
 }
 
 /// The TCP twin of `a_stream_for_an_unbound_service_never_dials_local`: a server driven by hand,
@@ -1165,10 +1144,10 @@ async fn a_refusal_carries_its_code_over_tcp() {
     );
     let (send, recv) = rogue.accept_bi().await.unwrap();
     let mut control = Control::new(send, recv);
-    assert!(matches!(
+    assert_matches!(
         control.next::<ClientMessage>().await,
         Some(ClientMessage::Hello { .. })
-    ));
+    );
     control
         .send(&ServerMessage::Welcome {
             agent: "rogue".into(),
@@ -1176,10 +1155,10 @@ async fn a_refusal_carries_its_code_over_tcp() {
         })
         .await
         .unwrap();
-    assert!(matches!(
+    assert_matches!(
         control.next::<ClientMessage>().await,
         Some(ClientMessage::Bind { .. })
-    ));
+    );
     control
         .send(&ServerMessage::Bound {
             service: "svc".into(),
@@ -1360,20 +1339,14 @@ async fn a_client_whose_control_stream_is_stalled_still_stops_when_told() {
     let (send, recv) = conn.accept_bi().await.unwrap();
     let mut control = Control::new(SendHalf::Quic(send), RecvHalf::Quic(recv));
     let hello = control.next::<ClientMessage>().await;
-    assert!(
-        matches!(hello, Some(ClientMessage::Hello { .. })),
-        "{hello:?}"
-    );
+    assert_matches!(hello, Some(ClientMessage::Hello { .. }));
     let welcome = ServerMessage::Welcome {
         agent: "stand-in".to_owned(),
         client_name: "test".to_owned(),
     };
     control.send(&welcome).await.unwrap();
     let connected = next_event(&mut client.events).await;
-    assert!(
-        matches!(connected, Event::Connected { .. }),
-        "{connected:?}"
-    );
+    assert_matches!(connected, Event::Connected { .. });
 
     // It reads nothing from here, and each ping has the client send a pong.
     for nonce in 0..2000 {

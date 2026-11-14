@@ -196,6 +196,7 @@ pub async fn keep(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -416,17 +417,14 @@ mod tests {
         let kept = tokio::spawn(keep(events, forward, showing, model));
         tx.send(connected()).await.unwrap();
         tx.send(bound("jellyfin", 8096)).await.unwrap();
-        assert!(matches!(
-            forwarded.recv().await,
-            Some(Event::Connected { .. })
-        ));
-        assert!(matches!(forwarded.recv().await, Some(Event::Bound { .. })));
+        assert_matches!(forwarded.recv().await, Some(Event::Connected { .. }));
+        assert_matches!(forwarded.recv().await, Some(Event::Bound { .. }));
         // Marks the model seen, so `changed` below waits for the reset.
-        assert!(matches!(modelled.borrow_and_update().link, Link::Up { .. }));
+        assert_matches!(modelled.borrow_and_update().link, Link::Up { .. });
 
         shown.send_modify(|shown| shown.traffic = Arc::new(Traffic::default()));
         modelled.changed().await.unwrap();
-        assert!(matches!(modelled.borrow().link, Link::Connecting));
+        assert_matches!(modelled.borrow().link, Link::Connecting);
 
         drop(tx);
         kept.await.unwrap();

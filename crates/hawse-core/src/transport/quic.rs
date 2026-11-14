@@ -221,6 +221,7 @@ mod tests {
     use crate::identity::Identity;
     use crate::tls;
     use hawse_proto::msg::ALPN;
+    use std::assert_matches;
     use tokio::time::timeout;
 
     fn server_endpoint(id: &Identity) -> Endpoint {
@@ -278,7 +279,7 @@ mod tests {
             incoming.await.is_err()
         });
         let err = connect(&client, addr).await.unwrap_err();
-        assert!(matches!(err, QuicError::Connection(_)), "{err:?}");
+        assert_matches!(err, QuicError::Connection(_));
         assert!(accept.await.unwrap());
     }
 
