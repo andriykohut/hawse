@@ -64,7 +64,9 @@ A server with no config yet runs on the defaults and reads
 `/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
 shows how it stands. `sudo hawse status` shows more: the clients and their
 ports, the services and their totals, and the keys that knocked. `--json`
-prints the same for scripts.
+prints the same for scripts. On most distributions the server also needs
+`net.core.rmem_max` raised, or its QUIC socket drops datagrams under load;
+[Configuration](/hawse/configuration/) has the line for `/etc/sysctl.d/`.
 
 On macOS it writes a LaunchAgent, which starts when you log in, so it runs as
 you, without sudo:
@@ -153,6 +155,9 @@ docker run -d --name hawse-server --network host --restart unless-stopped \
   -v /etc/hawse:/etc/hawse:ro -v hawse:/var/lib/hawse \
   ghcr.io/andriykohut/hawse:0.14.0 server
 ```
+
+With host networking the server gets the host's `net.core.rmem_max`, so raise
+it on the host as [Configuration](/hawse/configuration/) shows.
 
 The client needs host networking too when a `local` address points at the host.
 On a Compose network it can name other services instead, as in
