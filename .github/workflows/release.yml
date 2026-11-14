@@ -56,8 +56,11 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-about@0.9.2
+      # cross's own code does not build with the workflow's warnings denied.
       - if: runner.os == 'Linux'
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        env:
+          CARGO_BUILD_WARNINGS: warn
       - if: runner.os == 'Linux'
         run: cross build --release --target "$TARGET" -p hawse ${{ matrix.features }}
       - if: runner.os == 'macOS'
