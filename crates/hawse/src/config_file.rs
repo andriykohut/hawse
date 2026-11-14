@@ -185,7 +185,7 @@ mod tests {
     /// The help under the error `text` fails to load with as a config of `T`.
     fn help_for<T: DeserializeOwned>(text: &str) -> String {
         match parse::<T>(Path::new("x.toml"), text) {
-            Err(err) => err.help().map(|help| help.to_string()).unwrap_or_default(),
+            Err(err) => err.help().map_or_default(|help| help.to_string()),
             Ok(_) => panic!("{text} loaded"),
         }
     }

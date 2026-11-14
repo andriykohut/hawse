@@ -79,9 +79,7 @@ fn report(event: Event, cfg: &ClientConfig) -> bool {
             tracing::info!(%remote, %transport, name = %name, server = %agent, round_trip_ms, "connected");
         }
         Event::Bound { service, port } => {
-            let host = split_host_port(&cfg.server)
-                .map(|(host, _)| host)
-                .unwrap_or_default();
+            let host = split_host_port(&cfg.server).map_or_default(|(host, _)| host);
             let local = cfg.expose.get(&service).map_or("", |e| e.local.as_str());
             tracing::info!("{service}  {host}:{port} <- {local}");
         }

@@ -5,7 +5,7 @@ members = ["crates/hawse-proto", "crates/hawse-core", "crates/hawse"]
 [workspace.package]
 version = "0.13.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/andriykohut/hawse"
 

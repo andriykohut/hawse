@@ -403,9 +403,7 @@ pub fn frame(
     let again = style.accent(style.pick("↻", "~"));
     let moving = style.accent(style.pick("●", "*"));
     let idle = style.accent(style.pick("○", "o"));
-    let host = split_host_port(&cfg.server)
-        .map(|(host, _)| host)
-        .unwrap_or_default();
+    let host = split_host_port(&cfg.server).map_or_default(|(host, _)| host);
     let names = cfg.expose.keys().map(String::len).max().unwrap_or(0);
     let public = host.len()
         + 1
@@ -617,9 +615,7 @@ fn client_status_lines(
         Answer::Bound { port } => port.parse::<Port>().ok(),
         Answer::Pending | Answer::Refused { .. } => None,
     };
-    let host = split_host_port(&status.server)
-        .map(|(host, _)| host)
-        .unwrap_or_default();
+    let host = split_host_port(&status.server).map_or_default(|(host, _)| host);
     let services = &status.services;
     let widths = Widths {
         names: services.iter().map(|s| s.name.len()).max().unwrap_or(0),
@@ -754,9 +750,8 @@ fn server_status_lines(status: &ServerStatus, style: Style, room: usize) -> Vec<
                 }
             }
             Presence::NotConnected { last_s } => {
-                let seen = last_s
-                    .map(|last| format!(", last seen {} ago", span(secs(last))))
-                    .unwrap_or_default();
+                let seen =
+                    last_s.map_or_default(|last| format!(", last seen {} ago", span(secs(last))));
                 let mark = style.pick("○", "o");
                 let line = style.dim(&format!("{mark} {name:names$}  not connected{seen}"));
                 lines.push(fit(&[format!("  {line}")], room));
@@ -1335,7 +1330,7 @@ port = "51820/udp"
             accent: None,
             links: false,
         };
-        let ran = Duration::from_secs(3 * 86_400 + 4 * 3600 + 12 * 60);
+        let ran = Duration::from_hours(3 * 24 + 4) + Duration::from_mins(12);
         insta::assert_snapshot!(summary(ran, 2, &carried, style));
         let short = Duration::from_secs(30);
         let header = |reconnects| summary(short, reconnects, &BTreeMap::new(), style);
@@ -1458,7 +1453,7 @@ port = "51820/udp"
         let up = Link::Up {
             transport: TransportKind::Quic,
             round_trip: Duration::from_millis(24),
-            since: now - Duration::from_secs(2 * 3600 + 14 * 60),
+            since: now - Duration::from_hours(2) - Duration::from_mins(14),
         };
         let port = |number, kind| Port { number, kind };
         let bound = |number, kind, open, down, up| Row::Bound {
