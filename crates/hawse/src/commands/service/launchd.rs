@@ -105,6 +105,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_agent_is_a_plist_macos_reads() {
+        let _spawning = crate::tests::spawning();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.plist");
         std::fs::write(&path, plist(Role::Client, "/h", "/c", "/l")).unwrap();

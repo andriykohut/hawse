@@ -618,6 +618,7 @@ mod tests {
 
     #[test]
     fn a_release_replaces_the_binary_and_keeps_the_old_one() {
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
         let exe = bin.path().join("hawse");
@@ -644,6 +645,7 @@ mod tests {
 
     #[test]
     fn a_bad_checksum_replaces_nothing_and_leaves_nothing() {
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
         let sums = root.path().join("releases/download/v9.9.9/SHA256SUMS");
@@ -662,6 +664,7 @@ mod tests {
 
     #[test]
     fn a_binary_that_does_not_run_replaces_nothing() {
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\nexit 1\n");
         let exe = bin.path().join("hawse");
@@ -675,6 +678,7 @@ mod tests {
 
     #[test]
     fn the_kept_binary_replaces_a_link_rather_than_writing_through_it() {
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
         let exe = bin.path().join("hawse");
@@ -695,6 +699,7 @@ mod tests {
     #[test]
     fn the_new_binary_keeps_the_old_ones_owner_and_mode() {
         use std::os::unix::fs::PermissionsExt as _;
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
         let exe = bin.path().join("hawse");
@@ -764,6 +769,7 @@ mod tests {
 
     #[test]
     fn an_upgrade_already_staging_is_left_to_finish() {
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
         let other = bin.path().join(".hawse-upgrade");
@@ -811,6 +817,7 @@ mod tests {
 
     #[test]
     fn a_missing_archive_is_a_failed_download() {
+        let _spawning = crate::tests::spawning();
         let (root, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let base = release(root.path(), "9.9.9", "#!/bin/sh\necho 'hawse 9.9.9'\n");
         let name = format!("hawse-9.9.9-{}.tar.gz", target().unwrap());
