@@ -121,17 +121,21 @@ pub fn listen(
 /// most `net.core.rmem_max`.
 const RECEIVE_BUFFER: usize = 7 * 1024 * 1024;
 
-/// Binds a UDP socket at `addr` that asks for [`RECEIVE_BUFFER`]. A buffer the kernel caps or
+/// Binds a UDP socket at `addr` that asks for [`RECEIVE_BUFFER`] when its buffer is smaller. A
+/// larger one, as a raised `net.core.rmem_default` gives, is kept. A buffer the kernel caps or
 /// refuses is logged and the socket kept, since a smaller buffer costs drops and nothing else.
 fn bind(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     let socket = std::net::UdpSocket::bind(addr)?;
     let sized = socket2::SockRef::from(&socket);
     // Linux reports twice what it was asked for, so a grant up to the limit still reads as at
     // least `RECEIVE_BUFFER`.
-    match sized
-        .set_recv_buffer_size(RECEIVE_BUFFER)
-        .and_then(|()| sized.recv_buffer_size())
-    {
+    let granted = match sized.recv_buffer_size() {
+        Ok(now) if now >= RECEIVE_BUFFER => Ok(now),
+        _ => sized
+            .set_recv_buffer_size(RECEIVE_BUFFER)
+            .and_then(|()| sized.recv_buffer_size()),
+    };
+    match granted {
         Ok(granted) if granted < RECEIVE_BUFFER => tracing::warn!(
             granted,
             wanted = RECEIVE_BUFFER,
@@ -320,17 +324,18 @@ mod tests {
         assert!(accept.await.unwrap());
     }
 
+    /// A default at or above `RECEIVE_BUFFER` needs a raised `net.core.rmem_default`, so a host
+    /// left at its defaults checks only the growing half.
     #[test]
-    fn the_server_socket_buffers_more_than_the_default() {
+    fn the_server_socket_grows_a_small_buffer_and_keeps_a_large_one() {
         let size = |s: &std::net::UdpSocket| socket2::SockRef::from(s).recv_buffer_size().unwrap();
-        let plain = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sized = bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        assert!(
-            size(&sized) > size(&plain),
-            "{} vs {}",
-            size(&sized),
-            size(&plain)
-        );
+        let default = size(&std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+        let sized = size(&bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        if default < RECEIVE_BUFFER {
+            assert!(sized > default, "{sized} vs {default}");
+        } else {
+            assert_eq!(sized, default);
+        }
     }
 
     #[tokio::test]

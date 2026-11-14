@@ -214,5 +214,6 @@ at most `net.core.rmem_max`, 208 KiB on most distributions, and the server
 logs a warning when the buffer is capped: at that size a client's bursts
 overflow it and the kernel drops what does not fit
 ([Measurements](/hawse/measurements/)). `sysctl -w net.core.rmem_max=7500000`
-raises the limit, and the same line in a file under `/etc/sysctl.d/` keeps it
-across reboots.
+raises the limit, and `net.core.rmem_max = 7500000` in a file under
+`/etc/sysctl.d/` keeps it across reboots. A buffer already larger, from a raised
+`net.core.rmem_default`, is left as it is.
