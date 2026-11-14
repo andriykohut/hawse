@@ -251,7 +251,7 @@ fn output(command: &mut Command) -> Option<String> {
     let out = command.output().ok()?;
     out.status
         .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        .then(|| String::from_utf8_lossy_owned(out.stdout))
 }
 
 /// Where [`replace`] keeps the binary at `exe` that it replaces: beside it, `.old` after its name.
@@ -470,7 +470,7 @@ fn replace(
             .wrap_err_with(|| format!("cannot read {}", path.display()))
     };
     let got = hex(&hawse_core::tls::sha256(&read(&archive)?));
-    let sums = String::from_utf8_lossy(&read(&sums)?).into_owned();
+    let sums = String::from_utf8_lossy_owned(read(&sums)?);
     if sum(&sums, &format!("{name}.tar.gz")) != Some(got.as_str()) {
         miette::bail!("{name}.tar.gz does not match the release's SHA256SUMS");
     }
@@ -501,7 +501,7 @@ fn replace(
         .into_iter()
         .map(|role| {
             let unit = unpacked.join(format!("contrib/hawse-{}.service", role.name()));
-            Ok((role, String::from_utf8_lossy(&read(&unit)?).into_owned()))
+            Ok((role, String::from_utf8_lossy_owned(read(&unit)?)))
         })
         .collect::<miette::Result<Vec<_>>>()?;
     swap(exe, &new, &stage.0)?;

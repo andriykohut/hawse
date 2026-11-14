@@ -734,7 +734,7 @@ fn server_status_lines(status: &ServerStatus, style: Style, room: usize) -> Vec<
                 );
                 fields.extend(up_s.map(|up| format!("  {}  up {}", dot(), span(secs(up)))));
                 fields.extend(agent.as_deref().map(|agent| {
-                    let version = agent.strip_prefix("hawse/").unwrap_or(agent);
+                    let version = agent.trim_prefix("hawse/");
                     format!("  {}  {version}", dot())
                 }));
                 lines.push(fit(&fields, room));
