@@ -33,6 +33,12 @@ With `prefer = "tcp"`, traffic from visitor to service shares one yamux stream
 and tops out between 40 and 65 Mbit/s, dropping the rest; from service to
 visitor it lost under 2.5% at every rate.
 
+## The server's receive buffer
+
+With the kernel's default 208 KiB receive buffer, the Hetzner server's QUIC
+socket dropped 281,171 datagrams in three and a half days of one client's
+everyday traffic, about 79,000 a day; the client's socket dropped none.
+
 ## The fallback delay
 
 `transport.prefer = "auto"` gives QUIC 2 seconds before it dials the TCP
