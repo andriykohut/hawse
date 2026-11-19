@@ -110,13 +110,20 @@ pub async fn run(
         let (keeper, kept) = watch::channel(Keeper::default());
         tokio::spawn(status::server::keep(server.events(), keeper));
         let (policy, sessions) = (server.policy(), server.sessions());
-        let (tcp, started) = (cfg.transport.tcp_fallback, Instant::now());
+        let (tcp, buffer) = (cfg.transport.tcp_fallback, server.receive_buffer());
+        let started = Instant::now();
         tokio::spawn(bound.serve(move || {
             let live = sessions.live();
             let up = started.elapsed();
-            let reply =
-                kept.borrow()
-                    .snapshot(&policy.borrow(), &live, addr, tcp, up, Instant::now());
+            let reply = kept.borrow().snapshot(
+                &policy.borrow(),
+                &live,
+                addr,
+                tcp,
+                buffer,
+                up,
+                Instant::now(),
+            );
             Status::Server(reply)
         }))
     });

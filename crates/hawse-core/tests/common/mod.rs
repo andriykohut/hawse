@@ -55,7 +55,7 @@ pub async fn quic_pair() -> Pair {
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
     let (cert, key) = server_id.certificate().unwrap();
-    let server_endpoint = quic::listen(
+    let (server_endpoint, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         tls::server_config(cert, key, tls::provider()).unwrap(),
         Tuning::SERVER,

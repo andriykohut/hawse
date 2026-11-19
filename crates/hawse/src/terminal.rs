@@ -10,6 +10,7 @@ use hawse_core::config::{ClientConfig, split_host_port};
 use hawse_core::server;
 use hawse_core::traffic::Counts;
 use hawse_core::transport::TransportKind;
+use hawse_core::transport::quic::RECEIVE_BUFFER;
 use hawse_proto::key::PublicKey;
 use hawse_proto::msg::BindFailure;
 use hawse_proto::port::{Kind, Port, PortRequest};
@@ -679,6 +680,10 @@ fn client_status_lines(
 
 /// A server's status in `room` columns: its header, a line for each client, with the services a
 /// connected one has bound under it, and a line for each unknown key.
+/// What a server's status says when its QUIC receive buffer is short of what it asks for. The
+/// buffer is sized once, when the socket is bound, so a raised limit takes a restart.
+const CAPPED: &str = "the QUIC receive buffer is capped: raise net.core.rmem_max and restart";
+
 fn server_status_lines(status: &ServerStatus, style: Style, room: usize) -> Vec<String> {
     let dot = || style.dim(style.pick("·", "|"));
     let no = style.red(style.pick("✗", "x"));
@@ -710,6 +715,11 @@ fn server_status_lines(status: &ServerStatus, style: Style, room: usize) -> Vec<
         format!("  {}  {}", dot(), status.version),
     ];
     let mut lines = vec![fit(&header, room)];
+    if let Some(b) = status.receive_buffer
+        && b < RECEIVE_BUFFER as u64
+    {
+        lines.push(fit(&[format!("  {no} {CAPPED}")], room));
+    }
 
     if !clients.is_empty() {
         lines.push(String::new());
@@ -1701,6 +1711,7 @@ port = "51820/udp"
             version: "0.11.0".to_owned(),
             listen: "0.0.0.0:4433".to_owned(),
             tcp_fallback: false,
+            receive_buffer: Some(14_680_064),
             up_s: (3 * 24 + 4) * 3600,
             clients,
             unknown_keys: vec![Knock {
@@ -1802,6 +1813,22 @@ port = "51820/udp"
         let out = drawn(&server_status(vec![nas]), uncoloured(true), 0);
         assert!(out.contains("jellyfin  127.0.0.1:8096\n"), "{out}");
         assert!(out.contains("wg        [::1]:51820/udp\n"), "{out}");
+    }
+
+    #[test]
+    fn a_server_with_a_capped_receive_buffer_says_how_to_lift_it() {
+        let Status::Server(mut status) = server_status(vec![nas_connected()]) else {
+            unreachable!()
+        };
+        status.receive_buffer = Some(425_984);
+        let capped = Status::Server(status.clone());
+        insta::assert_snapshot!(drawn(&capped, uncoloured(true), 0));
+        let lines = status_lines(&capped, None, coloured(), 0);
+        assert!(lines[1].contains("\x1b[31m"), "{lines:?}");
+
+        status.receive_buffer = None;
+        let out = drawn(&Status::Server(status), uncoloured(true), 0);
+        assert!(!out.contains("rmem_max"), "{out}");
     }
 
     #[test]

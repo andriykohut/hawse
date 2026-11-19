@@ -204,7 +204,7 @@ async fn an_answer_to_a_bind_a_reload_has_replaced_binds_nothing() {
 
     let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
     let (cert, key) = server_id.certificate().unwrap();
-    let slow = quic::listen(
+    let (slow, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         tls::server_config(cert, key, tls::provider()).unwrap(),
         Tuning::SERVER,

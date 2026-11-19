@@ -76,6 +76,9 @@ pub struct ServerStatus {
     pub version: String,
     pub listen: String,
     pub tcp_fallback: bool,
+    /// The QUIC socket's receive buffer in bytes, as the kernel reports it; absent when the server
+    /// could not size it.
+    pub receive_buffer: Option<u64>,
     pub up_s: u64,
     pub clients: Vec<ClientEntry>,
     pub unknown_keys: Vec<Knock>,

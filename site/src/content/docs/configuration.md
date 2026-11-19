@@ -216,4 +216,7 @@ overflow it and the kernel drops what does not fit
 ([Measurements](/hawse/measurements/)). `sysctl -w net.core.rmem_max=7500000`
 raises the limit, and `net.core.rmem_max = 7500000` in a file under
 `/etc/sysctl.d/` keeps it across reboots. A buffer already larger, from a raised
-`net.core.rmem_default`, is left as it is.
+`net.core.rmem_default`, is left as it is. `hawse check` and `hawse service
+install server` say when the limit would cap it, and `hawse status` when it
+did. The server sizes the buffer as it starts, so a raised limit takes a
+restart.
