@@ -38,6 +38,10 @@ visitor it lost under 2.5% at every rate.
 With the kernel's default 208 KiB receive buffer, the Hetzner server's QUIC
 socket dropped 281,171 datagrams in three and a half days of one client's
 everyday traffic, about 79,000 a day; the client's socket dropped none.
+Asking for 7 MiB, the same socket dropped none in almost five days of the same
+client's traffic, which included streaming video at about 2.4 Mbit/s. The
+earlier window's traffic was not recorded, so the two are not a like-for-like
+comparison.
 
 ## The fallback delay
 
