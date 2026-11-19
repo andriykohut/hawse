@@ -75,15 +75,19 @@ impl<'de> Deserialize<'de> for ByteSize {
 pub mod duration {
     use std::time::Duration;
 
-    use serde::{Deserialize, Deserializer, Serializer};
+    use jiff::fmt::friendly::SpanParser;
+    use serde::{Deserialize, Deserializer};
 
-    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&humantime::format_duration(*d).to_string())
-    }
-
+    /// Reads a duration such as `30s`, `1m 30s` or `2 hours`, in units up to hours.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         let text = String::deserialize(d)?;
-        humantime::parse_duration(&text).map_err(serde::de::Error::custom)
+        SpanParser::new()
+            .parse_unsigned_duration(text.trim())
+            .map_err(|_| {
+                serde::de::Error::custom(format!(
+                    "`{text}` is not a duration like 30s, 1m 30s or 2h"
+                ))
+            })
     }
 }
 
@@ -121,15 +125,34 @@ mod tests {
         assert_eq!(t.b, ByteSize(4096));
     }
 
+    #[derive(Debug, serde::Deserialize)]
+    struct Timeout {
+        #[serde(with = "duration")]
+        d: std::time::Duration,
+    }
+
+    fn timeout(text: &str) -> Result<std::time::Duration, String> {
+        toml::from_str::<Timeout>(&format!("d = {text:?}"))
+            .map(|t| t.d)
+            .map_err(|err| err.message().to_owned())
+    }
+
     #[test]
-    fn duration_serde_uses_humantime() {
-        #[derive(serde::Deserialize)]
-        struct T {
-            #[serde(with = "duration")]
-            d: std::time::Duration,
+    fn duration_serde_reads_units_up_to_hours() {
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(timeout("30s"), Ok(secs(30)));
+        assert_eq!(timeout("1m 30s"), Ok(secs(90)));
+        assert_eq!(timeout("2 hours"), Ok(secs(7200)));
+        assert_eq!(timeout(" 30s "), Ok(secs(30)));
+    }
+
+    #[test]
+    fn duration_serde_refuses_what_is_not_a_duration_up_to_hours() {
+        for text in ["soon", "30", "-30s", "1d"] {
+            assert_eq!(
+                timeout(text),
+                Err(format!("`{text}` is not a duration like 30s, 1m 30s or 2h")),
+            );
         }
-        let t: T = toml::from_str("d = \"1m 30s\"").unwrap();
-        assert_eq!(t.d, std::time::Duration::from_secs(90));
-        assert!(toml::from_str::<T>("d = \"soon\"").is_err());
     }
 }
