@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use hawse_core::client::Client;
 use hawse_core::identity::Identity;
+use hawse_core::transport::quic;
 use miette::{IntoDiagnostic as _, WrapErr as _};
 
 use crate::config_file::{self, LoadError};
@@ -18,6 +19,21 @@ pub(crate) fn load_key(path: &Path) -> miette::Result<Option<Identity>> {
         .and_then(|pem| Identity::from_pem(&pem).into_diagnostic())
         .map(Some)
         .wrap_err_with(|| format!("cannot load the key at {}", path.display()))
+}
+
+/// What to tell an operator whose server would get a QUIC receive buffer short of what it asks
+/// for, or `None` when this host grants it or the probe fails.
+pub(crate) fn receive_buffer_hint() -> Option<&'static str> {
+    quic::receive_buffer().ok().and_then(buffer_hint)
+}
+
+fn buffer_hint(granted: usize) -> Option<&'static str> {
+    (granted < quic::RECEIVE_BUFFER).then_some(
+        "net.core.rmem_max holds the server's QUIC socket below the receive buffer it asks for, \
+         so it drops datagrams under load: `sysctl -w net.core.rmem_max=7500000` raises the \
+         limit, `net.core.rmem_max = 7500000` in a file under /etc/sysctl.d/ keeps it across \
+         reboots, and the server takes it when it restarts",
+    )
 }
 
 pub async fn run(config: Option<PathBuf>, connect: bool) -> miette::Result<()> {
@@ -46,6 +62,12 @@ pub async fn run(config: Option<PathBuf>, connect: bool) -> miette::Result<()> {
                 "valid {name} config; its key is not there yet, and the first start creates it"
             );
         }
+        if let Some(hint) = matches!(role, Role::Server)
+            .then(receive_buffer_hint)
+            .flatten()
+        {
+            tracing::warn!("{hint}");
+        }
         if let Some(cfg) = cfg {
             client = Some((cfg, identity, key_path));
         }
@@ -70,4 +92,23 @@ pub async fn run(config: Option<PathBuf>, connect: bool) -> miette::Result<()> {
         .wrap_err_with(|| format!("cannot connect to {server}"))?;
     tracing::info!(%remote, %transport, "the server answered, and its key is the config's `server_key`");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use hawse_core::transport::quic::RECEIVE_BUFFER;
+
+    use super::buffer_hint;
+
+    #[test]
+    fn a_capped_buffer_gets_the_lines_that_lift_the_cap() {
+        assert_eq!(buffer_hint(RECEIVE_BUFFER), None);
+        assert_eq!(buffer_hint(2 * RECEIVE_BUFFER), None);
+        let hint = buffer_hint(RECEIVE_BUFFER - 1).unwrap();
+        assert!(
+            hint.contains("sysctl -w net.core.rmem_max=7500000"),
+            "{hint}"
+        );
+        assert!(hint.contains("/etc/sysctl.d/"), "{hint}");
+    }
 }

@@ -230,6 +230,7 @@ pub enum ServerError {
 
 pub struct Server {
     endpoint: Endpoint,
+    receive_buffer: Option<usize>,
     tcp: Option<TcpListener>,
     tls: Arc<rustls::ServerConfig>,
     tuning: Tuning,
@@ -257,7 +258,7 @@ impl Server {
         // stream a peer may open as soon as its Initial arrives, so allowing more would cost every
         // handshake memory in proportion, a forged source's included. The TCP fallback keeps
         // `tuning`: yamux has one stream limit for both directions, and the server opens many.
-        let endpoint = quic::listen(
+        let (endpoint, receive_buffer) = quic::listen(
             cfg.listen,
             tls::server_config(cert.clone(), key.clone_key(), tls::provider())?,
             Tuning {
@@ -297,6 +298,7 @@ impl Server {
         });
         Ok(Self {
             endpoint,
+            receive_buffer,
             tcp,
             tls,
             tuning,
@@ -310,6 +312,12 @@ impl Server {
         self.endpoint
             .local_addr()
             .expect("a bound endpoint has an address")
+    }
+
+    /// The QUIC socket's receive buffer as the kernel reports it, or `None` when it could not be
+    /// sized. Short of [`quic::RECEIVE_BUFFER`] when `net.core.rmem_max` capped it at the start.
+    pub fn receive_buffer(&self) -> Option<usize> {
+        self.receive_buffer
     }
 
     /// Where a reload sends the `[clients.*]` it read. A session whose key is gone from them ends

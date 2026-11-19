@@ -547,7 +547,7 @@ async fn a_stream_for_an_unbound_service_never_dials_local() {
 
     let (server_id, client_id) = ids();
     let (cert, key) = server_id.certificate().unwrap();
-    let rogue = quic::listen(
+    let (rogue, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         tls::server_config(cert, key, tls::provider()).unwrap(),
         Tuning::SERVER,
@@ -741,7 +741,7 @@ async fn a_client_cancelled_mid_greeting_announces_no_retry() {
     let (cert, key) = server_id.certificate().unwrap();
     // Takes the connection and never answers the `Hello`, so the session is still waiting for its
     // `Welcome` when `cancel` fires and fails only afterwards, once the connection closes.
-    let silent = quic::listen(
+    let (silent, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         tls::server_config(cert, key, tls::provider()).unwrap(),
         Tuning::SERVER,
@@ -791,7 +791,7 @@ async fn a_client_turned_away_at_the_greeting_closes_before_it_returns() {
 
     let (server_id, client_id) = ids();
     let (cert, key) = server_id.certificate().unwrap();
-    let confused = quic::listen(
+    let (confused, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         tls::server_config(cert, key, tls::provider()).unwrap(),
         Tuning::SERVER,
@@ -1055,7 +1055,7 @@ async fn an_old_server_is_reported_as_a_version_mismatch_over_quic() {
     use hawse_core::transport::quic::{self, Tuning};
 
     let (server_id, client_id) = ids();
-    let old = quic::listen(
+    let (old, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         old_server_tls(&server_id),
         Tuning::SERVER,
@@ -1323,7 +1323,7 @@ async fn a_client_whose_control_stream_is_stalled_still_stops_when_told() {
         stream_window: 4096,
         ..Tuning::SERVER
     };
-    let endpoint = quic::listen(
+    let (endpoint, _) = quic::listen(
         "127.0.0.1:0".parse().unwrap(),
         tls::server_config(cert, key, tls::provider()).unwrap(),
         tuning,

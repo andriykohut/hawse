@@ -109,12 +109,17 @@ impl Keeper {
     /// connected exactly when its key is among the `live` sessions. A live session this keeper
     /// did not see connect, which its record's address tells apart from the session before it,
     /// has the live remote and no details.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is one fact of the reply, and a struct for the one caller would only rename them"
+    )]
     pub fn snapshot(
         &self,
         policy: &Policy,
         live: &[(PublicKey, SocketAddr)],
         listen: SocketAddr,
         tcp_fallback: bool,
+        receive_buffer: Option<usize>,
         up: Duration,
         now: Instant,
     ) -> ServerStatus {
@@ -162,6 +167,7 @@ impl Keeper {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             listen: listen.to_string(),
             tcp_fallback,
+            receive_buffer: receive_buffer.and_then(|bytes| u64::try_from(bytes).ok()),
             up_s: up.as_secs(),
             clients,
             unknown_keys: self
@@ -277,7 +283,15 @@ mod tests {
         live: &[(PublicKey, SocketAddr)],
         now: Instant,
     ) -> ServerStatus {
-        keeper.snapshot(policy, live, addr("[::]:4433"), true, Duration::ZERO, now)
+        keeper.snapshot(
+            policy,
+            live,
+            addr("[::]:4433"),
+            true,
+            Some(425_984),
+            Duration::ZERO,
+            now,
+        )
     }
 
     #[test]
@@ -293,6 +307,7 @@ mod tests {
             &live,
             addr("[::]:4433"),
             true,
+            Some(14_680_064),
             secs(9000),
             t0 + secs(7800),
         );
@@ -307,6 +322,7 @@ mod tests {
                 version: env!("CARGO_PKG_VERSION").into(),
                 listen: "[::]:4433".into(),
                 tcp_fallback: true,
+                receive_buffer: Some(14_680_064),
                 up_s: 9000,
                 clients: vec![
                     ClientEntry {
@@ -441,6 +457,7 @@ mod tests {
         let text = serde_json::to_string(&status).unwrap();
         assert_eq!(serde_json::from_str::<Status>(&text).unwrap(), status);
         assert!(text.contains(r#""role":"server""#), "{text}");
+        assert!(text.contains(r#""receive_buffer":425984"#), "{text}");
         assert!(text.contains(r#""state":"connected""#), "{text}");
         assert!(text.contains(r#""state":"not_connected""#), "{text}");
     }

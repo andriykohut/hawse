@@ -88,22 +88,26 @@ fn transport_config(t: Tuning) -> Result<TransportConfig, QuicError> {
 /// An unspecified IPv6 address the host cannot bind falls back to `0.0.0.0` on the same port,
 /// except when something already holds the port: IPv4 alone would answer only part of the peers,
 /// so that is a bind error.
+///
+/// Returns the endpoint and its socket's receive buffer as the kernel reports it, or `None` when
+/// the buffer could not be sized.
 pub fn listen(
     addr: SocketAddr,
     tls: rustls::ServerConfig,
     tuning: Tuning,
-) -> Result<Endpoint, QuicError> {
+) -> Result<(Endpoint, Option<usize>), QuicError> {
     let crypto = QuicServerConfig::try_from(tls)?;
     let mut cfg = ServerConfig::with_crypto(Arc::new(crypto));
     cfg.transport_config(Arc::new(transport_config(tuning)?));
-    let server = |addr: SocketAddr| -> std::io::Result<Endpoint> {
-        let socket = bind(addr)?;
-        Endpoint::new(
+    let server = |addr: SocketAddr| -> std::io::Result<(Endpoint, Option<usize>)> {
+        let (socket, granted) = bind(addr)?;
+        let endpoint = Endpoint::new(
             EndpointConfig::default(),
             Some(cfg.clone()),
             socket,
             Arc::new(TokioRuntime),
-        )
+        )?;
+        Ok((endpoint, granted))
     };
     match server(addr) {
         Ok(endpoint) => Ok(endpoint),
@@ -119,32 +123,51 @@ pub fn listen(
 /// What the server asks the kernel to buffer for its QUIC socket. The usual Linux default,
 /// 208 KiB, overflows under a client's bursts and the kernel drops the rest (#46). Linux grants at
 /// most `net.core.rmem_max`.
-const RECEIVE_BUFFER: usize = 7 * 1024 * 1024;
+pub const RECEIVE_BUFFER: usize = 7 * 1024 * 1024;
 
-/// Binds a UDP socket at `addr` that asks for [`RECEIVE_BUFFER`] when its buffer is smaller. A
-/// larger one, as a raised `net.core.rmem_default` gives, is kept. A buffer the kernel caps or
-/// refuses is logged and the socket kept, since a smaller buffer costs drops and nothing else.
-fn bind(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
-    let socket = std::net::UdpSocket::bind(addr)?;
-    let sized = socket2::SockRef::from(&socket);
+/// The receive buffer the server's QUIC socket gets on this host, as the kernel reports it, found
+/// by sizing a loopback socket bound for the purpose as [`listen`] sizes its own. Short of
+/// [`RECEIVE_BUFFER`] when `net.core.rmem_max` caps it.
+pub fn receive_buffer() -> std::io::Result<usize> {
+    grow(&std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?)
+}
+
+/// Asks for [`RECEIVE_BUFFER`] when `socket`'s buffer is smaller, and returns the size the kernel
+/// reports after. A larger one, as a raised `net.core.rmem_default` gives, is kept.
+fn grow(socket: &std::net::UdpSocket) -> std::io::Result<usize> {
+    let sized = socket2::SockRef::from(socket);
     // Linux reports twice what it was asked for, so a grant up to the limit still reads as at
     // least `RECEIVE_BUFFER`.
-    let granted = match sized.recv_buffer_size() {
+    match sized.recv_buffer_size() {
         Ok(now) if now >= RECEIVE_BUFFER => Ok(now),
         _ => sized
             .set_recv_buffer_size(RECEIVE_BUFFER)
             .and_then(|()| sized.recv_buffer_size()),
-    };
-    match granted {
-        Ok(granted) if granted < RECEIVE_BUFFER => tracing::warn!(
-            granted,
-            wanted = RECEIVE_BUFFER,
-            "the QUIC socket's receive buffer is capped; raise net.core.rmem_max"
-        ),
-        Ok(_) => {}
-        Err(err) => tracing::warn!(%err, "cannot size the QUIC socket's receive buffer"),
     }
-    Ok(socket)
+}
+
+/// Binds a UDP socket at `addr` and [`grow`]s its buffer, returning the socket and the size the
+/// kernel reports, or `None` when it could not be sized. A buffer the kernel caps or refuses is
+/// logged and the socket kept, since a smaller buffer costs drops and nothing else.
+fn bind(addr: SocketAddr) -> std::io::Result<(std::net::UdpSocket, Option<usize>)> {
+    let socket = std::net::UdpSocket::bind(addr)?;
+    let granted = match grow(&socket) {
+        Ok(granted) => {
+            if granted < RECEIVE_BUFFER {
+                tracing::warn!(
+                    granted,
+                    wanted = RECEIVE_BUFFER,
+                    "the QUIC socket's receive buffer is capped; raise net.core.rmem_max"
+                );
+            }
+            Some(granted)
+        }
+        Err(err) => {
+            tracing::warn!(%err, "cannot size the QUIC socket's receive buffer");
+            None
+        }
+    };
+    Ok((socket, granted))
 }
 
 pub fn dialer(
@@ -268,7 +291,9 @@ mod tests {
     fn server_endpoint(id: &Identity) -> Endpoint {
         let (cert, key) = id.certificate().unwrap();
         let cfg = tls::server_config(cert, key, tls::provider()).unwrap();
-        listen("127.0.0.1:0".parse().unwrap(), cfg, Tuning::SERVER).unwrap()
+        listen("127.0.0.1:0".parse().unwrap(), cfg, Tuning::SERVER)
+            .unwrap()
+            .0
     }
 
     fn client_endpoint(id: &Identity, pinned: PublicKey, remote: SocketAddr) -> Endpoint {
@@ -330,7 +355,7 @@ mod tests {
     fn the_server_socket_grows_a_small_buffer_and_keeps_a_large_one() {
         let size = |s: &std::net::UdpSocket| socket2::SockRef::from(s).recv_buffer_size().unwrap();
         let default = size(&std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
-        let sized = size(&bind("127.0.0.1:0".parse().unwrap()).unwrap());
+        let sized = size(&bind("127.0.0.1:0".parse().unwrap()).unwrap().0);
         if default < RECEIVE_BUFFER {
             assert!(sized > default, "{sized} vs {default}");
         } else {
@@ -338,12 +363,26 @@ mod tests {
         }
     }
 
+    /// What `hawse check` and `hawse service install` tell an operator is what the server's
+    /// listener then gets.
+    #[tokio::test]
+    async fn the_probe_finds_the_buffer_a_listener_gets() {
+        let id = Identity::generate().unwrap();
+        let (cert, key) = id.certificate().unwrap();
+        let cfg = tls::server_config(cert, key, tls::provider()).unwrap();
+        let (_endpoint, granted) =
+            listen("127.0.0.1:0".parse().unwrap(), cfg, Tuning::SERVER).unwrap();
+        assert_eq!(granted, Some(receive_buffer().unwrap()));
+    }
+
     #[tokio::test]
     async fn unspecified_v6_listen_falls_back_to_v4_when_needed() {
         let id = Identity::generate().unwrap();
         let (cert, key) = id.certificate().unwrap();
         let cfg = tls::server_config(cert, key, tls::provider()).unwrap();
-        let endpoint = listen("[::]:0".parse().unwrap(), cfg, Tuning::SERVER).unwrap();
+        let endpoint = listen("[::]:0".parse().unwrap(), cfg, Tuning::SERVER)
+            .unwrap()
+            .0;
         assert!(endpoint.local_addr().unwrap().ip().is_unspecified());
     }
 

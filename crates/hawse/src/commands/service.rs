@@ -167,6 +167,12 @@ fn install_unit(
     for line in report(role, &file, &identity.public_key(), created, &how) {
         println!("{line}");
     }
+    if let Some(hint) = matches!(role, Role::Server)
+        .then(super::check::receive_buffer_hint)
+        .flatten()
+    {
+        println!("{hint}");
+    }
     Ok(())
 }
 
