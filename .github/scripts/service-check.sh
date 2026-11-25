@@ -5,8 +5,14 @@ set -euo pipefail
 bin=/usr/local/sbin/hawse
 me=$(id -un)
 sudo install -D -m755 target/debug/hawse "$bin"
+# A key left in /var/lib/hawse, which both units shared before #148, is refused; moved where the
+# refusal says, it stays the server's identity.
+old_key=$(sudo "$bin" -q keygen --out /var/lib/hawse/server.key)
+if refusal=$(sudo "$bin" service install server 2>&1); then exit 1; fi
+grep -qF /var/lib/hawse-server/ <<<"$refusal"
+sudo mkdir -p /var/lib/hawse-server && sudo mv /var/lib/hawse/server.key /var/lib/hawse-server/
 server_key=$(sudo "$bin" service install server | sed -n 's/^server key: //p')
-test -n "$server_key"
+test "$server_key" = "$old_key"
 # hawse upgrade finds the binary a unit runs as systemd reports it.
 systemctl show -p ExecStart --value hawse-server | grep -q "path=$bin "
 # A second install is how a unit is upgraded.
@@ -27,5 +33,5 @@ sudo "$bin" service uninstall client
 sudo "$bin" service uninstall server
 test ! -e /etc/systemd/system/hawse-client.service
 test ! -e /etc/systemd/system/hawse-server.service
-sudo test -f /var/lib/hawse/server.key
+sudo test -f /var/lib/hawse-server/server.key
 test -f /srv/hawse/client.key

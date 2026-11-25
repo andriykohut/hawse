@@ -9,9 +9,10 @@ default), falling back to `/etc/hawse/` when the file is not there. `--config
 PATH` and the `HAWSE_CONFIG` environment variable override the location.
 Relative key paths resolve against the directory containing the config file.
 A config that sets no `key` uses `server.key` or `client.key` beside it when
-that file is there. Otherwise the key goes in `$STATE_DIRECTORY`, which a
-systemd unit sets to `/var/lib/hawse/`, then in `/var/lib/hawse/` if running as
-root, and beside the config otherwise.
+that file is there, then, for a systemd unit or root, one in `/var/lib/hawse/`,
+where units once kept it. Otherwise the key goes in `$STATE_DIRECTORY`, which a
+systemd unit sets to `/var/lib/hawse-server/` or `/var/lib/hawse-client/`, then
+in that same directory if running as root, and beside the config otherwise.
 
 Server settings and their defaults:
 

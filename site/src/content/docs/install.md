@@ -59,7 +59,7 @@ sudo hawse service install client
 A client's config is the one `sudo hawse join` writes to `/etc/hawse`; run
 without sudo, `join` writes to your own config directory, which the unit does not
 read. The unit runs under a throwaway account that keeps its key in
-`/var/lib/hawse`.
+`/var/lib/hawse-server` or `/var/lib/hawse-client`.
 A server with no config yet runs on the defaults and reads
 `/etc/hawse/server.toml` once it is written. `systemctl status hawse-server`
 shows how it stands. `sudo hawse status` shows more: the clients and their
@@ -103,9 +103,6 @@ unit with it; a POSTINIT init script that runs the same command puts it back.
 `hawse status` for a unit installed with `--user` needs no sudo when run as that
 account.
 
-Both units keep their keys in `/var/lib/hawse`, so a host runs one of them as a
-unit; a second on the same host needs `--user`.
-
 ## Upgrading
 
 `hawse upgrade` replaces the binary that runs it with the latest release and
@@ -131,7 +128,9 @@ over the binary and restart the service.
 
 Upgrade restarts a unit and does not rewrite it. When a release changes a unit
 `hawse service install` wrote, upgrade says so, and running the same install
-command again rewrites it.
+command again rewrites it. Units once shared `/var/lib/hawse` for their keys;
+install refuses a key left there and prints the commands that move it to the
+unit's own directory.
 
 A binary installed by cargo, Homebrew or Nix is upgraded with that tool, and an
 image by its tag. The checksums show the download is the release's;

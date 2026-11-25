@@ -14,7 +14,7 @@ RestartSec=5s
 # The service has no home, so the config path cannot be discovered and is given
 # above.
 ConfigurationDirectory=hawse
-StateDirectory=hawse
+StateDirectory=hawse-client
 RuntimeDirectory=hawse-client
 DynamicUser=yes
 UMask=0077

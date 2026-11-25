@@ -18,9 +18,6 @@ use crate::config_file;
 use crate::paths::{self, Located, Role};
 use systemd::Account;
 
-/// Where a unit without `--user` keeps its key: systemd's `StateDirectory=hawse`.
-const STATE: &str = "/var/lib/hawse";
-
 /// The words that mark a unit or an agent as written by `hawse service install`, which replaces
 /// and removes only a file that carries them.
 pub const MARKER: &str = "Written by hawse service install.";
@@ -308,18 +305,19 @@ fn hidden(path: &Path) -> Option<&'static str> {
 
 /// The key a unit for the config at `located` uses. With an `account` that is the account's own
 /// default, in a directory that has to be there already; without one the key has to be in the
-/// unit's state directory, since the unit's throwaway account can neither read root's key nor
-/// write anywhere else. The error says how to fix a key that is not.
+/// role's [`paths::state_dir`], since the unit's throwaway account can neither read a key another
+/// account owns nor write anywhere else. The error says how to fix a key that is not.
 fn unit_key(
     role: Role,
     located: &Located,
     configured: Option<&Path>,
     account: Option<&str>,
 ) -> miette::Result<PathBuf> {
+    let state = paths::state_dir(role);
     let key = match configured {
         Some(key) => located.dir.join(key),
         None if account.is_some() => paths::default_key(role, &located.dir, None, false),
-        None => paths::default_key(role, &located.dir, Some(OsStr::new(STATE)), false),
+        None => paths::default_key(role, &located.dir, Some(state.as_os_str()), false),
     };
     if let Some(name) = account {
         let dir = key.parent().unwrap_or(Path::new("/"));
@@ -332,16 +330,17 @@ fn unit_key(
         }
         return Ok(key);
     }
-    if key.starts_with(STATE) {
+    if key.starts_with(&state) {
         return Ok(key);
     }
+    let state = state.display();
     if configured.is_some() {
         miette::bail!(
-            "the unit can keep its key only under {STATE}; drop `key` from the config or point it there"
+            "the unit can keep its key only under {state}; drop `key` from the config or point it there"
         );
     }
     Err(miette::miette!(
-        "{key} is root's, and the unit's throwaway account cannot read it; sudo mv {key} {STATE}/ and run this again",
+        "the unit's throwaway account cannot read {key}; sudo mkdir -p {state} && sudo mv {key} {state}/ and run this again",
         key = key.display()
     ))
 }
@@ -537,7 +536,7 @@ mod tests {
         let err = unit_key(Role::Client, &located, None, None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("/var/lib/hawse/"), "{err}");
+        assert!(err.contains("/var/lib/hawse-client/"), "{err}");
         assert_eq!(
             unit_key(Role::Client, &located, None, Some("someone")).unwrap(),
             dir.path().join("client.key")
@@ -545,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_keeps_an_unnamed_key_in_var_lib_and_refuses_one_elsewhere() {
+    fn a_unit_keeps_an_unnamed_key_in_its_own_directory_and_refuses_one_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
         let located = Located {
             file: dir.path().join("server.toml"),
@@ -554,12 +553,17 @@ mod tests {
         };
         assert_eq!(
             unit_key(Role::Server, &located, None, None).unwrap(),
-            Path::new("/var/lib/hawse/server.key")
+            Path::new("/var/lib/hawse-server/server.key")
         );
-        let var_lib = Path::new("/var/lib/hawse/server.key");
-        assert!(unit_key(Role::Server, &located, Some(var_lib), None).is_ok());
-        let beside = Path::new("server.key");
-        assert!(unit_key(Role::Server, &located, Some(beside), None).is_err());
+        let own = Path::new("/var/lib/hawse-server/server.key");
+        assert!(unit_key(Role::Server, &located, Some(own), None).is_ok());
+        for elsewhere in [
+            "server.key",
+            "/var/lib/hawse/server.key",
+            "/var/lib/hawse-client/server.key",
+        ] {
+            assert!(unit_key(Role::Server, &located, Some(Path::new(elsewhere)), None).is_err());
+        }
     }
 
     #[test]
