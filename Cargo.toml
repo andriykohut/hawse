@@ -25,7 +25,7 @@ gethostname = "1"
 ipnet = { version = "2", features = ["serde"] }
 jiff = { version = "1", default-features = false, features = ["std"] }
 miette = { version = "7", features = ["fancy"] }
-notify = "8"
+notify = "9"
 owo-colors = "4"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 quinn = { version = "0.11", default-features = false, features = [
