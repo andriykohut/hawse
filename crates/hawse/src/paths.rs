@@ -87,8 +87,8 @@ pub fn key_path(role: Role, located: &Located, configured: Option<&Path>) -> Pat
 }
 
 /// Where the key of a config in `config_dir` that names none is: one already beside the config;
-/// else in the first of systemd's `state_directory`; else in `/var/lib/hawse` for root; else
-/// beside the config.
+/// else, for a unit or root, one already in `/var/lib/hawse`; else in the first of systemd's
+/// `state_directory`; else in the role's [`state_dir`] for root; else beside the config.
 pub fn default_key(
     role: Role,
     config_dir: &Path,
@@ -102,11 +102,22 @@ pub fn default_key(
     }
     // systemd joins several StateDirectory= entries with colons.
     let state = state_directory.and_then(|dirs| std::env::split_paths(dirs).next());
+    // Both units and root kept their keys here before each role had its own directory (#148).
+    let shared = Path::new("/var/lib/hawse").join(role.key_name());
+    if (state.is_some() || root) && shared.is_file() {
+        return shared;
+    }
     match state {
         Some(dir) => dir.join(role.key_name()),
-        None if root => Path::new("/var/lib/hawse").join(role.key_name()),
+        None if root => state_dir(role).join(role.key_name()),
         None => beside,
     }
+}
+
+/// The role's systemd `StateDirectory=`, where its unit keeps the key, and where root keeps it so
+/// that `sudo hawse` finds the unit's.
+pub fn state_dir(role: Role) -> PathBuf {
+    PathBuf::from(format!("/var/lib/hawse-{}", role.name()))
 }
 
 fn user_dir() -> Option<PathBuf> {
@@ -176,11 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn root_keeps_its_key_in_var_lib() {
+    fn root_keeps_its_key_where_the_unit_does() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             default_key(Role::Client, dir.path(), None, true),
-            Path::new("/var/lib/hawse/client.key")
+            Path::new("/var/lib/hawse-client/client.key")
+        );
+        assert_eq!(
+            default_key(Role::Server, dir.path(), None, true),
+            Path::new("/var/lib/hawse-server/server.key")
         );
     }
 
