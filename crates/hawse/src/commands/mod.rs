@@ -11,7 +11,7 @@ use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{EventKindMask, RecommendedWatcher, RecursiveMode, Watcher as _};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -103,12 +103,15 @@ impl Reloads {
             Some(dir) if !dir.as_os_str().is_empty() => dir,
             _ => Path::new("."),
         };
-        let watching = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            // Reading the config is itself an access. A full channel already holds the wakeup.
-            if !event.is_ok_and(|event| event.kind.is_access()) {
+        // Reading the config is itself an access.
+        let config = notify::Config::default().with_event_kinds(EventKindMask::CORE);
+        let watching = RecommendedWatcher::new(
+            // A full channel already holds the wakeup.
+            move |_: notify::Result<notify::Event>| {
                 let _ = tx.try_send(());
-            }
-        })
+            },
+            config,
+        )
         .and_then(|mut watcher| {
             watcher.watch(dir, RecursiveMode::NonRecursive)?;
             // Not a reason to give up the watch above, which still sees the link replaced.
